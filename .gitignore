@@ -1,0 +1,13 @@
+# REGDOCS generated/runtime state
+/regdocs.db
+/regdocs.db-wal
+/regdocs.db-shm
+/regdocs.db-journal
+/regdocs.db-scout.lock
+/raw/
+/downloads/
+/_audit/
+
+# Ignore virtual environment folders
+.venv/
+venv/
