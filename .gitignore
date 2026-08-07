@@ -8,6 +8,8 @@
 /downloads/
 /_audit/
 
+.env
+
 # Ignore virtual environment folders
 .venv/
 venv/
