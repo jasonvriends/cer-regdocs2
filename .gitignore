@@ -6,6 +6,7 @@
 /regdocs.db-scout.lock
 /raw/
 /downloads/
+/analysis/
 /_audit/
 
 .env
