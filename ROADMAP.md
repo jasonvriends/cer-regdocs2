@@ -67,7 +67,9 @@ The pipeline has:
 - persistent stage artifacts under `workspace/`;
 - version-controlled scripts and runbooks under `pipeline/`;
 - repository-relative stored paths;
-- pinned direct Python dependencies; and
+- pinned direct Python dependencies;
+- automatic resumable `Content-Range` analysis for PDFs over 300 pages while
+  preserving one Stage 2 source identity; and
 - offline self-tests for Stages 1 and 2.
 
 This baseline proves the acquisition and transformation path. It is not yet an
@@ -92,14 +94,15 @@ Focus:
 - centralize schema migrations, configuration, locking, and stale-run recovery;
 - make Stage 2 file promotion and ledger updates crash-recoverable;
 - require bounded Stage 3 selection or explicit full-run acknowledgement;
-- preflight Stage 3 page/byte volume and projected cost;
+- preflight Stage 3 page/byte volume and projected cost before billable work;
 - retain provider usage and per-document/per-run cost metadata;
 - persist accepted Azure operation IDs and preserve attempts append-only;
 - make inspection and no-op modes genuinely read-only where promised;
 - write Stage 4 as atomic, manifested generations;
 - prevent filtered normalization from replacing the canonical corpus by
   default; and
-- add fixture, regression, concurrency, and fault-injection tests.
+- add fixture, regression, concurrency, and fault-injection tests, including
+  large-PDF range-boundary and restart cases.
 
 Exit condition:
 
@@ -280,7 +283,7 @@ The prototype succeeds when reviewers can see that:
 1. Close the Stage 1–4 hardening items that block safe unattended or full
    runs.
 2. Add representative fixtures and test interruption, recovery, concurrency,
-   parser drift, and artifact publication.
+   parser drift, range boundaries, and artifact publication.
 3. Select the reference project/proceeding corpus and define completeness.
 4. Freeze the first normalized-artifact and generation-manifest contract.
 5. Rebuild the reference corpus and produce a corpus-health report.
@@ -300,6 +303,7 @@ The prototype succeeds when reviewers can see that:
 | 2026-08-08 | Separate code, ledger, and operational artifacts | Makes persistence and ownership visible in `pipeline/`, `database/`, and `workspace/` |
 | 2026-08-08 | Keep current operations out of the roadmap | README and adjacent stage runbooks remain the implementation documentation |
 | 2026-08-08 | Organize the roadmap by outcome gates | Keeps future work independent of abandoned hosting and database choices |
+| 2026-08-08 | Analyze PDFs over 300 pages with Azure `Content-Range` rather than splitting source PDFs | Preserves one source SHA/provenance identity while making large analyses resumable |
 
 ## Open questions
 
