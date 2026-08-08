@@ -20,7 +20,7 @@ analyses + raw Content Understanding JSON
                                        +--> provenance
 ```
 
-Script version documented: **4.0.1**.
+Script version documented: **4.1.0**.
 
 ## Purpose and boundary
 
@@ -41,22 +41,43 @@ artifact. Each ranged Azure result is preserved as a separate entry in the
 canonical `contents[]` array rather than rewriting its internal spans and
 offsets.
 
-Stage 4 already iterates `contents[]` independently, so no special command or
-normalization mode is required. A 986-page Stage 3 result containing four
-ranged contributions is still normalized as one REGDOCS document and its page,
-table, chunk, and document counts are summed across all content entries.
+Stage 4 iterates those `contents[]` entries independently. A 986-page Stage 3
+result containing four ranged contributions is still normalized as one REGDOCS
+document. Page, table, section, figure, chunk, and provenance records are built
+across the complete combined result.
+
+Azure source page identity is preserved, so a record from source page 742 still
+points to page 742 of the original PDF. `content_index` identifies which
+canonical `contents[]` contribution produced the record.
+
+Beginning with Stage 4.1.0, provenance element identities are also globally
+qualified across the combined result. Azure-local pointers are retained for
+inspection, but the primary pointer includes the `contents[]` index.
+
+For example, an Azure-local pointer:
+
+```text
+/paragraphs/12
+```
+
+from the third `contents[]` entry is normalized as:
+
+```json
+{
+  "content_index": 2,
+  "element": "/contents/2/paragraphs/12",
+  "local_element": "/paragraphs/12"
+}
+```
+
+The same rule is used for paragraph, table, and figure evidence, including
+paragraph evidence nested under a figure. This removes the ambiguity that
+previously existed when two ranged content entries both contained something
+like `/paragraphs/12`.
 
 The Stage 3 canonical artifact also contains `regdocsChunking` metadata for
-audit purposes. Stage 4 currently leaves that metadata in the raw artifact
-rather than copying it into every normalized record.
-
-One provenance limitation becomes more important for ranged documents:
-element pointers such as `/paragraphs/10` are local to a `contents[]` entry,
-but the detailed provenance element objects do not currently include
-`content_index`. Chunk and page records do retain `content_index` where
-implemented, but a standalone element pointer in provenance can therefore be
-ambiguous across multiple ranged content entries. See **Known content-coverage
-limitations** below.
+audit purposes. Stage 4 leaves that metadata in the raw Stage 3 artifact rather
+than copying it into every normalized record.
 
 ## Installation
 
@@ -67,7 +88,7 @@ python -m pip install -r pipeline/requirements.txt
 ```
 
 Stage 4 itself uses only the Python standard library, but the shared environment
-supports running and validating the complete pipeline.
+supports running the complete pipeline.
 
 ## Important corpus-replacement rule
 
@@ -133,7 +154,7 @@ are preserved as normalization warnings rather than silently ignored.
 
 For a ranged PDF, Stage 3 itself validates each requested range page count and
 the combined page count before publishing the canonical artifact. Stage 4 then
-sums the published `contents[]` entries independently.
+processes the published `contents[]` entries independently.
 
 ## Outputs
 
@@ -156,7 +177,7 @@ Each line is one compact JSON object with keys sorted deterministically.
 | `pages.jsonl` | analyzed page | Page text, Markdown slice, dimensions, labels, headers, and footers |
 | `chunks.jsonl` | searchable text/table/figure unit | Search-ready content with inherited filters and section/page context |
 | `tables.jsonl` | detected table | Detailed table cells, dimensions, caption, text, geometry, and source links |
-| `provenance.jsonl` | emitted chunk | Emitted source elements, spans, page range, and regions supporting the chunk |
+| `provenance.jsonl` | emitted chunk | Source elements, content index, spans, page range, and regions supporting the chunk |
 
 ## Stable record identities
 
@@ -191,9 +212,6 @@ Each document record combines:
 - Markdown SHA-256;
 - normalizer version, parser version, and configuration hash.
 
-The document record intentionally points back to source and analysis evidence
-instead of embedding the entire analyzed body.
-
 For ranged Stage 3 input, `page_count`, `table_count`, `section_count`, and
 `figure_count` are sums across all canonical `contents[]` entries.
 
@@ -201,7 +219,8 @@ For ranged Stage 3 input, `page_count`, `table_count`, `section_count`, and
 
 Page records contain:
 
-- physical page number and content index;
+- physical source page number;
+- `content_index` for the contributing Stage 3 `contents[]` entry;
 - printed page labels;
 - width, height, unit, and angle;
 - body content;
@@ -211,10 +230,8 @@ Page records contain:
 
 Headers, footers, and page-number paragraphs are not mixed into the page body.
 
-Azure `Content-Range` keeps the source page identity, so a ranged large PDF
-continues to produce page records using the original document page numbers.
-`content_index` identifies which canonical Stage 3 `contents[]` contribution
-produced the page.
+Azure `Content-Range` keeps the source page identity, so ranged large PDFs
+continue to use original document page numbers.
 
 ## Chunking behavior
 
@@ -250,27 +267,57 @@ sections in source-span order, and:
 
 Chunk types currently include `text`, `table`, and `figure`.
 
+Every emitted chunk is required to carry `content_index`. Stage 4.1.0 treats a
+missing `content_index` as an internal provenance error rather than silently
+publishing an ambiguous chunk.
+
 ## Table and provenance behavior
 
 Detailed table records preserve row/column indices, spans, cell kinds, cell
-content, source strings, and parsed page polygons. Search chunks derived from a
-table link back through `table_id` and include the row range for each part.
+content, source strings, parsed page polygons, the global table identity, and
+the local `content_table_index` within its Azure content object.
 
 Each chunk receives one provenance record with:
 
 - chunk and document identity;
 - source-file SHA-256;
+- `content_index`;
 - first and last source page;
-- merged source regions;
-- Azure element pointers, spans, source strings, and fragment metadata.
+- merged source regions and page polygons;
+- qualified Azure element pointers;
+- original Azure-local element pointers;
+- spans, source strings, and fragment metadata.
 
-This provides a useful trace from a normalized search hit to analyzed page
-geometry and the downloaded source version. It is not yet a proof that every
-meaningful source element was emitted.
+A typical evidence item now looks like:
+
+```json
+{
+  "content_index": 2,
+  "element": "/contents/2/paragraphs/12",
+  "local_element": "/paragraphs/12",
+  "element_type": "paragraph",
+  "element_index": 12,
+  "source": "D(742,...)"
+}
+```
+
+This gives two complementary routes back to evidence:
+
+```text
+REGDOCS document + source SHA-256
+             |
+             +--> original PDF page + polygon
+             |
+             +--> contents[index] + exact Azure element
+```
+
+The first route supports source-document inspection. The second supports exact
+dereferencing inside the combined Stage 3 JSON.
 
 ## Known content-coverage limitations
 
-The current traversal does not emit every Azure Content Understanding element:
+The current traversal still does not emit every Azure Content Understanding
+element:
 
 - hyperlink elements and their targets are not projected;
 - figure captions and footnotes are not included unless their text is also
@@ -278,15 +325,15 @@ The current traversal does not emit every Azure Content Understanding element:
 - table footnotes are not projected;
 - non-header/footer paragraphs outside the walked section structure have no
   general fallback pass;
-- provenance element pointers do not include `content_index`, so the same
-  `/paragraphs/N`, `/tables/N`, or `/figures/N` pointer is ambiguous when the
-  canonical Azure result contains multiple `contents[]` entries; this is now a
-  normal condition for Stage 3 PDFs over 300 pages;
 - a split oversized paragraph retains the original paragraph-wide span and
   region for every fragment.
 
-Until coverage auditing is implemented, validate representative documents
-against their raw Stage 3 JSON before using the normalized corpus for
+The former multi-`contents[]` pointer ambiguity is **not** a current limitation
+as of Stage 4.1.0; provenance element identities are qualified by
+`content_index`.
+
+Until broader coverage auditing is implemented, validate representative
+documents against their raw Stage 3 JSON before using the normalized corpus for
 high-recall retrieval or evidentiary citation.
 
 ## Determinism and configuration identity
@@ -305,6 +352,10 @@ API version
 target words
 maximum words
 ```
+
+Stage 4.1.0 changes the normalized provenance contract, so its version and
+parser identity were bumped. Re-running normalization therefore produces a new
+configuration identity rather than presenting the 4.0.1 output as equivalent.
 
 Each document also receives a deterministic SHA-256 over its document, page,
 chunk, table, and provenance records. Each final JSONL file receives a SHA-256
@@ -340,6 +391,26 @@ python pipeline/regdocs_4_normalize.py \
 For a large ranged PDF, verify that the Stage 4 `OK` page count matches the
 Stage 3 `COMBINED` page count and the source PDF page count.
 
+Then inspect a provenance record from a later content range:
+
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("workspace/4_normalize/pilot/provenance.jsonl")
+for line in path.open(encoding="utf-8"):
+    record = json.loads(line)
+    if record.get("content_index", 0) > 0 and record.get("elements"):
+        print(json.dumps(record, indent=2, ensure_ascii=False))
+        break
+PY
+```
+
+For Stage 4.1.0, evidence in that record should include both a qualified
+`element` beginning with `/contents/<content_index>/...` and a `local_element`
+containing the original Azure-local pointer.
+
 Inspect line counts and parse every emitted line:
 
 ```bash
@@ -367,6 +438,9 @@ Rebuild the full canonical corpus only after the pilot is satisfactory:
 ```bash
 python pipeline/regdocs_4_normalize.py
 ```
+
+No Azure rerun is required for this provenance change. Stage 4.1.0 can rebuild
+its outputs from existing successful Stage 3 JSON.
 
 ## Dry-run and status side effects
 
@@ -458,9 +532,8 @@ and return `1`.
 Before treating Stage 4 output as an independently publishable production
 snapshot, prioritize:
 
-1. add a source-element coverage invariant, preserve hyperlink targets and
-   table/figure captions and footnotes, qualify provenance element identities
-   by `content_index`, and emit figures/links explicitly;
+1. add a source-element coverage invariant and preserve hyperlink targets,
+   table/figure captions, and footnotes more completely;
 2. refuse filtered runs against the canonical output unless explicitly
    acknowledged;
 3. write versioned generation directories plus a manifest and atomically switch
@@ -474,7 +547,8 @@ snapshot, prioritize:
 8. add JSON Schema and output schema-version fields, a standalone `--audit`,
    and a manifest containing selection, counts, hashes, failures, and complete
    input fingerprints;
-9. add regression fixtures that include a Stage 3 multi-`contents[]` ranged PDF;
+9. add regression fixtures that include a Stage 3 multi-`contents[]` ranged PDF
+   and assert qualified provenance pointers at range boundaries;
 10. move toward per-document shards or partitioned snapshots for incremental
     rebuilds and large corpora.
 
