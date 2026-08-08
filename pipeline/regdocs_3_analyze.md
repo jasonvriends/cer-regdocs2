@@ -75,7 +75,10 @@ local PDF page count before publishing the canonical combined artifact.
 
 The combined JSON preserves each ranged Azure response as a separate
 `contents[]` contribution instead of rewriting cross-range spans or offsets.
-Stage 4 already processes each `contents[]` object independently.
+Stage 4 processes each `contents[]` object independently. Beginning with Stage
+4.1.0, normalized provenance also qualifies Azure-local paragraph/table/figure
+pointers with that `contents[]` index, so the separate ranged responses remain
+exactly dereferenceable after normalization.
 
 The canonical JSON receives additional metadata:
 
@@ -548,7 +551,7 @@ Before treating Stage 3 as an unattended production worker, prioritize:
    hashes, unique temporary files, and a standalone audit/status command;
 7. add regression tests for range boundaries, cached-part recovery, forced
    resubmission, page-count mismatch, and Stage 4 normalization of multiple
-   `contents[]` entries.
+   `contents[]` entries with qualified provenance pointers.
 
 Previous: [Stage 2 downloader](regdocs_2_download.md).
 
