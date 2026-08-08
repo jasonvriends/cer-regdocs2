@@ -23,7 +23,7 @@ workspace/4_normalize/
      Search Explorer   future UI / RAG
 ```
 
-Script version documented: **5.0.0**.
+Script version documented: **5.0.1**.
 
 ## Purpose and boundary
 
@@ -31,7 +31,7 @@ Stage 5 is a **derivative publication stage**. Stages 1–4 remain the auditable
 source pipeline. Azure AI Search is a rebuildable retrieval index, not the
 source of truth.
 
-Stage 5.0 intentionally starts with:
+The initial Stage 5 implementation intentionally starts with:
 
 - keyword/full-text search;
 - metadata filters;
@@ -107,15 +107,24 @@ Stage 5 currently does not require `documents.jsonl`, `pages.jsonl`, or
 `tables.jsonl` because the chunk records already inherit the document metadata
 needed for the first search index.
 
-Before Azure is contacted, Stage 5 validates:
+Stage 5.0.1 streams `chunks.jsonl` and `provenance.jsonl` in lockstep rather than
+loading both files into memory. Stage 4 emits one provenance record for every
+chunk in the same deterministic order, so Stage 5 validates the complete pair
+sequence first and then streams it again during upload. Normal operating memory
+is therefore dominated by the current Azure upload batch instead of corpus
+size.
 
-- every selected chunk has an `id`;
-- every selected chunk has exactly one matching provenance record;
+Before Azure is contacted, Stage 5 validates the full paired input sequence:
+
+- every chunk has an `id`;
+- each chunk is paired with exactly one provenance record;
+- the two JSONL files have the same record count;
 - provenance `chunk_id` matches the chunk ID;
 - provenance `document_id` matches the chunk document ID; and
 - provenance `content_index` matches the chunk content index.
 
-For an unfiltered full-corpus run, orphan provenance records also cause failure.
+Even a filtered pilot scans the full pair sequence for structural consistency,
+then selects only the requested document/chunk scope for upload.
 
 ## Search document identity
 
@@ -290,7 +299,8 @@ python pipeline/regdocs_5_index.py --dry-run
 
 The command reports:
 
-- mapped chunk count;
+- selected mapped chunk count;
+- total paired chunk/provenance count checked;
 - source REGDOCS document count;
 - chunk-type counts;
 - approximate mapped payload size;
@@ -425,9 +435,9 @@ python pipeline/regdocs_5_index.py \
 The Azure portal's **Search Explorer** is also useful for inspecting the same
 index interactively during development.
 
-## What Stage 5.0 does not yet do
+## What the initial Stage 5 does not yet do
 
-Stage 5.0 deliberately does not yet implement:
+Stage 5 deliberately does not yet implement:
 
 - vector embeddings;
 - vector fields or HNSW configuration;
