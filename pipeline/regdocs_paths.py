@@ -36,6 +36,7 @@ ANALYZE_DIR = WORKSPACE_DIR / "3_analyze"
 CONTENT_UNDERSTANDING_DIR = ANALYZE_DIR / "content-understanding"
 
 NORMALIZE_DIR = WORKSPACE_DIR / "4_normalize"
+INDEX_DIR = WORKSPACE_DIR / "5_index"
 
 
 def stored_path(path: Path) -> str:
