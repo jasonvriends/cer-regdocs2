@@ -219,9 +219,9 @@ def make_index(index_name: str) -> Any:
         SimpleField,
     )
 
-    S = SearchFieldDataType.String
-    I = SearchFieldDataType.Int32
-    C = SearchFieldDataType.Collection(S)
+    S = SearchFieldDataType.STRING
+    I = SearchFieldDataType.INT32
+    C = "Collection(Edm.String)"
     fields = [
         SimpleField(name="key", type=S, key=True),
         SimpleField(name="chunk_id", type=S, filterable=True),
