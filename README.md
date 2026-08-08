@@ -150,6 +150,12 @@ chunk-to-source provenance. It makes no network calls. Stage 4 processes each
 Azure `contents[]` entry independently, including the multiple entries produced
 when Stage 3 recombines a ranged large-PDF analysis.
 
+Stage 4.1.0 qualifies every paragraph/table/figure provenance pointer with its
+`content_index`, for example `/contents/2/paragraphs/12`, while retaining the
+original Azure-local pointer as `local_element`. This makes provenance
+unambiguous across large PDFs without losing original page numbers or polygon
+geometry.
+
 Primary outputs:
 
 ```text
@@ -272,7 +278,7 @@ Normalize one document as a pilot:
 
 ```bash
 python pipeline/regdocs_4_normalize.py \
-  --document-id 2969897 \
+  --document-id 4647200 \
   --output-dir workspace/4_normalize/pilot
 ```
 
@@ -309,8 +315,13 @@ python pipeline/regdocs_4_normalize.py --status
 ```
 
 For a large-PDF Stage 3 run, verify the reported combined page count matches the
-source PDF page count before proceeding to Stage 4. Stage 3 now enforces this
+source PDF page count before proceeding to Stage 4. Stage 3 enforces this
 invariant before publishing a ranged canonical artifact.
+
+For a Stage 4 ranged-PDF pilot, inspect a provenance record with
+`content_index > 0` and verify its evidence pointer begins with the same
+`/contents/<content_index>/` value. The Stage 4 runbook includes a ready-to-run
+verification snippet.
 
 ## Operational principles
 
@@ -320,6 +331,8 @@ invariant before publishing a ranged canonical artifact.
   reproducible.
 - Prefer resumable ledger and artifact state, including large-PDF range parts,
   and atomic filesystem commits.
+- Keep source-document page/geometry provenance and analyzer-element provenance
+  explicit and independently traceable.
 - Keep credentials out of command lines, files, logs, and version control.
 - Run conservatively against the public REGDOCS service and billable analysis
   services.
