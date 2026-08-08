@@ -8,8 +8,9 @@ For current behavior and commands, use:
 - [README.md](README.md) for repository orientation and quick start;
 - [Stage 1 — Scout](pipeline/regdocs_1_scout.md);
 - [Stage 2 — Download](pipeline/regdocs_2_download.md);
-- [Stage 3 — Analyze](pipeline/regdocs_3_analyze.md); and
-- [Stage 4 — Normalize](pipeline/regdocs_4_normalize.md).
+- [Stage 3 — Analyze](pipeline/regdocs_3_analyze.md);
+- [Stage 4 — Normalize](pipeline/regdocs_4_normalize.md); and
+- [Stage 5 — Index](pipeline/regdocs_5_index.md).
 
 If this roadmap disagrees with implemented behavior, the stage documentation
 and code are authoritative.
@@ -52,18 +53,19 @@ The near-term goal is an internal proof of value strong enough to answer:
 
 ## Current baseline
 
-The repository now contains a runnable four-stage local pipeline:
+The repository now contains a runnable five-stage pipeline:
 
 ```text
 1. Scout      REGDOCS metadata and raw HTML evidence
 2. Download   validated, hashed, versioned source files
 3. Analyze    Azure Content Understanding JSON and Markdown
 4. Normalize  deterministic documents/pages/chunks/tables/provenance JSONL
+5. Index      Azure AI Search full-text/filter/facet chunk index
 ```
 
 The pipeline has:
 
-- one shared SQLite ledger under `database/`;
+- one shared SQLite ledger for Stages 1–4 under `database/`;
 - persistent stage artifacts under `workspace/`;
 - version-controlled scripts and runbooks under `pipeline/`;
 - repository-relative stored paths;
@@ -71,22 +73,31 @@ The pipeline has:
 - automatic resumable `Content-Range` analysis for PDFs over 300 pages while
   preserving one Stage 2 source identity;
 - Stage 4 provenance that keeps original page/polygon geometry and globally
-  qualifies Azure element pointers across multiple `contents[]` entries; and
+  qualifies Azure element pointers across multiple `contents[]` entries;
+- Stage 5 validation that joins each indexed chunk back to its matching
+  provenance record before publication;
+- an initial Azure AI Search schema for keyword search, filters, facets, page
+  identity, source URLs, and compact qualified element paths; and
 - offline self-tests for Stages 1 and 2.
 
-This baseline proves the acquisition and transformation path. It is not yet an
-unattended production system or a complete, validated research corpus.
+Azure AI Search is currently a rebuildable derivative publication target, not a
+replacement for the Stage 1–4 source pipeline. Stage 5.0 intentionally does not
+yet add semantic ranking, vectors, or LLM answer generation.
+
+This baseline proves the acquisition, transformation, and first retrieval path.
+It is not yet an unattended production system or a complete, validated research
+corpus.
 
 ## Roadmap horizons
 
 The horizons below describe outcomes and validation gates, not a delivery
-stack. They assume a local workbench unless a later decision establishes a
-different operating model.
+stack. They assume the preserved local corpus remains independently auditable
+even when Azure services are used for analysis or search.
 
 ### Now — Make the pipeline safe and repeatable
 
 **Outcome:** bounded runs can be operated and recovered without avoidable
-security, billing, concurrency, or corpus-integrity risk.
+security, billing, concurrency, corpus-integrity, or publication risk.
 
 Focus:
 
@@ -102,29 +113,36 @@ Focus:
 - make inspection and no-op modes genuinely read-only where promised;
 - write Stage 4 as atomic, manifested generations;
 - prevent filtered normalization from replacing the canonical corpus by
-  default; and
+  default;
+- make Stage 5 publication resolve to an explicit normalized generation;
+- replace destructive Stage 5 rebuilds with versioned search indexes plus an
+  alias/pointer switch;
+- add Stage 5 incremental deletion/change detection after generation identity
+  exists; and
 - add fixture, regression, concurrency, and fault-injection tests, including
-  large-PDF range-boundary, restart, and qualified-provenance cases.
+  large-PDF range-boundary, restart, qualified-provenance, and search-publication
+  cases.
 
 Exit condition:
 
 - interruption and restart paths are tested;
 - concurrent writers cannot duplicate billable work or corrupt artifacts;
 - ledger state and committed artifacts cannot describe different generations;
-  and
-- integrity and security audits pass before larger runs.
+- a published search index can be traced to one normalized generation; and
+- integrity and security audits pass before larger unattended runs.
 
 ### Next — Establish a validated reference corpus
 
 **Outcome:** a selected real-world corpus can be rebuilt deterministically from
-preserved evidence and evaluated for completeness.
+preserved evidence, published to search, and evaluated for completeness.
 
 Focus:
 
 - choose representative projects or proceedings;
 - define explicit selection and completeness criteria;
 - version normalized JSONL contracts and generation manifests;
-- build the corpus reproducibly through all four stages;
+- build the corpus reproducibly through Stages 1–4;
+- publish the validated snapshot through Stage 5;
 - measure missing files, failed analyses, omitted source structures, and
   provenance coverage;
 - produce corpus-health and integrity reports; and
@@ -133,32 +151,57 @@ Focus:
 Exit condition:
 
 - unchanged inputs produce logically or byte-identical normalized output;
-- every normalized record resolves to preserved source evidence; and
+- every normalized record resolves to preserved source evidence;
+- every published search result resolves back to the normalized corpus; and
 - known gaps are measured and visible rather than silently omitted.
 
-### Then — Add local indexing and discovery
+### Then — Establish and measure the retrieval baseline
 
-**Outcome:** the validated corpus is searchable locally without AI or external
-services.
+**Outcome:** the validated corpus is usefully searchable before semantic or LLM
+complexity is added.
 
 Focus:
 
-- build rebuildable, versioned metadata and full-text indexes;
-- support facets, snippets, highlighting, and page/chunk source locations;
-- refresh indexes incrementally from manifested normalized generations;
-- make corpus completeness, index health, and provenance inspectable; and
-- create representative discovery queries and a keyword relevance baseline.
+- exercise the Stage 5 Azure AI Search keyword index with real regulatory
+  queries;
+- support facets, filters, snippets, highlighting, and page/chunk source
+  locations in the eventual user-facing layer;
+- create representative discovery queries and relevance judgments;
+- measure keyword/full-text ranking quality;
+- diagnose normalization or metadata gaps exposed by retrieval; and
+- make corpus completeness, index health, and provenance inspectable.
 
 Exit condition:
 
-- a clean environment can rebuild the indexes from versioned artifacts;
-- representative queries return source-locatable evidence; and
+- a clean environment can rebuild the search index from versioned artifacts;
+- representative queries return source-locatable evidence;
+- retrieval metrics and failure cases are recorded; and
 - index state resolves to one normalized generation.
 
-### After indexing — Validate research workflows
+### After the baseline — Improve retrieval only when measured
+
+**Outcome:** semantic complexity is adopted only where it improves the measured
+baseline.
+
+Sequence:
+
+1. test Azure semantic ranking against the keyword baseline;
+2. diagnose wins and regressions by query type;
+3. add embeddings and vector fields only for demonstrated semantic-recall gaps;
+4. test hybrid keyword + vector ranking;
+5. retain project/document/date/type filters in hybrid retrieval; and
+6. adopt the simplest retrieval configuration that measurably improves the
+   evaluation set while preserving source identity.
+
+Exit condition:
+
+- ranking results are reproducible and evaluated; and
+- returned evidence resolves to exact pages or source regions.
+
+### After retrieval — Validate research workflows
 
 **Outcome:** core regulatory research tasks work independently of any chosen
-interface.
+chat interface.
 
 Focus:
 
@@ -167,45 +210,30 @@ Focus:
 - support timelines and document/source-version inspection;
 - support bounded evidence selection and passage or document comparison;
 - preserve portable saved research state; and
-- use the simplest useful local surface, such as a CLI, notebook, or local
-  tool, while validating the workflows.
+- use the simplest useful interface while validating the workflows.
+
+The interface may start with Azure Search Explorer, the Stage 5 CLI, a notebook,
+or a lightweight web application. The research workflow should determine the
+UI rather than the reverse.
 
 Exit condition:
 
 - a researcher can find a proceeding, understand its structure and chronology,
   select evidence, inspect exact sources, and reproduce the research state
-  without AI.
+  without relying on an LLM.
 
-### Later — Measure and improve retrieval
-
-**Outcome:** retrieval quality is measured before semantic complexity is
-added.
-
-Sequence:
-
-1. create representative relevance judgments and metrics;
-2. establish a metadata, filter, and full-text baseline;
-3. diagnose normalization and indexing gaps exposed by that baseline;
-4. test semantic retrieval only for demonstrated gaps; and
-5. adopt hybrid ranking only if it measurably improves the baseline while
-   retaining metadata and provenance constraints.
-
-Exit condition:
-
-- ranking results are reproducible and evaluated; and
-- returned evidence resolves to exact pages or source regions.
-
-### After retrieval — Add bounded, cited AI workflows
+### After retrieval quality — Add bounded, cited AI workflows
 
 **Outcome:** bounded evidence produces useful research outputs with verifiable
 support.
 
 Sequence:
 
-1. summarize one document, folder, or filing;
+1. summarize one document, folder, or filing from retrieved evidence;
 2. compare user-selected evidence;
 3. generate a cited chronology or issue brief;
-4. extract commitments, positions, and concerns; and
+4. extract commitments, positions, concerns, organizations, and legal
+   references; and
 5. add contextual question answering only after citation reliability is
    demonstrated.
 
@@ -277,23 +305,24 @@ The prototype succeeds when reviewers can see that:
 - dossiers and timelines reveal useful context;
 - search finds relevant material with inspectable source locations;
 - bounded AI produces useful research outputs with verifiable citations; and
-- the local workbench supports repeatable research without weakening its
-  provenance foundation.
+- the workbench supports repeatable research without weakening its provenance
+  foundation.
 
 ## Immediate next actions
 
-1. Close the Stage 1–4 hardening items that block safe unattended or full
-   runs.
-2. Add representative fixtures and test interruption, recovery, concurrency,
-   parser drift, range boundaries, qualified provenance, and artifact
-   publication.
-3. Select the reference project/proceeding corpus and define completeness.
-4. Freeze the first normalized-artifact and generation-manifest contract.
-5. Rebuild the reference corpus and produce a corpus-health report.
-6. Create representative discovery queries and relevance judgments.
-7. Establish a local metadata/full-text retrieval baseline against them.
-8. Validate dossier, timeline, inspection, evidence-selection, and comparison
-   workflows on the reference corpus.
+1. Finish and verify the final Stage 4 corpus generation.
+2. Run Stage 5 local validation and publish the first `regdocs-chunks` index.
+3. Create representative discovery queries and relevance judgments.
+4. Measure the Azure AI Search keyword/filter baseline before adding vectors.
+5. Close the Stage 1–5 hardening items that block safe unattended or full runs.
+6. Add representative fixtures and test interruption, recovery, concurrency,
+   parser drift, range boundaries, qualified provenance, and publication.
+7. Select the reference project/proceeding corpus and define completeness.
+8. Freeze the first normalized-artifact and generation-manifest contract.
+9. Rebuild the reference corpus, publish it to search, and produce a
+   corpus-health/retrieval report.
+10. Validate dossier, timeline, inspection, evidence-selection, and comparison
+    workflows on the reference corpus.
 
 ## Decision log
 
@@ -302,22 +331,27 @@ The prototype succeeds when reviewers can see that:
 | 2026-08-07 | Keep SQLite as the local pipeline source of truth | Portable and auditable |
 | 2026-08-07 | Make AI contextual and evidence-first | Improves traceability and differentiates the research experience |
 | 2026-08-07 | Use a curated prototype corpus | Optimizes for proof of value rather than premature scale |
-| 2026-08-08 | Use four explicit local pipeline stages | Separates discovery, source acquisition, external analysis, and deterministic normalization |
+| 2026-08-08 | Use explicit acquisition, analysis, normalization, and publication stages | Keeps external services downstream of preserved source evidence |
 | 2026-08-08 | Separate code, ledger, and operational artifacts | Makes persistence and ownership visible in `pipeline/`, `database/`, and `workspace/` |
 | 2026-08-08 | Keep current operations out of the roadmap | README and adjacent stage runbooks remain the implementation documentation |
-| 2026-08-08 | Organize the roadmap by outcome gates | Keeps future work independent of abandoned hosting and database choices |
+| 2026-08-08 | Organize the roadmap by outcome gates | Keeps future work independent of interface choices |
 | 2026-08-08 | Analyze PDFs over 300 pages with Azure `Content-Range` rather than splitting source PDFs | Preserves one source SHA/provenance identity while making large analyses resumable |
 | 2026-08-08 | Qualify normalized Azure element pointers by `contents[]` index | Keeps exact analyzer-element provenance unambiguous across ranged large PDFs while retaining original page geometry |
+| 2026-08-08 | Publish Stage 4 chunks directly to Azure AI Search with a controlled Stage 5 push API | Keeps REGDOCS chunking/provenance authoritative while making the normalized corpus searchable without Azure re-chunking it |
+| 2026-08-08 | Measure keyword/filter retrieval before adding semantic, vector, or LLM layers | Prevents retrieval defects from being hidden behind more complex AI behavior |
 
 ## Open questions
 
 - Which project or proceeding should anchor the first internal demonstration?
 - What is the minimum complete, versioned normalized-corpus contract?
-- What normalization coverage threshold is acceptable before indexing?
-- Which local discovery surface is useful first: CLI, notebook, or another
-  local tool?
-- What retrieval evaluation set and success metrics should gate hybrid search?
+- What normalization coverage threshold is acceptable before broader indexing?
+- What retrieval evaluation set and success metrics should gate semantic and
+  hybrid search?
+- Which user-facing surface should follow Search Explorer/CLI: a custom web UI,
+  a Microsoft sample adapted to REGDOCS, or another lightweight research tool?
 - What citation accuracy and completeness should gate generated briefs?
+- Which enrichment schema should represent commitments, conditions,
+  organizations, legal references, and relationships?
 - How much bilingual and accessibility functionality is required for the first
   demonstration?
 - Who is the first internal audience, and which workflow matters most to them?
