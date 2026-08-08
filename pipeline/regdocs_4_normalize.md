@@ -33,6 +33,31 @@ It is the final stage in this repository's current four-stage pipeline. Loading
 the JSONL into a search engine, analytics system, or vector store is a separate
 concern.
 
+## Stage 3 ranged-PDF compatibility
+
+Stage 3 automatically analyzes PDFs over 300 pages with multiple Azure
+`Content-Range` requests and combines the results into one canonical JSON
+artifact. Each ranged Azure result is preserved as a separate entry in the
+canonical `contents[]` array rather than rewriting its internal spans and
+offsets.
+
+Stage 4 already iterates `contents[]` independently, so no special command or
+normalization mode is required. A 986-page Stage 3 result containing four
+ranged contributions is still normalized as one REGDOCS document and its page,
+table, chunk, and document counts are summed across all content entries.
+
+The Stage 3 canonical artifact also contains `regdocsChunking` metadata for
+audit purposes. Stage 4 currently leaves that metadata in the raw artifact
+rather than copying it into every normalized record.
+
+One provenance limitation becomes more important for ranged documents:
+element pointers such as `/paragraphs/10` are local to a `contents[]` entry,
+but the detailed provenance element objects do not currently include
+`content_index`. Chunk and page records do retain `content_index` where
+implemented, but a standalone element pointer in provenance can therefore be
+ambiguous across multiple ranged content entries. See **Known content-coverage
+limitations** below.
+
 ## Installation
 
 From the repository root, install the shared pipeline dependencies:
@@ -56,7 +81,7 @@ Use a separate output directory for every pilot:
 
 ```bash
 python pipeline/regdocs_4_normalize.py \
-  --document-id 2969897 \
+  --document-id 4647200 \
   --output-dir workspace/4_normalize/pilot
 ```
 
@@ -106,6 +131,10 @@ For each candidate, the normalizer verifies that:
 Differences between Stage 3's recorded page/table/section counts and the JSON
 are preserved as normalization warnings rather than silently ignored.
 
+For a ranged PDF, Stage 3 itself validates each requested range page count and
+the combined page count before publishing the canonical artifact. Stage 4 then
+sums the published `contents[]` entries independently.
+
 ## Outputs
 
 The default output set is:
@@ -141,7 +170,9 @@ figure ref: <document-id>:figure:<four-digit-sequence>
 ```
 
 Chunk and table numbering follows deterministic source traversal order for the
-same validated input and configuration.
+same validated input and configuration. Table and figure numbering use global
+offsets across all `contents[]` entries so ranged Stage 3 results remain one
+logical sequence.
 
 Every projection retains the document ID and source-file SHA-256. Relevant
 records also retain source URL, resolved URL, analyzer ID, API version, and
@@ -163,6 +194,9 @@ Each document record combines:
 The document record intentionally points back to source and analysis evidence
 instead of embedding the entire analyzed body.
 
+For ranged Stage 3 input, `page_count`, `table_count`, `section_count`, and
+`figure_count` are sums across all canonical `contents[]` entries.
+
 ## Page projection
 
 Page records contain:
@@ -176,6 +210,11 @@ Page records contain:
 - source-file and processing provenance.
 
 Headers, footers, and page-number paragraphs are not mixed into the page body.
+
+Azure `Content-Range` keeps the source page identity, so a ranged large PDF
+continues to produce page records using the original document page numbers.
+`content_index` identifies which canonical Stage 3 `contents[]` contribution
+produced the page.
 
 ## Chunking behavior
 
@@ -194,7 +233,8 @@ python pipeline/regdocs_4_normalize.py \
   --max-words 900
 ```
 
-The normalizer walks Azure sections in source-span order and:
+The normalizer processes each Stage 3 content entry in order, walks its Azure
+sections in source-span order, and:
 
 - preserves the section-heading path on each chunk;
 - excludes page headers, footers, page numbers, and section headings from body
@@ -239,8 +279,9 @@ The current traversal does not emit every Azure Content Understanding element:
 - non-header/footer paragraphs outside the walked section structure have no
   general fallback pass;
 - provenance element pointers do not include `content_index`, so the same
-  `/paragraphs/N` pointer is ambiguous when the Azure result contains multiple
-  `contents` entries;
+  `/paragraphs/N`, `/tables/N`, or `/figures/N` pointer is ambiguous when the
+  canonical Azure result contains multiple `contents[]` entries; this is now a
+  normal condition for Stage 3 PDFs over 300 pages;
 - a split oversized paragraph retains the original paragraph-wide span and
   region for every fragment.
 
@@ -284,7 +325,7 @@ Preview one document without writing JSONL:
 
 ```bash
 python pipeline/regdocs_4_normalize.py \
-  --document-id 2969897 \
+  --document-id 4647200 \
   --dry-run
 ```
 
@@ -292,9 +333,12 @@ Write a one-document pilot away from the canonical corpus:
 
 ```bash
 python pipeline/regdocs_4_normalize.py \
-  --document-id 2969897 \
+  --document-id 4647200 \
   --output-dir workspace/4_normalize/pilot
 ```
+
+For a large ranged PDF, verify that the Stage 4 `OK` page count matches the
+Stage 3 `COMBINED` page count and the source PDF page count.
 
 Inspect line counts and parse every emitted line:
 
@@ -415,8 +459,8 @@ Before treating Stage 4 output as an independently publishable production
 snapshot, prioritize:
 
 1. add a source-element coverage invariant, preserve hyperlink targets and
-   table/figure captions and footnotes, qualify identities by content index,
-   and emit figures/links explicitly;
+   table/figure captions and footnotes, qualify provenance element identities
+   by `content_index`, and emit figures/links explicitly;
 2. refuse filtered runs against the canonical output unless explicitly
    acknowledged;
 3. write versioned generation directories plus a manifest and atomically switch
@@ -430,7 +474,8 @@ snapshot, prioritize:
 8. add JSON Schema and output schema-version fields, a standalone `--audit`,
    and a manifest containing selection, counts, hashes, failures, and complete
    input fingerprints;
-9. move toward per-document shards or partitioned snapshots for incremental
-   rebuilds and large corpora.
+9. add regression fixtures that include a Stage 3 multi-`contents[]` ranged PDF;
+10. move toward per-document shards or partitioned snapshots for incremental
+    rebuilds and large corpora.
 
 Previous: [Stage 3 analyzer](regdocs_3_analyze.md).
