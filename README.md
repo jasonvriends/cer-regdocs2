@@ -20,6 +20,7 @@ Canada Energy Regulator REGDOCS
               v
 3. Analyze
    Azure Content Understanding JSON + Markdown
+   automatic 300-page Content-Range handling for large PDFs
               |
               v
 4. Normalize
@@ -120,8 +121,13 @@ Detailed documentation: [Stage 2 — Download](pipeline/regdocs_2_download.md).
 ### 3 — Analyze
 
 `pipeline/regdocs_3_analyze.py` sends current downloaded files to Azure AI
-Content Understanding using `prebuilt-layout`, preserves immutable raw JSON and
-Markdown, and records analysis status and provenance in SQLite.
+Content Understanding using `prebuilt-layout`, preserves raw JSON and Markdown,
+and records analysis status and provenance in SQLite.
+
+PDFs over 300 pages are counted locally and analyzed automatically in inclusive
+`Content-Range` requests of at most 300 pages. The original PDF is not
+physically split. Each successful range is saved independently so an interrupted
+large document can normally resume without rebilling completed ranges.
 
 Primary outputs:
 
@@ -131,13 +137,18 @@ workspace/3_analyze/content-understanding/raw/
 workspace/3_analyze/content-understanding/markdown/
 ```
 
+Large PDFs additionally create per-range raw JSON and metadata below the
+canonical raw JSON's `<sha256>.parts/` directory.
+
 Detailed documentation: [Stage 3 — Analyze](pipeline/regdocs_3_analyze.md).
 
 ### 4 — Normalize
 
 `pipeline/regdocs_4_normalize.py` locally converts successful layout analyses
 into deterministic JSONL projections for documents, pages, chunks, tables, and
-chunk-to-source provenance. It makes no network calls.
+chunk-to-source provenance. It makes no network calls. Stage 4 processes each
+Azure `contents[]` entry independently, including the multiple entries produced
+when Stage 3 recombines a ranged large-PDF analysis.
 
 Primary outputs:
 
@@ -188,8 +199,8 @@ python -m pip install -r pipeline/requirements.txt
 ```
 
 The requirements file includes Scout's faster `lxml` parser, progress-bar
-support, and the Azure libraries used by Stage 3. Stage 4 itself uses only the
-Python standard library.
+support, the Azure libraries used by Stage 3, and `pypdf` for Stage 3 PDF page
+counting. Stage 4 itself uses only the Python standard library.
 
 ### Run Stage 1
 
@@ -232,6 +243,16 @@ python pipeline/regdocs_3_analyze.py --dry-run --limit 10
 python pipeline/regdocs_3_analyze.py --limit 10
 ```
 
+No special command is required for a large PDF. For example:
+
+```bash
+python pipeline/regdocs_3_analyze.py --document-id 4647200
+```
+
+A 986-page PDF is automatically submitted as `1-300`, `301-600`, `601-900`,
+and `901-986`, then recombined into the normal canonical Stage 3 JSON and
+Markdown artifacts.
+
 Stage 3 can incur Azure charges and requires one explicit selection scope. Keep
 initial runs bounded. After reviewing a complete no-Azure-call preview, run all
 remaining eligible files with:
@@ -242,7 +263,8 @@ python pipeline/regdocs_3_analyze.py --all
 ```
 
 See the Stage 3 runbook before a full run, and do not use `--force` unless you
-intend to resubmit matching successful analyses.
+intend to resubmit matching successful analyses. For a large PDF, `--force`
+also bypasses saved range-part recovery and resubmits every range.
 
 ### Run Stage 4
 
@@ -286,15 +308,21 @@ python pipeline/regdocs_2_download.py --status-json
 python pipeline/regdocs_4_normalize.py --status
 ```
 
+For a large-PDF Stage 3 run, verify the reported combined page count matches the
+source PDF page count before proceeding to Stage 4. Stage 3 now enforces this
+invariant before publishing a ranged canonical artifact.
+
 ## Operational principles
 
 - Preserve `workspace/1_scout/raw/`; it is source evidence, not cache.
 - Treat source-file SHA-256 as the definitive downloaded version identity.
 - Keep acquisition, analysis, normalization, and indexing independently
   reproducible.
-- Prefer resumable ledger state and atomic filesystem commits.
+- Prefer resumable ledger and artifact state, including large-PDF range parts,
+  and atomic filesystem commits.
 - Keep credentials out of command lines, files, logs, and version control.
-- Run conservatively against the public REGDOCS service.
+- Run conservatively against the public REGDOCS service and billable analysis
+  services.
 
 Future product direction and open decisions are tracked in
 [ROADMAP.md](ROADMAP.md).
