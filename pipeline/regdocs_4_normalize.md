@@ -29,9 +29,10 @@ catalogue metadata, the current downloaded-file identity, and a successful
 Stage 3 layout result into search-oriented JSONL while retaining links back to
 source elements and page geometry.
 
-It is the final stage in this repository's current four-stage pipeline. Loading
-the JSONL into a search engine, analytics system, or vector store is a separate
-concern.
+Stage 4 is the deterministic corpus boundary between external document analysis
+and downstream retrieval. Stage 5 consumes `chunks.jsonl` and
+`provenance.jsonl` to publish a rebuildable Azure AI Search index; Stage 4
+remains authoritative for normalized search content and detailed provenance.
 
 ## Stage 3 ranged-PDF compatibility
 
@@ -178,6 +179,11 @@ Each line is one compact JSON object with keys sorted deterministically.
 | `chunks.jsonl` | searchable text/table/figure unit | Search-ready content with inherited filters and section/page context |
 | `tables.jsonl` | detected table | Detailed table cells, dimensions, caption, text, geometry, and source links |
 | `provenance.jsonl` | emitted chunk | Source elements, content index, spans, page range, and regions supporting the chunk |
+
+Stage 5 uses `chunks.jsonl` as its primary search-document input and joins each
+chunk to its matching `provenance.jsonl` record before Azure AI Search
+publication. The other Stage 4 projections remain available for document/page
+inspection and future application features.
 
 ## Stable record identities
 
@@ -442,6 +448,12 @@ python pipeline/regdocs_4_normalize.py
 No Azure rerun is required for this provenance change. Stage 4.1.0 can rebuild
 its outputs from existing successful Stage 3 JSON.
 
+After the final canonical normalize, validate the Stage 5 handoff locally:
+
+```bash
+python pipeline/regdocs_5_index.py --dry-run
+```
+
 ## Dry-run and status side effects
 
 `--dry-run` resolves candidates and artifacts without creating JSONL or a
@@ -553,3 +565,5 @@ snapshot, prioritize:
     rebuilds and large corpora.
 
 Previous: [Stage 3 analyzer](regdocs_3_analyze.md).
+
+Next: [Stage 5 index publisher](regdocs_5_index.md).
