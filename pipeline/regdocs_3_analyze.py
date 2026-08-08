@@ -1,43 +1,19 @@
 #!/usr/bin/env python3
-"""
-REGDOCS Stage 3 - ANALYZE
+"""Stage 3: analyze downloaded files with Azure Content Understanding.
 
-Reads downloaded files from the REGDOCS SQLite database, sends them to
-Azure AI Content Understanding using prebuilt-layout, preserves the raw
-Azure result JSON + Markdown, and records analysis state in SQLite.
+Syntax::
 
-Primary manifest: files table (is_current = 1)
-Filesystem: validation / optional fallback only
+    python pipeline/regdocs_3_analyze.py [options]
+    python pipeline/regdocs_3_analyze.py --help
 
-Azure connection settings may be supplied as command-line parameters or environment variables.
-Command-line parameters take precedence. The API key is never written to SQLite.
-
-Environment fallbacks:
-    CONTENTUNDERSTANDING_ENDPOINT=https://<resource>.services.ai.azure.com
-    CONTENTUNDERSTANDING_KEY=<optional; DefaultAzureCredential is used otherwise>
-    CONTENTUNDERSTANDING_API_VERSION=2025-11-01
-    CONTENTUNDERSTANDING_ANALYZER_ID=prebuilt-layout
-
-Install:
-    python -m pip install azure-ai-contentunderstanding azure-identity
-
-Example:
-    python regdocs_3_analyze_azure_v2.py \
-        --db ./regdocs.db \
-        --download-dir ./downloads \
-        --output-dir ./analysis \
-        --endpoint "https://<resource>.services.ai.azure.com" \
-        --key "<key>" \
-        --api-version 2025-11-01 \
-        --analyzer-id prebuilt-layout \
-        --limit 10
-
-Start with a small pilot. Remove --limit only after validating varied documents.
+Cost controls, credentials, recovery, and artifact contracts are documented in
+``pipeline/regdocs_3_analyze.md``.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import mimetypes
@@ -51,12 +27,27 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from azure.ai.contentunderstanding import ContentUnderstandingClient
-from azure.core.credentials import AzureKeyCredential
-from azure.core.exceptions import HttpResponseError, ServiceRequestError
-from azure.identity import DefaultAzureCredential
+try:
+    from azure.ai.contentunderstanding import ContentUnderstandingClient
+    from azure.core.credentials import AzureKeyCredential
+    from azure.core.exceptions import HttpResponseError, ServiceRequestError
+    from azure.identity import DefaultAzureCredential
+except ImportError as exc:
+    raise SystemExit(
+        "Missing Stage 3 Azure dependency. Install with: "
+        "python -m pip install -r pipeline/requirements.txt"
+    ) from exc
 
-SCRIPT_VERSION = "3.1.0"
+from regdocs_paths import (
+    ANALYZE_LOCK_PATH,
+    CONTENT_UNDERSTANDING_DIR,
+    DATABASE_PATH,
+    DOWNLOAD_FILES_DIR,
+    resolve_stored_path,
+    stored_path,
+)
+
+SCRIPT_VERSION = "3.3.0"
 DEFAULT_API_VERSION = "2025-11-01"
 PARSER_VERSION = f"azure-content-understanding-{DEFAULT_API_VERSION}"
 DEFAULT_ANALYZER_ID = "prebuilt-layout"
@@ -98,6 +89,43 @@ def safe_path_component(value: str) -> str:
     """Return a filesystem-safe component while keeping analyzer/API labels readable."""
     cleaned = "".join(c if c.isalnum() or c in "-_." else "_" for c in value.strip())
     return cleaned or "unknown"
+
+
+class StageLock:
+    """Exclusive lock preventing concurrent billable Stage 3 workers."""
+
+    def __init__(self, path: Path, *, force: bool = False):
+        self.path = path
+        self.force = force
+        self.owned = False
+
+    def __enter__(self) -> "StageLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.force and self.path.exists():
+            self.path.unlink()
+        payload = {"pid": os.getpid(), "created_at": utcnow()}
+        try:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError as exc:
+            detail = ""
+            with contextlib.suppress(OSError):
+                detail = self.path.read_text(encoding="utf-8")
+            raise RuntimeError(
+                f"Analyze lock already exists: {self.path}. Confirm no analyzer is running "
+                "before using --force-lock."
+                + (f"\nLock contents: {detail}" if detail else "")
+            ) from exc
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=2)
+            stream.write("\n")
+        self.owned = True
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        if self.owned:
+            with contextlib.suppress(FileNotFoundError):
+                self.path.unlink()
+        self.owned = False
 
 
 def atomic_write_text(path: Path, text: str) -> None:
@@ -158,6 +186,8 @@ class AnalysisOutcome:
     error_message: Optional[str] = None
     elapsed_seconds: Optional[float] = None
     attempt_count: int = 0
+    artifact_source: Optional[str] = None
+    reconciled_at: Optional[str] = None
 
 
 def open_db(path: Path) -> sqlite3.Connection:
@@ -192,6 +222,8 @@ def _create_analyses_table(con: sqlite3.Connection) -> None:
             warning_count INTEGER,
             elapsed_seconds REAL,
             attempt_count INTEGER NOT NULL DEFAULT 0,
+            artifact_source TEXT,
+            reconciled_at TEXT,
             error_code TEXT,
             error_message TEXT,
             created_at TEXT NOT NULL,
@@ -234,7 +266,7 @@ def _has_analysis_identity_index(con: sqlite3.Connection) -> bool:
 
 
 def _rebuild_analyses_table(con: sqlite3.Connection) -> None:
-    """Migrate the known pre-3.1 analyses schema without losing completed work."""
+    """Migrate known earlier analyses schemas without losing completed work."""
     columns = {str(r[1]) for r in con.execute("PRAGMA table_info(analyses)").fetchall()}
     required_legacy = {
         "id", "run_id", "document_id", "file_id", "file_sha256", "analyzer_id",
@@ -249,7 +281,7 @@ def _rebuild_analyses_table(con: sqlite3.Connection) -> None:
             f"cannot safely migrate automatically. Missing columns: {', '.join(missing)}"
         )
 
-    legacy_name = "analyses__legacy_3_1"
+    legacy_name = "analyses__legacy_3_2"
     if con.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (legacy_name,)
     ).fetchone():
@@ -269,6 +301,8 @@ def _rebuild_analyses_table(con: sqlite3.Connection) -> None:
         )
         elapsed_expr = "elapsed_seconds" if "elapsed_seconds" in columns else "NULL"
         attempts_expr = "attempt_count" if "attempt_count" in columns else "0"
+        source_expr = "artifact_source" if "artifact_source" in columns else "NULL"
+        reconciled_expr = "reconciled_at" if "reconciled_at" in columns else "NULL"
 
         con.execute(
             f"""
@@ -276,13 +310,15 @@ def _rebuild_analyses_table(con: sqlite3.Connection) -> None:
                 id, run_id, document_id, file_id, file_sha256, analyzer_id, api_version,
                 operation_id, status, started_at, finished_at, raw_json_path, markdown_path,
                 page_count, table_count, section_count, warning_count, elapsed_seconds,
-                attempt_count, error_code, error_message, created_at, updated_at
+                attempt_count, artifact_source, reconciled_at, error_code, error_message,
+                created_at, updated_at
             )
             SELECT
                 id, run_id, document_id, file_id, file_sha256, analyzer_id, {api_expr},
                 operation_id, status, started_at, finished_at, raw_json_path, markdown_path,
                 page_count, table_count, section_count, warning_count, {elapsed_expr},
-                {attempts_expr}, error_code, error_message, created_at, updated_at
+                {attempts_expr}, {source_expr}, {reconciled_expr}, error_code, error_message,
+                created_at, updated_at
             FROM {legacy_name}
             """
         )
@@ -315,6 +351,10 @@ def ensure_schema(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE analyses ADD COLUMN elapsed_seconds REAL")
     if "attempt_count" not in columns:
         con.execute("ALTER TABLE analyses ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0")
+    if "artifact_source" not in columns:
+        con.execute("ALTER TABLE analyses ADD COLUMN artifact_source TEXT")
+    if "reconciled_at" not in columns:
+        con.execute("ALTER TABLE analyses ADD COLUMN reconciled_at TEXT")
 
     _create_analyses_indexes(con)
     con.commit()
@@ -323,9 +363,10 @@ def ensure_schema(con: sqlite3.Connection) -> None:
 def create_run(con: sqlite3.Connection, args: argparse.Namespace) -> int:
     now = utcnow()
     params = {
-        "db": str(args.db),
-        "download_dir": str(args.download_dir) if args.download_dir else None,
-        "output_dir": str(args.output_dir),
+        "db": stored_path(args.db),
+        "download_dir": stored_path(args.download_dir) if args.download_dir else None,
+        "output_dir": stored_path(args.output_dir),
+        "lock_file": stored_path(args.lock_file),
         "endpoint": args.endpoint,
         "auth_mode": "key" if args.key else "default_azure_credential",
         "api_version": args.api_version,
@@ -334,9 +375,11 @@ def create_run(con: sqlite3.Connection, args: argparse.Namespace) -> int:
         "retry_base_delay": args.retry_base_delay,
         "retry_max_delay": args.retry_max_delay,
         "analyzer_id": args.analyzer_id,
+        "all": args.all_candidates,
         "limit": args.limit,
         "document_id": args.document_id,
         "force": args.force,
+        "reconcile_artifacts": not args.no_reconcile_artifacts,
     }
     cur = con.execute(
         """
@@ -516,9 +559,303 @@ def select_candidates(
     ]
 
 
+
+def canonical_artifact_paths(
+    output_dir: Path,
+    analyzer_id: str,
+    api_version: str,
+    candidate: Candidate,
+) -> tuple[Path, Path]:
+    analyzer_component = safe_path_component(analyzer_id)
+    api_component = safe_path_component(api_version)
+    identity = candidate.sha256.lower()
+    raw_path = (
+        output_dir / "raw" / analyzer_component / api_component /
+        candidate.document_id / f"{identity}.json"
+    )
+    md_path = (
+        output_dir / "markdown" / analyzer_component / api_component /
+        candidate.document_id / f"{identity}.md"
+    )
+    return raw_path, md_path
+
+
+def legacy_artifact_paths(output_dir: Path, candidate: Candidate) -> tuple[Path, Path]:
+    identity = candidate.sha256.lower()
+    return (
+        output_dir / "raw" / candidate.document_id / f"{identity}.json",
+        output_dir / "markdown" / candidate.document_id / f"{identity}.md",
+    )
+
+
+def _existing_path(value: Optional[str]) -> Optional[Path]:
+    if not value:
+        return None
+    p = resolve_stored_path(value)
+    try:
+        p = p.resolve()
+    except OSError:
+        pass
+    return p if p.is_file() else None
+
+
+def _load_and_validate_result_json(
+    raw_path: Path,
+    analyzer_id: str,
+    api_version: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        data = json.loads(raw_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"invalid JSON: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError("top-level Azure result must be a JSON object")
+
+    actual_analyzer = data.get("analyzerId") or data.get("analyzer_id")
+    actual_api = data.get("apiVersion") or data.get("api_version")
+    if actual_analyzer != analyzer_id:
+        raise ValueError(
+            f"analyzer mismatch: artifact={actual_analyzer!r}, expected={analyzer_id!r}"
+        )
+    if actual_api != api_version:
+        raise ValueError(
+            f"API version mismatch: artifact={actual_api!r}, expected={api_version!r}"
+        )
+
+    contents = data.get("contents") or []
+    if not isinstance(contents, list):
+        raise ValueError("contents is not a list")
+
+    markdown_parts: list[str] = []
+    page_count = 0
+    table_count = 0
+    section_count = 0
+    for content in contents:
+        if not isinstance(content, dict):
+            continue
+        markdown = content.get("markdown")
+        if isinstance(markdown, str) and markdown:
+            markdown_parts.append(markdown)
+        pages = content.get("pages") or []
+        tables = content.get("tables") or []
+        sections = content.get("sections") or []
+        if isinstance(pages, list):
+            page_count += len(pages)
+        if isinstance(tables, list):
+            table_count += len(tables)
+        if isinstance(sections, list):
+            section_count += len(sections)
+
+    warnings = data.get("warnings") or []
+    warning_count = len(warnings) if isinstance(warnings, list) else 0
+    metadata = {
+        "page_count": page_count,
+        "table_count": table_count,
+        "section_count": section_count,
+        "warning_count": warning_count,
+        "markdown": "\n\n".join(markdown_parts),
+    }
+    return data, metadata
+
+
+def find_reconcilable_artifacts(
+    con: sqlite3.Connection,
+    candidate: Candidate,
+    output_dir: Path,
+    analyzer_id: str,
+    api_version: str,
+) -> tuple[Optional[AnalysisOutcome], Optional[str]]:
+    """Find valid prior Azure output, canonicalize it, and return a no-cost success outcome."""
+    row = con.execute(
+        """
+        SELECT * FROM analyses
+        WHERE file_id=? AND file_sha256=? AND analyzer_id=? AND api_version=?
+        """,
+        (candidate.file_id, candidate.sha256, analyzer_id, api_version),
+    ).fetchone()
+
+    canonical_raw, canonical_md = canonical_artifact_paths(
+        output_dir, analyzer_id, api_version, candidate
+    )
+    legacy_raw, legacy_md = legacy_artifact_paths(output_dir, candidate)
+
+    raw_candidates: list[tuple[str, Path]] = []
+    if row is not None:
+        db_raw = _existing_path(row["raw_json_path"])
+        if db_raw is not None:
+            raw_candidates.append(("db_path", db_raw))
+    raw_candidates.extend([
+        ("canonical", canonical_raw),
+        ("legacy", legacy_raw),
+    ])
+
+    seen: set[Path] = set()
+    validation_errors: list[str] = []
+    for source_kind, raw_path in raw_candidates:
+        try:
+            resolved = raw_path.expanduser().resolve()
+        except OSError:
+            resolved = raw_path.expanduser()
+        if resolved in seen or not resolved.is_file():
+            continue
+        seen.add(resolved)
+
+        try:
+            _, metadata = _load_and_validate_result_json(
+                resolved, analyzer_id, api_version
+            )
+        except ValueError as exc:
+            validation_errors.append(f"{resolved}: {exc}")
+            continue
+
+        # Keep the source artifact untouched. Canonicalize by copying the exact JSON text.
+        if resolved != canonical_raw.resolve():
+            atomic_write_text(canonical_raw, resolved.read_text(encoding="utf-8"))
+
+        md_source: Optional[Path] = None
+        if row is not None:
+            db_md = _existing_path(row["markdown_path"])
+            if db_md is not None:
+                md_source = db_md
+        if md_source is None and canonical_md.is_file():
+            md_source = canonical_md
+        if md_source is None and legacy_md.is_file():
+            md_source = legacy_md
+
+        if md_source is not None:
+            try:
+                md_resolved = md_source.expanduser().resolve()
+            except OSError:
+                md_resolved = md_source.expanduser()
+            if md_resolved != canonical_md.resolve():
+                atomic_write_text(canonical_md, md_resolved.read_text(encoding="utf-8"))
+        else:
+            # Azure JSON itself contains the generated Markdown, so rebuild it locally.
+            atomic_write_text(canonical_md, metadata["markdown"])
+            source_kind = source_kind + "+markdown_from_json"
+
+        operation_id = str(row["operation_id"]) if row is not None and row["operation_id"] else None
+        outcome = AnalysisOutcome(
+            document_id=candidate.document_id,
+            file_id=candidate.file_id,
+            status="SUCCEEDED",
+            operation_id=operation_id,
+            api_version=api_version,
+            raw_json_path=stored_path(canonical_raw),
+            markdown_path=stored_path(canonical_md),
+            page_count=int(metadata["page_count"]),
+            table_count=int(metadata["table_count"]),
+            section_count=int(metadata["section_count"]),
+            warning_count=int(metadata["warning_count"]),
+            elapsed_seconds=0.0,
+            attempt_count=0,
+            artifact_source=f"reconciled_{source_kind}",
+            reconciled_at=utcnow(),
+        )
+        return outcome, None
+
+    if validation_errors:
+        return None, "; ".join(validation_errors)[:4000]
+    return None, None
+
+
+def audit_succeeded_artifacts(
+    con: sqlite3.Connection,
+    output_dir: Path,
+    analyzer_id: str,
+    api_version: str,
+    document_id: Optional[str],
+) -> tuple[int, int]:
+    """Verify successful DB rows have valid artifacts; stale rows become eligible for repair."""
+    params: list[Any] = [analyzer_id, api_version]
+    doc_clause = ""
+    if document_id:
+        doc_clause = " AND d.id = ?"
+        params.append(document_id)
+
+    rows = con.execute(
+        f"""
+        SELECT
+            d.id AS document_id, f.id AS file_id, f.path AS db_path, f.sha256,
+            f.extension, f.mime_type, f.size_bytes
+        FROM analyses a
+        JOIN files f ON f.id = a.file_id
+        JOIN documents d ON d.id = f.document_id
+        WHERE f.is_current=1
+          AND a.analyzer_id=? AND a.api_version=? AND a.status='SUCCEEDED'
+          {doc_clause}
+        """,
+        params,
+    ).fetchall()
+
+    verified = 0
+    stale = 0
+    for r in rows:
+        candidate = Candidate(
+            document_id=str(r["document_id"]),
+            file_id=int(r["file_id"]),
+            db_path=str(r["db_path"]),
+            sha256=str(r["sha256"]),
+            extension=r["extension"],
+            mime_type=r["mime_type"],
+            size_bytes=r["size_bytes"],
+        )
+        outcome, validation_error = find_reconcilable_artifacts(
+            con, candidate, output_dir, analyzer_id, api_version
+        )
+        if outcome is not None:
+            # Refresh artifact paths/counts without erasing the original Azure timing/attempt metadata.
+            con.execute(
+                """
+                UPDATE analyses
+                SET raw_json_path=?, markdown_path=?, page_count=?, table_count=?,
+                    section_count=?, warning_count=?,
+                    artifact_source=CASE
+                        WHEN raw_json_path IS NULL OR raw_json_path <> ?
+                            THEN ?
+                        ELSE artifact_source
+                    END,
+                    reconciled_at=CASE
+                        WHEN raw_json_path IS NULL OR raw_json_path <> ?
+                            THEN ?
+                        ELSE reconciled_at
+                    END,
+                    error_code=NULL, error_message=NULL, updated_at=?
+                WHERE file_id=? AND file_sha256=? AND analyzer_id=? AND api_version=?
+                """,
+                (
+                    outcome.raw_json_path, outcome.markdown_path, outcome.page_count,
+                    outcome.table_count, outcome.section_count, outcome.warning_count,
+                    outcome.raw_json_path, outcome.artifact_source,
+                    outcome.raw_json_path, outcome.reconciled_at, utcnow(),
+                    candidate.file_id, candidate.sha256, analyzer_id, api_version,
+                ),
+            )
+            verified += 1
+            continue
+
+        stale += 1
+        con.execute(
+            """
+            UPDATE analyses
+            SET status='STALE_ARTIFACTS', error_code='ARTIFACT_MISSING_OR_INVALID',
+                error_message=?, updated_at=?
+            WHERE file_id=? AND file_sha256=? AND analyzer_id=? AND api_version=?
+            """,
+            (
+                validation_error or "Successful DB row has no valid matching JSON artifact",
+                utcnow(), candidate.file_id, candidate.sha256, analyzer_id, api_version,
+            ),
+        )
+    con.commit()
+    return verified, stale
+
 def resolve_file_path(candidate: Candidate, db_path: Path, download_dir: Optional[Path]) -> Path:
     p = Path(candidate.db_path)
-    attempts: list[Path] = []
+    attempts: list[Path] = [
+        resolve_stored_path(candidate.db_path, legacy_base=db_path.parent)
+    ]
 
     if p.is_absolute():
         attempts.append(p)
@@ -548,7 +885,8 @@ def resolve_file_path(candidate: Candidate, db_path: Path, download_dir: Optiona
 
     raise FileNotFoundError(
         f"Downloaded file not found for document {candidate.document_id}; "
-        f"DB path={candidate.db_path!r}; tried: " + ", ".join(str(x) for x in attempts)
+        f"DB path={candidate.db_path!r}; tried: "
+        + ", ".join(stored_path(x) for x in attempts)
     )
 
 
@@ -587,6 +925,8 @@ def upsert_analysis_start(
             warning_count=NULL,
             elapsed_seconds=NULL,
             attempt_count=0,
+            artifact_source=NULL,
+            reconciled_at=NULL,
             error_code=NULL,
             error_message=NULL,
             updated_at=excluded.updated_at
@@ -613,19 +953,20 @@ def store_outcome(
     api_version: str,
     outcome: AnalysisOutcome,
 ) -> None:
+    now = utcnow()
     con.execute(
         """
         UPDATE analyses
         SET status=?, operation_id=?, finished_at=?,
             raw_json_path=?, markdown_path=?, page_count=?, table_count=?,
             section_count=?, warning_count=?, elapsed_seconds=?, attempt_count=?,
-            error_code=?, error_message=?, updated_at=?
+            artifact_source=?, reconciled_at=?, error_code=?, error_message=?, updated_at=?
         WHERE file_id=? AND file_sha256=? AND analyzer_id=? AND api_version=?
         """,
         (
             outcome.status,
             outcome.operation_id,
-            utcnow(),
+            now,
             outcome.raw_json_path,
             outcome.markdown_path,
             outcome.page_count,
@@ -634,15 +975,26 @@ def store_outcome(
             outcome.warning_count,
             outcome.elapsed_seconds,
             outcome.attempt_count,
+            outcome.artifact_source,
+            outcome.reconciled_at,
             outcome.error_code,
             outcome.error_message,
-            utcnow(),
+            now,
             candidate.file_id,
             candidate.sha256,
             analyzer_id,
             api_version,
         ),
     )
+    if outcome.status == "SUCCEEDED":
+        con.execute(
+            """
+            UPDATE errors
+            SET resolved_at=?
+            WHERE stage='analyze' AND document_id=? AND resolved_at IS NULL
+            """,
+            (now, candidate.document_id),
+        )
     con.commit()
 
 
@@ -731,7 +1083,8 @@ def analyze_one(
                 status="FAILED",
                 error_code="HASH_MISMATCH",
                 error_message=(
-                    f"DB sha256={candidate.sha256}, disk sha256={actual_hash}, path={file_path}"
+                    f"DB sha256={candidate.sha256}, disk sha256={actual_hash}, "
+                    f"path={stored_path(file_path)}"
                 ),
                 elapsed_seconds=time.monotonic() - start,
                 attempt_count=0,
@@ -754,14 +1107,9 @@ def analyze_one(
             result_dict = result.as_dict()
             result_api_version = getattr(result, "api_version", None)
 
-            analyzer_component = safe_path_component(analyzer_id)
-            api_component = safe_path_component(api_version)
-            raw_dir = output_dir / "raw" / analyzer_component / api_component / candidate.document_id
-            md_dir = output_dir / "markdown" / analyzer_component / api_component / candidate.document_id
-
-            identity = candidate.sha256.lower()
-            raw_path = raw_dir / f"{identity}.json"
-            md_path = md_dir / f"{identity}.md"
+            raw_path, md_path = canonical_artifact_paths(
+                output_dir, analyzer_id, api_version, candidate
+            )
 
             markdown_parts: list[str] = []
             page_count = 0
@@ -791,14 +1139,15 @@ def analyze_one(
                 status="SUCCEEDED",
                 operation_id=operation_id,
                 api_version=result_api_version,
-                raw_json_path=str(raw_path),
-                markdown_path=str(md_path),
+                raw_json_path=stored_path(raw_path),
+                markdown_path=stored_path(md_path),
                 page_count=page_count,
                 table_count=table_count,
                 section_count=section_count,
                 warning_count=len(warnings),
                 elapsed_seconds=time.monotonic() - start,
                 attempt_count=attempt,
+                artifact_source="azure",
             )
 
         except HttpResponseError as exc:
@@ -863,7 +1212,15 @@ def analyze_one(
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="REGDOCS Stage 3: Azure Content Understanding analysis")
-    p.add_argument("--db", type=Path, required=True, help="Path to regdocs.db")
+    p.add_argument(
+        "--db",
+        type=Path,
+        default=stored_path(DATABASE_PATH),
+        help=(
+            "Path to the REGDOCS SQLite ledger "
+            f"(default: {stored_path(DATABASE_PATH)})"
+        ),
+    )
     p.add_argument(
         "--endpoint",
         default=os.environ.get("CONTENTUNDERSTANDING_ENDPOINT"),
@@ -922,13 +1279,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--download-dir",
         type=Path,
+        default=stored_path(DOWNLOAD_FILES_DIR),
         help="Root download directory used to resolve relative file paths / filename fallback",
     )
     p.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("analysis/content-understanding"),
-        help="Directory for immutable raw JSON and Markdown artifacts",
+        default=stored_path(CONTENT_UNDERSTANDING_DIR),
+        help="Directory for raw JSON and Markdown artifacts",
+    )
+    p.add_argument(
+        "--lock-file",
+        type=Path,
+        default=stored_path(ANALYZE_LOCK_PATH),
+        help="Exclusive Stage 3 writer lock",
+    )
+    p.add_argument(
+        "--force-lock",
+        action="store_true",
+        help="Remove an existing lock only after confirming no analyzer is running",
     )
     p.add_argument(
         "--analyzer-id",
@@ -938,9 +1307,24 @@ def build_parser() -> argparse.ArgumentParser:
             "env: CONTENTUNDERSTANDING_ANALYZER_ID)"
         ),
     )
-    p.add_argument("--limit", type=int, help="Process at most N candidates")
-    p.add_argument("--document-id", help="Analyze one REGDOCS document ID")
-    p.add_argument("--force", action="store_true", help="Re-analyze even if this file hash already succeeded")
+    scope = p.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--limit", type=int, help="Process at most N candidates")
+    scope.add_argument("--document-id", help="Analyze one REGDOCS document ID")
+    scope.add_argument(
+        "--all",
+        dest="all_candidates",
+        action="store_true",
+        help="Explicitly acknowledge processing every currently eligible candidate",
+    )
+    p.add_argument(
+        "--force", action="store_true",
+        help="Force a new Azure analysis; bypass DB/artifact reconciliation for selected candidates",
+    )
+    p.add_argument(
+        "--no-reconcile-artifacts",
+        action="store_true",
+        help="Disable discovery/backfill of existing Azure JSON/Markdown artifacts",
+    )
     p.add_argument(
         "--no-verify-hash",
         action="store_true",
@@ -956,24 +1340,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    args.db = args.db.expanduser().resolve()
-    args.output_dir = args.output_dir.expanduser().resolve()
+    args.db = resolve_stored_path(args.db)
+    args.output_dir = resolve_stored_path(args.output_dir)
+    args.lock_file = resolve_stored_path(args.lock_file)
     if args.download_dir:
-        args.download_dir = args.download_dir.expanduser().resolve()
+        args.download_dir = resolve_stored_path(args.download_dir)
 
     if not args.db.is_file():
         print(f"ERROR: database not found: {args.db}", file=sys.stderr)
         return 2
 
-    if not args.dry_run and not args.endpoint:
-        print(
-            "ERROR: --endpoint is required unless CONTENTUNDERSTANDING_ENDPOINT is set",
-            file=sys.stderr,
-        )
-        return 2
-
     if args.polling_interval <= 0:
         print("ERROR: --polling-interval must be greater than 0", file=sys.stderr)
+        return 2
+    if args.limit is not None and args.limit < 1:
+        print("ERROR: --limit must be at least 1", file=sys.stderr)
         return 2
     if args.max_attempts < 1:
         print("ERROR: --max-attempts must be at least 1", file=sys.stderr)
@@ -989,13 +1370,32 @@ def main() -> int:
 
     con = open_db(args.db)
     ensure_schema(con)
-    run_id = create_run(con, args)
+    stage_lock = StageLock(args.lock_file, force=args.force_lock)
+    try:
+        stage_lock.__enter__()
+    except RuntimeError as exc:
+        con.close()
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    try:
+        run_id = create_run(con, args)
+    except Exception:
+        con.close()
+        stage_lock.__exit__()
+        raise
     started = time.monotonic()
 
     client = None
     credential = None
 
     try:
+        verified_existing = 0
+        stale_existing = 0
+        if not args.force and not args.no_reconcile_artifacts:
+            verified_existing, stale_existing = audit_succeeded_artifacts(
+                con, args.output_dir, args.analyzer_id, args.api_version, args.document_id
+            )
+
         candidates = select_candidates(
             con,
             analyzer_id=args.analyzer_id,
@@ -1020,21 +1420,59 @@ def main() -> int:
         print(f"Polling:  {args.polling_interval:g}s")
         print(f"Retries:  {args.max_attempts} max attempts; {args.retry_base_delay:g}-{args.retry_max_delay:g}s backoff")
         print(f"Output:   {args.output_dir}")
+        if not args.force and not args.no_reconcile_artifacts:
+            print(
+                f"Reconcile: enabled; {verified_existing} existing success row(s) verified, "
+                f"{stale_existing} stale row(s) queued for repair"
+            )
+        else:
+            print("Reconcile: disabled")
 
         if total == 0:
             finish_run(con, run_id, "SUCCEEDED", 0, 0, 0, 0, 0, 0, 0, time.monotonic() - started)
             return 0
-
-        if not args.dry_run:
-            client, credential = make_client(args)
 
         succeeded = 0
         failed = 0
         skipped = 0
         pages_succeeded = 0
         analysis_attempts = 0
+        reconciled = 0
 
         for i, candidate in enumerate(candidates, start=1):
+            if not args.force and not args.no_reconcile_artifacts:
+                recovered, validation_error = find_reconcilable_artifacts(
+                    con, candidate, args.output_dir, args.analyzer_id, args.api_version
+                )
+                if recovered is not None:
+                    upsert_analysis_start(
+                        con, run_id, candidate, args.analyzer_id, args.api_version
+                    )
+                    store_outcome(
+                        con, candidate, args.analyzer_id, args.api_version, recovered
+                    )
+                    succeeded += 1
+                    reconciled += 1
+                    pages_succeeded += recovered.page_count or 0
+                    print(f"[{i}/{total}] {candidate.document_id}  RECOVERED locally; no Azure call")
+                    print(
+                        f"          pages={recovered.page_count} tables={recovered.table_count} "
+                        f"sections={recovered.section_count} source={recovered.artifact_source}"
+                    )
+                    print(f"          JSON: {recovered.raw_json_path}")
+                    print(f"          MD:   {recovered.markdown_path}")
+                    update_run_progress(
+                        con, run_id, i, total, succeeded, failed, skipped,
+                        pages_succeeded, analysis_attempts,
+                        f"Recovered {candidate.document_id} locally; no Azure call",
+                    )
+                    continue
+                elif validation_error:
+                    print(
+                        f"[{i}/{total}] {candidate.document_id}  existing artifact rejected: "
+                        f"{validation_error[:300]}"
+                    )
+
             try:
                 file_path = resolve_file_path(candidate, args.db, args.download_dir)
             except FileNotFoundError as exc:
@@ -1069,6 +1507,29 @@ def main() -> int:
                     pages_succeeded, analysis_attempts, f"Dry run: {candidate.document_id}"
                 )
                 continue
+
+            if client is None:
+                if not args.endpoint:
+                    msg = (
+                        "No valid existing artifact was found and Azure is required, but no endpoint "
+                        "is configured. Pass --endpoint or set CONTENTUNDERSTANDING_ENDPOINT."
+                    )
+                    finish_run(
+                        con,
+                        run_id,
+                        "FAILED",
+                        i - 1,
+                        total,
+                        succeeded,
+                        failed,
+                        skipped,
+                        pages_succeeded,
+                        analysis_attempts,
+                        time.monotonic() - started,
+                    )
+                    print(f"ERROR: {msg}", file=sys.stderr)
+                    return 2
+                client, credential = make_client(args)
 
             upsert_analysis_start(con, run_id, candidate, args.analyzer_id, args.api_version)
             outcome = analyze_one(
@@ -1111,7 +1572,7 @@ def main() -> int:
                     retryable,
                     {
                         "file_id": candidate.file_id,
-                        "file_path": str(file_path),
+                        "file_path": stored_path(file_path),
                         "operation_id": outcome.operation_id,
                         "analyzer_id": args.analyzer_id,
                         "api_version": args.api_version,
@@ -1151,13 +1612,13 @@ def main() -> int:
         print()
         print(
             f"Run {run_id} {final_status}: "
-            f"{succeeded} succeeded, {failed} failed, {skipped} skipped, "
-            f"{pages_succeeded} pages, {analysis_attempts} analysis attempt(s)"
+            f"{succeeded} succeeded ({reconciled} reconciled locally), "
+            f"{failed} failed, {skipped} skipped, {pages_succeeded} pages, "
+            f"{analysis_attempts} Azure submission attempt(s)"
         )
         return 0 if failed == 0 else 1
 
     except KeyboardInterrupt:
-        elapsed = time.monotonic() - started
         con.execute(
             "UPDATE runs SET status='INTERRUPTED', finished_at=?, heartbeat_at=?, progress_message=? WHERE id=?",
             (utcnow(), utcnow(), "Interrupted by user", run_id),
@@ -1188,6 +1649,7 @@ def main() -> int:
             except Exception:
                 pass
         con.close()
+        stage_lock.__exit__()
 
 
 if __name__ == "__main__":

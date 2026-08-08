@@ -3,7 +3,7 @@
 Stage 2 of the REGDOCS acquisition pipeline: **select, download, verify, version, reconcile, and export metadata for source files discovered by the scout**.
 
 ```text
-regdocs.db
+database/regdocs.db
    |
    v
 eligible file rows
@@ -19,16 +19,20 @@ eligible file rows
    +--> archive replaced versions
    |
    v
-downloads/ + files table + optional JSON sidecars
+workspace/2_download/files/ + files table + optional JSON sidecars
 ```
 
-Script version documented: **1.1.1**.
+Script version documented: **1.1.2**.
 
 ## Purpose
 
-The downloader consumes the exact five-table SQLite ledger created by `regdocs_1_scout.py`.
+The downloader consumes the shared SQLite ledger created by `regdocs_1_scout.py`.
 
-It does not crawl REGDOCS for new documents. Its job is to turn already-scouted file records into durable, verified local source files while preserving download state and file-version history.
+It does not crawl REGDOCS for new documents. Its job is to turn already-scouted
+file records into managed local source files while preserving download state
+and file-version history. Download-time validation is strong, but the current
+reconciliation and crash-recovery limitations below matter when calling the
+collection fully verified or durable.
 
 ## Default policy
 
@@ -40,9 +44,9 @@ By default the downloader:
 - never downloads compound-document shells;
 - never downloads synthetic paper-only rows;
 - attempts unknown file kinds and identifies them from the response;
-- stores current files as `downloads/<document-id>.<extension>`;
-- streams in-progress downloads under `downloads/.partial/`;
-- archives replaced versions under `downloads/_versions/<document-id>/`;
+- stores current files as `workspace/2_download/files/<document-id>.<extension>`;
+- streams in-progress downloads under `workspace/2_download/files/.partial/`;
+- archives replaced versions under `workspace/2_download/files/_versions/<document-id>/`;
 - reconciles files already present on disk before selecting network work;
 - uses SQLite as the authoritative metadata ledger;
 - uses one globally paced worker;
@@ -51,7 +55,7 @@ By default the downloader:
 
 ## Database contract
 
-The downloader expects exactly these five user tables:
+The downloader requires these five acquisition tables:
 
 - `documents`
 - `runs`
@@ -59,7 +63,8 @@ The downloader expects exactly these five user tables:
 - `raw_snapshots`
 - `files`
 
-It refuses databases with missing or unexpected user tables.
+It refuses databases missing an acquisition table, while allowing additive
+tables owned by downstream stages such as `analyses` and `normalizations`.
 
 Stage 2 creates no additional user tables.
 
@@ -140,7 +145,7 @@ SHA-256 is the definitive local version identity.
 Downloads are first streamed into:
 
 ```text
-downloads/.partial/
+workspace/2_download/files/.partial/
 ```
 
 Only a completed and validated file is moved to its final location.
@@ -148,15 +153,15 @@ Only a completed and validated file is moved to its final location.
 Default current-file naming:
 
 ```text
-downloads/<document-id>.<extension>
+workspace/2_download/files/<document-id>.<extension>
 ```
 
 Examples:
 
 ```text
-downloads/4710492.pdf
-downloads/4812031.docx
-downloads/4910022.xlsx
+workspace/2_download/files/4710492.pdf
+workspace/2_download/files/4812031.docx
+workspace/2_download/files/4910022.xlsx
 ```
 
 This stable naming model makes the REGDOCS document ID the filesystem join key.
@@ -166,7 +171,7 @@ This stable naming model makes the REGDOCS document ID the filesystem join key.
 If a newly downloaded file replaces a different existing file for the same document ID, the prior file is archived by hash:
 
 ```text
-downloads/_versions/<document-id>/<sha256>.<extension>
+workspace/2_download/files/_versions/<document-id>/<sha256>.<extension>
 ```
 
 This preserves source history while keeping one simple current path.
@@ -174,7 +179,7 @@ This preserves source history while keeping one simple current path.
 Disable version archiving with:
 
 ```bash
-python regdocs_2_download.py --no-archive-replaced
+python pipeline/regdocs_2_download.py --no-archive-replaced
 ```
 
 ## Existing-file reconciliation
@@ -194,13 +199,18 @@ It can:
 By default, an already recorded hash may be reused during reconciliation. To re-hash existing files:
 
 ```bash
-python regdocs_2_download.py --verify-existing
+python pipeline/regdocs_2_download.py --verify-existing
 ```
+
+Use `--verify-existing` for integrity-sensitive runs. Without it, a replaced or
+corrupt file can be adopted while retaining a previously recorded SHA-256.
+Also note that reconciliation is currently global: even a targeted
+`--document-id` or `--limit` run can reconcile and reset unrelated file rows.
 
 Disable reconciliation:
 
 ```bash
-python regdocs_2_download.py --no-reconcile
+python pipeline/regdocs_2_download.py --no-reconcile
 ```
 
 ## JSON sidecars
@@ -210,31 +220,31 @@ Stage 2 can export deterministic portable metadata sidecars.
 For a current file:
 
 ```text
-downloads/4710492.pdf
+workspace/2_download/files/4710492.pdf
 ```
 
 the default sidecar is:
 
 ```text
-downloads/4710492.metadata.json
+workspace/2_download/files/4710492.metadata.json
 ```
 
 Generate after a normal download run:
 
 ```bash
-python regdocs_2_download.py --sidecars
+python pipeline/regdocs_2_download.py --sidecars
 ```
 
 Generate or refresh sidecars without network access:
 
 ```bash
-python regdocs_2_download.py --sidecars-only
+python pipeline/regdocs_2_download.py --sidecars-only
 ```
 
 Write sidecars to a separate directory:
 
 ```bash
-python regdocs_2_download.py \
+python pipeline/regdocs_2_download.py \
   --sidecars-only \
   --sidecar-dir export/metadata
 ```
@@ -264,44 +274,45 @@ The sidecar projects authoritative SQLite state into a portable document includi
 
 This makes sidecars convenient inputs for downstream OCR, content-understanding, ETL, or RAG jobs while keeping SQLite as the source of truth.
 
+Sidecars contain the full metadata object and local paths. Treat them as
+operational exports, review them before sharing, and create them under suitable
+filesystem permissions. `--sidecars-only` trusts ledger/file relationships; it
+does not re-hash the source bytes.
+
 ## Installation
 
-Required:
+From the repository root, install the shared pipeline dependencies:
 
 ```bash
-pip install httpx
+python -m pip install -r pipeline/requirements.txt
 ```
 
-Recommended for progress bars:
-
-```bash
-pip install tqdm
-```
+The shared file includes both `httpx` and `tqdm` used by this stage.
 
 ## Common commands
 
 ### Preview selected work
 
 ```bash
-python regdocs_2_download.py --dry-run --limit 25
+python pipeline/regdocs_2_download.py --dry-run --limit 25
 ```
 
 ### Normal download run
 
 ```bash
-python regdocs_2_download.py
+python pipeline/regdocs_2_download.py
 ```
 
 ### Download one document
 
 ```bash
-python regdocs_2_download.py --document-id 4710492
+python pipeline/regdocs_2_download.py --document-id 4710492
 ```
 
 Repeat the option for multiple IDs:
 
 ```bash
-python regdocs_2_download.py \
+python pipeline/regdocs_2_download.py \
   --document-id 4710492 \
   --document-id 4710501
 ```
@@ -309,69 +320,69 @@ python regdocs_2_download.py \
 ### Include HTML
 
 ```bash
-python regdocs_2_download.py --include-html
+python pipeline/regdocs_2_download.py --include-html
 ```
 
 ### Retry records marked final-failed
 
 ```bash
-python regdocs_2_download.py --retry-failed
+python pipeline/regdocs_2_download.py --retry-failed
 ```
 
 ### Force redownload
 
 ```bash
-python regdocs_2_download.py --force
+python pipeline/regdocs_2_download.py --force
 ```
 
 ### Verify existing local files
 
 ```bash
-python regdocs_2_download.py --verify-existing
+python pipeline/regdocs_2_download.py --verify-existing
 ```
 
 ### Download and create sidecars
 
 ```bash
-python regdocs_2_download.py --sidecars
+python pipeline/regdocs_2_download.py --sidecars
 ```
 
 ### Sidecars only
 
 ```bash
-python regdocs_2_download.py --sidecars-only
+python pipeline/regdocs_2_download.py --sidecars-only
 ```
 
 ### Status
 
 ```bash
-python regdocs_2_download.py --status
+python pipeline/regdocs_2_download.py --status
 ```
 
 Machine-readable:
 
 ```bash
-python regdocs_2_download.py --status-json
+python pipeline/regdocs_2_download.py --status-json
 ```
 
 ### Offline self-test
 
 ```bash
-python regdocs_2_download.py --self-test
+python pipeline/regdocs_2_download.py --self-test
 ```
 
 ### Version
 
 ```bash
-python regdocs_2_download.py --version
+python pipeline/regdocs_2_download.py --version
 ```
 
 ## CLI reference
 
 | Option | Default | Description |
 |---|---:|---|
-| `--db` | `regdocs.db` | Scout SQLite database |
-| `--downloads`, `--output-dir` | `downloads` | Current source-file directory |
+| `--db` | `database/regdocs.db` | Scout SQLite database |
+| `--downloads`, `--output-dir` | `workspace/2_download/files` | Current source-file directory |
 | `--document-id` | none | Select one document ID; repeatable |
 | `--limit` | none | Process at most N selected records |
 | `--include-html` | disabled | Download known HTML records |
@@ -391,14 +402,15 @@ python regdocs_2_download.py --version
 | `--sidecars-only` | disabled | Write sidecars without network downloads |
 | `--sidecar-dir` | beside source file | Alternate sidecar directory |
 | `--partial-max-age-hours` | `24.0` | Delete stale partials older than this |
-| `--audit-dir` | `_audit` | Log, progress, and lock directory |
-| `--dry-run` | disabled | Preview selection without writes |
+| `--audit-dir` | `workspace/2_download/run` | Log and progress directory |
+| `--lock-file` | `database/locks/2_download.lock` | Exclusive stage lock |
+| `--dry-run` | disabled | Read-only candidate preview; no reconciliation or download |
 | `--status` | — | Human-readable latest status |
 | `--status-json` | — | JSON latest status |
 | `--version` | — | Print script version |
 | `--self-test` | — | Run offline tests |
 | `--verbose` | disabled | Debug logging |
-| `--force-lock` | disabled | Replace a stale download lock |
+| `--force-lock` | disabled | Unconditionally remove the lock; only after proving no downloader is running |
 
 ## Download metadata written to the ledger
 
@@ -459,7 +471,8 @@ Retryable HTTP statuses include:
 - `503`
 - `504`
 
-`Retry-After` is honored when available.
+`Retry-After` is honored when available. It is not currently capped, so an
+unexpectedly large server value can stall the run.
 
 Without it, retries use a bounded exponential delay.
 
@@ -487,25 +500,25 @@ The default maximum file size is:
 Change it with:
 
 ```bash
-python regdocs_2_download.py --max-file-size-mb 512
+python pipeline/regdocs_2_download.py --max-file-size-mb 512
 ```
 
 Both declared `Content-Length` and streamed bytes are checked.
 
 ## Progress and audit files
 
-Default audit directory:
+Default run-state directory:
 
 ```text
-_audit/
+workspace/2_download/run/
 ```
 
 During a run:
 
 ```text
-_audit/download-progress.json
-_audit/download.log
-_audit/download.lock
+workspace/2_download/run/progress.json
+workspace/2_download/run/download.log
+database/locks/2_download.lock
 ```
 
 The progress JSON contains:
@@ -535,6 +548,38 @@ A successfully downloaded document also receives:
 documents.status = DOWNLOADED
 ```
 
+## Selection, reconciliation, and preview scope
+
+Candidate download selection honors `--document-id` and `--limit`, but the
+pre-download reconciliation and non-file normalization passes currently scan
+the full ledger. A one-document smoke test is therefore not isolated from other
+document state.
+
+An explicit unknown or ineligible `--document-id` can result in a successful
+zero-work run. Confirm that the expected ID appears in preview output.
+
+A normal `--dry-run` opens the ledger read-only, does not reconcile, does not
+acquire the stage lock, and does not download files. The special combination
+`--sidecars-only --dry-run` does acquire and release the lock even though it
+does not write sidecars.
+
+With `--sidecars --limit N`, sidecar selection is based on the first N
+successful ledger rows, not necessarily the N documents downloaded by that
+invocation.
+
+## Locking and concurrent runs
+
+The downloader uses:
+
+```text
+database/locks/2_download.lock
+```
+
+Stale partial cleanup currently occurs before the lock is acquired. The lock
+does not validate process liveness or ownership, and `--force-lock`
+unconditionally unlinks it. Never run two downloaders against the same ledger
+and output tree. Verify the original process is stopped before forcing a lock.
+
 ## Failure handling
 
 Final failures are written to the shared `errors` table.
@@ -551,6 +596,20 @@ The downloader records structured context such as:
 
 A later successful download resolves prior unresolved download errors for that document without deleting the historical rows.
 
+An invalid file found during reconciliation can currently leave its document
+at `SUCCEEDED`, where normal selection skips it. Review reconciliation errors
+and use `--verify-existing`; do not rely on status alone as an integrity audit.
+
+A failed forced refresh can also demote the download status even while a
+previous current file remains available. Availability of the last verified
+artifact and outcome of the latest refresh attempt are not yet separate states.
+
+The filesystem archive/promotion steps and their SQLite updates are not one
+crash-atomic transaction. A hard crash at exactly the wrong point can require
+manual hash/path reconciliation. The fallback used for some cross-filesystem
+moves is not atomic. Keep database and file backups together and run an
+integrity verification after abnormal termination.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -564,7 +623,7 @@ A later successful download resolves prior unresolved download errors for that d
 
 The offline self-test exercises core behavior including:
 
-- exact five-table schema expectations;
+- required five-table acquisition schema with additive downstream tables allowed;
 - candidate selection;
 - HTML skipping;
 - non-file normalization;
@@ -579,7 +638,7 @@ The offline self-test exercises core behavior including:
 Run it before deploying script changes:
 
 ```bash
-python regdocs_2_download.py --self-test
+python pipeline/regdocs_2_download.py --self-test
 ```
 
 ## Future update-check mode
@@ -597,6 +656,44 @@ The intended approach is:
 The design explicitly keeps SHA-256 as the definitive version identity. HTTP validators are only optimization signals.
 
 This mode is **not implemented in the current script**.
+
+## Current trust and security limits
+
+The current HTTP client follows redirects without enforcing a scheme, host, or
+private-network policy. A poisoned ledger URL or hostile redirect can make the
+downloader contact an unintended destination. Run against trusted Stage 1 data
+until every request and redirect is constrained to approved HTTPS CER hosts.
+
+Document IDs are used in filenames, globs, temporary prefixes, and archive
+directories without a centralized strict path-component check. Reconciliation
+can also encounter symlinks. Keep the managed download tree private and free of
+untrusted filenames/symlinks.
+
+Downloaded documents are untrusted external bytes. Downstream parsing should
+run with resource limits and isolation; a quarantine or malware-scanning hook
+is not currently present.
+
+## Current hardening priorities
+
+Before unattended production use, prioritize:
+
+1. acquire a robust lock before partial cleanup and supervise worker failures so
+   an unexpected exception cannot leave `queue.join()` waiting forever;
+2. always hash adopted/changed files, quarantine invalid files, and make status
+   reflect reconciliation failures;
+3. add a filesystem/SQLite intent journal with durable directory sync and
+   startup recovery for every archive/promotion crash point;
+4. scope repair work to explicit selection unless `--reconcile-all` is chosen;
+5. enforce approved HTTPS destinations, safe document/path components, and
+   symlink containment;
+6. preserve a known-good current artifact when a forced refresh fails;
+7. add schema migrations and a uniqueness constraint for one current file per
+   document;
+8. bound retry waits, transfer duration, disk use, and numeric arguments;
+9. separate audit, repair, quarantine, and download modes, then add conditional
+   GET and resumable-download support;
+10. add local HTTP, concurrency, signal, corruption, and crash fault-injection
+    tests.
 
 ## Relationship to downstream document intelligence
 
@@ -617,4 +714,4 @@ document_id + source_sha256 + processor_version
 
 That allows OCR, extraction, chunking, and embeddings to be rerun only when the source bytes or processing logic change.
 
-Previous: [Stage 1 scout](README-regdocs_1_scout.md).
+Previous: [Stage 1 scout](regdocs_1_scout.md).

@@ -1,102 +1,13 @@
 #!/usr/bin/env python3
-"""REGDOCS Stage 2 downloader for the five-table document ledger.
+"""Stage 2: download, validate, hash, and version REGDOCS source files.
 
-PIPELINE
-========
+Syntax::
 
-    1. regdocs_1_scout.py              discover metadata and container members
-    2. regdocs_2_download_v1_1_1.py    download and verify source files  <-- here
-    3. document intelligence           Docling/OCR/vision/models
-    4. export/index                    source file + optional metadata JSON
+    python pipeline/regdocs_2_download.py [options]
+    python pipeline/regdocs_2_download.py --help
 
-This downloader is designed specifically for the scout's five-table SQLite ledger. It creates no additional user tables. Download state is
-stored in the existing five-table ledger:
-
-    documents       current stage status and projected download metadata
-    runs            run history, progress, heartbeat, and counters
-    errors          structured download and reconciliation problems
-    raw_snapshots   unchanged; owned by the scout
-    files           one row per observed file version
-
-DEFAULT POLICY
-==============
-
-* Download records where ``documents.is_file = 1``.
-* Skip known HTML records unless ``--include-html`` is supplied.
-* Never download Folder, Compound Document, or synthetic paper-only rows.
-* Download unknown file kinds and identify them from bytes and HTTP headers.
-* Write current files as ``downloads/<document-id>.<extension>``.
-* Archive replaced versions under ``downloads/_versions/<document-id>/``.
-* Stream to ``downloads/.partial`` and atomically move completed files.
-* Reconcile already-downloaded files before selecting new work.
-* Keep SQLite as the authoritative metadata ledger.
-* Optionally write deterministic ``<document-id>.metadata.json`` sidecars.
-* Generate or refresh sidecars without network access using ``--sidecars-only``.
-* Use one globally paced worker by default, with 3-6 seconds between starts.
-* Retry temporary failures up to four attempts per selected document.
-
-FUTURE ENHANCEMENTS
-===================
-
-* Add a lightweight ``--check-updates`` mode for files already marked
-  ``download_status = SUCCEEDED``. The check should use the stored HTTP
-  validators captured during download (``ETag`` and ``Last-Modified``) and send
-  a conditional GET with ``If-None-Match`` and/or ``If-Modified-Since``. A
-  ``304 Not Modified`` response should count as unchanged without transferring
-  the file body. A ``200 OK`` response should be streamed, validated, and
-  SHA-256 compared with the current file before deciding that a new version
-  exists.
-* Keep SHA-256 as the definitive version identity. HTTP validators are only a
-  cheap change-detection signal and must not replace byte-level verification.
-* Record lightweight-check facts in the existing ``metadata.download`` object
-  (for example ``last_checked_at``, ``remote_check_status``, observed ``etag``
-  and ``last_modified``) rather than adding another SQLite table.
-* When neither ``ETag`` nor ``Last-Modified`` is available, let the fast update
-  scan skip the record by default and provide an optional periodic full
-  revalidation mode that re-downloads and hashes such files. This avoids making
-  routine update scans as expensive as a complete redownload.
-* Consider an optional conditional ``HEAD`` probe only if REGDOCS is shown to
-  return the same reliable validators as GET. Conditional GET should remain the
-  preferred implementation because it uses the normal download endpoint and
-  can return ``304`` with no response body.
-* Add update-scan summary counters such as ``checked``, ``unchanged_304``,
-  ``changed``, ``same_hash_after_200``, ``validators_missing``, and
-  ``check_failed`` so update runs are easy to audit.
-* Keep JSON sidecars as an export projection from SQLite. Future Azure-oriented
-  export work can add a profile that emits only the metadata fields needed by
-  Azure Content Understanding / AI Search while preserving the full SQLite
-  ledger as the authoritative source.
-
-COMMON COMMANDS
-===============
-
-    python regdocs_2_download_v1_1_1.py --dry-run --limit 25
-    python regdocs_2_download_v1_1_1.py --limit 25
-    python regdocs_2_download_v1_1_1.py --document-id 4710492
-    python regdocs_2_download_v1_1_1.py --include-html
-    python regdocs_2_download_v1_1_1.py --retry-failed
-    python regdocs_2_download_v1_1_1.py --verify-existing
-    python regdocs_2_download_v1_1_1.py --sidecars
-    python regdocs_2_download_v1_1_1.py --sidecars-only
-    python regdocs_2_download_v1_1_1.py --status
-    python regdocs_2_download_v1_1_1.py --self-test
-
-DEPENDENCIES
-============
-
-    pip install httpx
-
-Optional progress bars:
-
-    pip install tqdm
-
-EXIT CODES
-==========
-
-    0   completed without final selected-document failures
-    2   completed with one or more selected-document failures
-    1   configuration, database, or fatal runtime error
-    130 interrupted; completed work remains committed
+Operational policy, schemas, recovery, and examples are documented in
+``pipeline/regdocs_2_download.md``.
 """
 
 from __future__ import annotations
@@ -124,10 +35,15 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import unquote, urlparse
 
+import regdocs_paths
+
 try:
     import httpx
 except ImportError as exc:  # pragma: no cover
-    raise SystemExit("Missing dependency 'httpx'. Install with: pip install httpx") from exc
+    raise SystemExit(
+        "Missing dependency 'httpx'. Install with: "
+        "python -m pip install -r pipeline/requirements.txt"
+    ) from exc
 
 try:
     from tqdm import tqdm
@@ -153,9 +69,15 @@ except ImportError:  # pragma: no cover
             return None
 
 
-SCRIPT_VERSION = "1.1.1"
+SCRIPT_VERSION = "1.1.2"
 PARSER_VERSION = "document-ledger-download-2026-08-07-v1.1.1-sidecars-docs"
-EXPECTED_USER_TABLES = {"documents", "runs", "errors", "raw_snapshots", "files"}
+REQUIRED_ACQUISITION_TABLES = {
+    "documents",
+    "runs",
+    "errors",
+    "raw_snapshots",
+    "files",
+}
 RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 HTML_KINDS = {"html document", "html", "web page"}
 HTML_EXTENSIONS = {".html", ".htm", ".xhtml"}
@@ -278,22 +200,6 @@ def user_tables(conn: sqlite3.Connection) -> set[str]:
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         )
     }
-
-
-def stored_path(path: Path, db_path: Path) -> str:
-    """Prefer portable paths relative to the database directory."""
-    resolved = path.resolve()
-    try:
-        return str(resolved.relative_to(db_path.parent.resolve()))
-    except ValueError:
-        return str(resolved)
-
-
-def resolve_stored_path(value: str, db_path: Path) -> Path:
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        path = db_path.parent / path
-    return path.resolve()
 
 
 def configure_logging(verbose: bool, log_path: Path | None = None) -> None:
@@ -566,7 +472,7 @@ class DownloadedFile:
 class LedgerDB:
     def __init__(self, path: Path, *, read_only: bool = False):
         if not path.exists():
-            raise FileNotFoundError(f"Scout database not found: {path}")
+            raise FileNotFoundError(f"Pipeline database not found: {path}")
         self.path = path.resolve()
         if read_only:
             uri = f"file:{self.path.as_posix()}?mode=ro"
@@ -580,18 +486,11 @@ class LedgerDB:
             self.conn.execute("PRAGMA synchronous=NORMAL")
             self.conn.execute("PRAGMA foreign_keys=ON")
         actual = user_tables(self.conn)
-        missing = EXPECTED_USER_TABLES - actual
-        unexpected = actual - EXPECTED_USER_TABLES
+        missing = REQUIRED_ACQUISITION_TABLES - actual
         if missing:
             raise RuntimeError(
-                "Database is not the expected five-table scout ledger; missing: "
+                "Database is missing required acquisition tables: "
                 + ", ".join(sorted(missing))
-            )
-        if unexpected:
-            raise RuntimeError(
-                "Database contains unexpected user tables: "
-                + ", ".join(sorted(unexpected))
-                + ". Use the clean five-table database produced by the scout."
             )
 
     def close(self) -> None:
@@ -935,7 +834,7 @@ class LedgerDB:
         if row:
             self.conn.execute(
                 "UPDATE files SET path=?, is_current=0 WHERE id=?",
-                (stored_path(new_path, self.path), int(row["id"])),
+                (regdocs_paths.stored_path(new_path), int(row["id"])),
             )
             self.conn.commit()
 
@@ -950,7 +849,7 @@ class LedgerDB:
         adopted: bool = False,
     ) -> None:
         now = utc_now()
-        path_value = stored_path(final_path, self.path)
+        path_value = regdocs_paths.stored_path(final_path)
         self.conn.execute(
             "UPDATE files SET is_current=0 WHERE document_id=?",
             (candidate.document_id,),
@@ -1173,7 +1072,12 @@ def existing_candidate_path(
 ) -> Path | None:
     paths: list[Path] = []
     if candidate.file_path:
-        paths.append(resolve_stored_path(candidate.file_path, db_path))
+        paths.append(
+            regdocs_paths.resolve_stored_path(
+                candidate.file_path,
+                legacy_base=db_path.parent,
+            )
+        )
     indexed_path = indexed.get(candidate.document_id)
     if indexed_path:
         paths.append(indexed_path)
@@ -1314,7 +1218,10 @@ def sidecar_destination(
     if sidecar_dir is not None:
         return sidecar_dir / f"{row['id']}{SIDECAR_SUFFIX}"
     stored = first_text(row["current_file_path"]) or first_text(row["document_file_path"])
-    source_path = resolve_stored_path(stored, db_path)
+    source_path = regdocs_paths.resolve_stored_path(
+        stored,
+        legacy_base=db_path.parent,
+    )
     return source_path.with_name(f"{row['id']}{SIDECAR_SUFFIX}")
 
 
@@ -1339,7 +1246,10 @@ def write_sidecars(
         document_id = str(row["id"])
         try:
             stored = first_text(row["current_file_path"]) or first_text(row["document_file_path"])
-            source_path = resolve_stored_path(stored, db_path)
+            source_path = regdocs_paths.resolve_stored_path(
+                stored,
+                legacy_base=db_path.parent,
+            )
             if not source_path.is_file():
                 summary["missing_source_files"] += 1
                 summary["failed"] += 1
@@ -1869,7 +1779,10 @@ def reconcile_existing(
                 )
             actual_hash = sha256_file(path) if verify_existing or not candidate.stored_hash else candidate.stored_hash
             stored_resolved = (
-                resolve_stored_path(candidate.file_path, db.path)
+                regdocs_paths.resolve_stored_path(
+                    candidate.file_path,
+                    legacy_base=db.path.parent,
+                )
                 if candidate.file_path
                 else None
             )
@@ -1921,15 +1834,19 @@ def reconcile_existing(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Download and verify REGDOCS files using the five-table scout ledger.",
+        description="Download and verify REGDOCS files using the pipeline ledger.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--db", default="regdocs.db", help="Scout SQLite database")
+    parser.add_argument(
+        "--db",
+        default=regdocs_paths.stored_path(regdocs_paths.DATABASE_PATH),
+        help="Pipeline SQLite database",
+    )
     parser.add_argument(
         "--downloads",
         "--output-dir",
         dest="downloads",
-        default="downloads",
+        default=regdocs_paths.stored_path(regdocs_paths.DOWNLOAD_FILES_DIR),
         help="Current source-file directory",
     )
     parser.add_argument(
@@ -1973,7 +1890,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--archive-replaced",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Archive replaced versions under downloads/_versions",
+        help="Archive replaced versions under the source-file directory's _versions folder",
     )
     parser.add_argument(
         "--sidecars",
@@ -2000,7 +1917,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=24.0,
         help="Delete stale .partial files older than this",
     )
-    parser.add_argument("--audit-dir", default="_audit", help="Progress, log, and lock directory")
+    parser.add_argument(
+        "--audit-dir",
+        default=regdocs_paths.stored_path(regdocs_paths.DOWNLOAD_RUN_DIR),
+        help="Progress and log directory",
+    )
+    parser.add_argument(
+        "--lock-file",
+        default=regdocs_paths.stored_path(regdocs_paths.DOWNLOAD_LOCK_PATH),
+        help="Exclusive downloader lock file",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Preview selected records without writes")
     parser.add_argument("--status", action="store_true", help="Show latest download run and counts")
     parser.add_argument("--status-json", action="store_true", help="Show latest status as JSON")
@@ -2159,6 +2085,12 @@ def run_self_test() -> None:
         now = utc_now()
         conn = sqlite3.connect(db_path)
         conn.executescript(TEST_SCHEMA_SQL)
+        conn.executescript(
+            """
+            CREATE TABLE analyses (id INTEGER PRIMARY KEY);
+            CREATE TABLE normalizations (id INTEGER PRIMARY KEY);
+            """
+        )
         rows = [
             ("1", "PDF one", "https://apps.cer-rec.gc.ca/REGDOCS/File/Download/1", "PDF Document", 1),
             ("2", "HTML two", "https://apps.cer-rec.gc.ca/REGDOCS/File/Download/2", "Html Document", 1),
@@ -2293,28 +2225,19 @@ def main() -> int:
             run_self_test()
             return 0
 
-        db_path = Path(args.db).expanduser().resolve()
+        db_path = regdocs_paths.resolve_stored_path(args.db)
         if args.status or args.status_json:
             print_status(db_path, as_json=args.status_json)
             return 0
 
-        downloads = Path(args.downloads).expanduser()
-        if not downloads.is_absolute():
-            downloads = db_path.parent / downloads
-        downloads = downloads.resolve()
-        audit_dir = Path(args.audit_dir).expanduser()
-        if not audit_dir.is_absolute():
-            audit_dir = db_path.parent / audit_dir
-        audit_dir = audit_dir.resolve()
+        downloads = regdocs_paths.resolve_stored_path(args.downloads)
+        audit_dir = regdocs_paths.resolve_stored_path(args.audit_dir)
+        lock_path = regdocs_paths.resolve_stored_path(args.lock_file)
         sidecar_dir: Path | None = None
         if args.sidecar_dir:
-            sidecar_dir = Path(args.sidecar_dir).expanduser()
-            if not sidecar_dir.is_absolute():
-                sidecar_dir = db_path.parent / sidecar_dir
-            sidecar_dir = sidecar_dir.resolve()
-        progress_path = audit_dir / "download-progress.json"
-        log_path = audit_dir / "download.log"
-        lock_path = audit_dir / "download.lock"
+            sidecar_dir = regdocs_paths.resolve_stored_path(args.sidecar_dir)
+        progress_path = audit_dir / regdocs_paths.DOWNLOAD_PROGRESS_PATH.name
+        log_path = audit_dir / regdocs_paths.DOWNLOAD_LOG_PATH.name
         configure_logging(args.verbose, None if args.dry_run else log_path)
 
         if args.sidecars_only:
@@ -2392,8 +2315,10 @@ def main() -> int:
                 if html_skipped:
                     db.mark_html_skipped(document_ids=html_skipped)
                 parameters = {
-                    "db": str(db_path),
-                    "downloads": str(downloads),
+                    "db": regdocs_paths.stored_path(db_path),
+                    "downloads": regdocs_paths.stored_path(downloads),
+                    "run_dir": regdocs_paths.stored_path(audit_dir),
+                    "lock_file": regdocs_paths.stored_path(lock_path),
                     "document_ids": list(args.document_id),
                     "limit": args.limit,
                     "include_html": args.include_html,
@@ -2408,7 +2333,9 @@ def main() -> int:
                     "verify_existing": args.verify_existing,
                     "archive_replaced": args.archive_replaced,
                     "write_sidecars": args.write_sidecars,
-                    "sidecar_dir": str(sidecar_dir) if sidecar_dir else None,
+                    "sidecar_dir": (
+                        regdocs_paths.stored_path(sidecar_dir) if sidecar_dir else None
+                    ),
                 }
                 run_id = db.start_run(parameters, len(preselected))
                 reconciliation = {
@@ -2515,7 +2442,7 @@ def main() -> int:
                             """
                         ).fetchone()[0]
                     ),
-                    "downloads_directory": str(downloads),
+                    "downloads_directory": regdocs_paths.stored_path(downloads),
                 }
                 status = (
                     "SUCCEEDED"

@@ -1,133 +1,13 @@
 #!/usr/bin/env python3
-"""Scout file-level metadata from Canada Energy Regulator REGDOCS.
+"""Stage 1: discover REGDOCS metadata and preserve raw source evidence.
 
-PURPOSE
-=======
+Syntax::
 
-This is Stage 1 of a simple document-processing pipeline:
+    python pipeline/regdocs_1_scout.py [options]
+    python pipeline/regdocs_1_scout.py --help
 
-    scout -> download -> document intelligence -> export
-
-The scout answers two questions for every item returned by a REGDOCS date
-search:
-
-1. What metadata does REGDOCS expose without downloading the file?
-2. What is the current pipeline status for that item?
-
-It fetches only:
-
-* the selected date-range search results;
-* the explicit member result fragment loaded by each selected or nested container page;
-* the live Advanced Search facet catalogue and filtered facet result pages;
-* each selected or container-discovered item's own REGDOCS detail page.
-
-Container expansion is deliberately narrow. REGDOCS items explicitly labelled
-``Compound Document`` or ``Folder`` are treated as container shells. The shell explicitly declares the AJAX endpoint that
-loads the filing's result list (for example ``/REGDOCS/Item/LoadResult/<id>``).
-The scout fetches only that declared result fragment, parses its explicit rows,
-adds those stable member IDs to the document ledger, records membership in
-JSON, and queues any explicit child Folder or Compound Document. A seen set,
-maximum depth, and maximum container count make nested traversal loop-safe. It
-does not follow company, project, taxonomy, breadcrumb, navigation, or arbitrary
-outbound links.
-
-The numeric REGDOCS item ID is the stable identity key for normal items. When
-REGDOCS reuses one placeholder ID for several paper-only rows, the scout assigns
-a stable synthetic ID based on the parent container and exhibit number while
-preserving the original numeric value in metadata. If the same normal item is
-found first through a container and later through a date search (or the reverse),
-the existing row is updated rather than duplicated. Download and downstream
-stage state are preserved.
-
-SQLITE DESIGN
-=============
-
-The database is a pipeline ledger, not an application search engine. The scout
-creates only five user tables:
-
-    documents       One row per REGDOCS item, metadata, and stage statuses.
-    runs            Run history, live progress, heartbeat, counters, summary.
-    errors          Structured warnings and errors for every pipeline stage.
-    raw_snapshots   Pointers to compressed REGDOCS source responses.
-    files           Downloaded file facts; empty until the download stage writes them.
-
-All REGDOCS metadata for an item is projected into ``documents.metadata`` as
-JSON. Facets and detail-page fields are arrays/objects inside that JSON instead
-of separate normalized tables. This keeps the database easy to inspect and
-makes later ``document-id.pdf`` + ``document-id.json`` export straightforward.
-
-RAW SOURCE ARCHIVE
-==================
-
-Successful HTML responses are gzip-compressed and stored by SHA-256:
-
-    raw/regdocs/
-      advanced/<prefix>/<sha256>.html.gz
-      search/<prefix>/<sha256>.html.gz
-      facet/<prefix>/<sha256>.html.gz
-      detail/<prefix>/<sha256>.html.gz
-      container/<prefix>/<sha256>.html.gz  # AJAX member-list fragments
-
-Keep this directory with the database. It is the evidence behind the metadata
-and allows parser improvements without losing the original REGDOCS response.
-The database stores relative paths so the database and raw archive can be moved
-together.
-
-DEFAULT GOLD PROFILE
-====================
-
-Running with no arguments uses the production defaults:
-
-    python regdocs_1_scout.py
-
-On a new database it scouts January 1 of the current year through today. Later
-runs normally refresh a seven-day overlap from the newest stored filing date.
-At least every 30 days it refreshes the full current year.
-
-The defaults traverse explicit nested members of Compound Document and Folder items,
-collect all live facets, fetch each selected or container-discovered item's own detail page,
-preserve raw responses, use one globally paced request worker, wait a random
-2-4 seconds between request starts, retry temporary failures four times, and
-reuse successful detail metadata for 30 days.
-
-PROGRESS
-========
-
-During base discovery, progress reports pages checked, estimated page count,
-unique records parsed, failed pages, and the latest result offset. The estimate is
-derived from REGDOCS' approximate total and can grow when a tail probe finds more rows.
-
-Live status is persisted to SQLite and atomically projected to:
-
-    _audit/scout-progress.json
-
-Detailed logs are written to:
-
-    _audit/scout.log
-
-Monitor a running scout from another terminal:
-
-    watch -n 5 'python regdocs_1_scout.py --status'
-
-DEPENDENCIES
-============
-
-    pip install httpx beautifulsoup4 tqdm
-
-Optional faster HTML parser:
-
-    pip install lxml
-
-USEFUL COMMANDS
-===============
-
-    python regdocs_1_scout.py --self-test
-    python regdocs_1_scout.py --show-defaults
-    python regdocs_1_scout.py --status
-    python regdocs_1_scout.py --status-json
-    python regdocs_1_scout.py --audit
-    python regdocs_1_scout.py --start-date 2025-01-01 --end-date 2025-12-31
-    python regdocs_1_scout.py --repair-containers
+Operational policy, schemas, recovery, and examples are documented in
+``pipeline/regdocs_1_scout.md``.
 """
 
 from __future__ import annotations
@@ -154,16 +34,22 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urljoin
 
+import regdocs_paths
+
 try:
     import httpx
 except ImportError as exc:
-    raise SystemExit("Missing dependency 'httpx'. Install with: pip install httpx") from exc
+    raise SystemExit(
+        "Missing dependency 'httpx'. Install with: "
+        "python -m pip install -r pipeline/requirements.txt"
+    ) from exc
 
 try:
     from bs4 import BeautifulSoup, Tag
 except ImportError as exc:
     raise SystemExit(
-        "Missing dependency 'beautifulsoup4'. Install with: pip install beautifulsoup4"
+        "Missing dependency 'beautifulsoup4'. Install with: "
+        "python -m pip install -r pipeline/requirements.txt"
     ) from exc
 
 try:
@@ -182,7 +68,7 @@ except ImportError:
         def update(self, _: int = 1) -> None:
             return None
 
-SCRIPT_VERSION = "1.1.1"
+SCRIPT_VERSION = "1.1.2"
 PARSER_VERSION = "document-ledger-scout-2026-08-07-v1-container-tree-audit-progress"
 SCHEMA_VERSION = 2
 EXPECTED_USER_TABLES = {"documents", "runs", "errors", "raw_snapshots", "files"}
@@ -953,7 +839,7 @@ CREATE INDEX IF NOT EXISTS idx_files_document_current ON files(document_id, is_c
 
 
 class PipelineDB:
-    """Five-table SQLite ledger for metadata, status, runs, errors, and files."""
+    """SQLite ledger with five required base tables and additive stage tables."""
 
     def __init__(self, path: Path):
         self.path = path.resolve()
@@ -967,19 +853,6 @@ class PipelineDB:
         self._install_schema()
 
     def _install_schema(self) -> None:
-        existing = {
-            row[0] for row in self.conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-            )
-        }
-        unexpected = existing - EXPECTED_USER_TABLES
-        if unexpected:
-            raise RuntimeError(
-                "This is not a five-table pipeline-ledger database. "
-                "The scout will not modify it. Back it up, then use a new --db path "
-                "or delete the database, WAL, and SHM files before retrying. "
-                "Unexpected tables: " + ", ".join(sorted(unexpected))
-            )
         self.conn.executescript(SCHEMA_SQL)
         self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.conn.commit()
@@ -988,10 +861,11 @@ class PipelineDB:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        if actual != EXPECTED_USER_TABLES:
+        missing = EXPECTED_USER_TABLES - actual
+        if missing:
             raise RuntimeError(
-                "Schema verification failed. Expected exactly: "
-                + ", ".join(sorted(EXPECTED_USER_TABLES))
+                "Schema verification failed. Missing required base tables: "
+                + ", ".join(sorted(missing))
                 + "; found: " + ", ".join(sorted(actual))
             )
 
@@ -1117,10 +991,7 @@ class PipelineDB:
         stored: StoredRaw,
         response_headers: Mapping[str, str],
     ) -> int:
-        try:
-            relative = stored.path.relative_to(self.path.parent)
-        except ValueError:
-            relative = stored.path
+        persisted_path = regdocs_paths.stored_path(stored.path)
         self.conn.execute(
             """
             INSERT INTO raw_snapshots (
@@ -1136,13 +1007,16 @@ class PipelineDB:
                 fetched_at=excluded.fetched_at,
                 http_status=excluded.http_status,
                 content_type=excluded.content_type,
+                size_bytes=excluded.size_bytes,
+                compressed_size_bytes=excluded.compressed_size_bytes,
+                relative_path=excluded.relative_path,
                 response_headers_json=excluded.response_headers_json,
                 parser_version=excluded.parser_version
             """,
             (
                 run_id, document_id, source_kind, source_url, final_url, fetched_at,
                 http_status, content_type, stored.sha256, stored.size_bytes,
-                stored.compressed_size_bytes, str(relative).replace(os.sep, "/"),
+                stored.compressed_size_bytes, persisted_path.replace(os.sep, "/"),
                 json_dumps(dict(response_headers)), PARSER_VERSION,
             ),
         )
@@ -3183,13 +3057,30 @@ class DocumentScout:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Scout REGDOCS metadata and explicit nested members of Compound Document and Folder items into a five-table SQLite pipeline ledger.",
+        description=("Scout REGDOCS metadata and explicit nested members of Compound Document "
+                     "and Folder items into the SQLite pipeline ledger."),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--db", default="regdocs.db")
-    parser.add_argument("--raw-dir", default="raw/regdocs")
-    parser.add_argument("--progress-file", default="_audit/scout-progress.json")
-    parser.add_argument("--log-file", default="_audit/scout.log")
+    parser.add_argument(
+        "--db", default=regdocs_paths.stored_path(regdocs_paths.DATABASE_PATH),
+        help="SQLite pipeline-ledger path",
+    )
+    parser.add_argument(
+        "--raw-dir", default=regdocs_paths.stored_path(regdocs_paths.SCOUT_RAW_DIR),
+        help="Content-addressed raw REGDOCS archive directory",
+    )
+    parser.add_argument(
+        "--progress-file", default=regdocs_paths.stored_path(regdocs_paths.SCOUT_PROGRESS_PATH),
+        help="Atomic JSON live-progress path",
+    )
+    parser.add_argument(
+        "--log-file", default=regdocs_paths.stored_path(regdocs_paths.SCOUT_LOG_PATH),
+        help="Durable scout log path",
+    )
+    parser.add_argument(
+        "--lock-file", default=regdocs_paths.stored_path(regdocs_paths.SCOUT_LOCK_PATH),
+        help="Exclusive Stage 1 writer-lock path",
+    )
     parser.add_argument("--start-date", help="YYYY-MM-DD")
     parser.add_argument("--end-date", help="YYYY-MM-DD")
     parser.add_argument("--page-size", type=int, choices=PAGE_SIZES, default=200)
@@ -3236,7 +3127,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--show-defaults", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--version", action="store_true", help="Print script identity and exit")
-    parser.add_argument("--check-schema", action="store_true", help="List database tables and verify the five-table schema")
+    parser.add_argument(
+        "--check-schema", action="store_true",
+        help="List database tables and verify the five required base tables",
+    )
     parser.add_argument(
         "--audit", action="store_true",
         help=("Run a read-only ledger audit: SQLite integrity, container counts and "
@@ -3266,11 +3160,6 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--max-retries cannot be negative")
     if args.retry_backoff < 1:
         raise ValueError("--retry-backoff must be at least 1")
-
-
-def resolve_relative_path(value: str | Path, *, base: Path) -> Path:
-    path = Path(value).expanduser()
-    return (base / path).resolve() if not path.is_absolute() else path.resolve()
 
 
 def resolve_gold_dates(db: PipelineDB, start_arg: str | None, end_arg: str | None) -> tuple[str, str, str]:
@@ -3304,7 +3193,15 @@ def resolve_gold_dates(db: PipelineDB, start_arg: str | None, end_arg: str | Non
 
 def default_profile() -> dict[str, Any]:
     return {
-        "database_tables": ["documents", "runs", "errors", "raw_snapshots", "files"],
+        "database_tables": sorted(EXPECTED_USER_TABLES),
+        "database_table_policy": "five required base tables; downstream stage tables are allowed",
+        "paths": {
+            "database": regdocs_paths.stored_path(regdocs_paths.DATABASE_PATH),
+            "raw_snapshots": regdocs_paths.stored_path(regdocs_paths.SCOUT_RAW_DIR),
+            "progress": regdocs_paths.stored_path(regdocs_paths.SCOUT_PROGRESS_PATH),
+            "log": regdocs_paths.stored_path(regdocs_paths.SCOUT_LOG_PATH),
+            "lock": regdocs_paths.stored_path(regdocs_paths.SCOUT_LOCK_PATH),
+        },
         "date_policy": {
             "new_database": "January 1 of current year through today",
             "normal_repeat": "newest stored filing date minus 7 days through today",
@@ -3324,7 +3221,7 @@ def default_profile() -> dict[str, Any]:
         "max_retries": 4,
         "detail_refresh_days": 30,
         "raw_snapshots": True,
-        "audit_command": "python regdocs_1_scout.py --audit",
+        "audit_command": "python pipeline/regdocs_1_scout.py --audit",
     }
 
 
@@ -3430,14 +3327,18 @@ def check_schema(db_path: Path) -> tuple[bool, dict[str, Any]]:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         )
+        table_set = set(tables)
         expected = sorted(EXPECTED_USER_TABLES)
-        return tables == expected, {
+        missing = sorted(EXPECTED_USER_TABLES - table_set)
+        additional = sorted(table_set - EXPECTED_USER_TABLES)
+        return not missing, {
             "database": str(db_path),
             "exists": True,
             "tables": tables,
             "expected_user_tables": expected,
-            "unexpected_tables": sorted(set(tables) - EXPECTED_USER_TABLES),
-            "missing_tables": sorted(EXPECTED_USER_TABLES - set(tables)),
+            "additional_tables": additional,
+            "unexpected_tables": [],
+            "missing_tables": missing,
             "user_version": int(conn.execute("PRAGMA user_version").fetchone()[0]),
         }
     finally:
@@ -3495,15 +3396,17 @@ def audit_database(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        schema_ok = tables == EXPECTED_USER_TABLES
+        schema_ok = EXPECTED_USER_TABLES.issubset(tables)
+        additional_tables = sorted(tables - EXPECTED_USER_TABLES)
         report.update(
             database_tables=sorted(tables),
             schema_ok=schema_ok,
             missing_tables=sorted(EXPECTED_USER_TABLES - tables),
-            unexpected_tables=sorted(tables - EXPECTED_USER_TABLES),
+            additional_tables=additional_tables,
+            unexpected_tables=[],
         )
         if not schema_ok:
-            add_issue("database tables do not match the five-table ledger schema")
+            add_issue("database is missing one or more required base ledger tables")
             return False, report
 
         quick_check_rows = [str(row[0]) for row in conn.execute("PRAGMA quick_check")]
@@ -3743,8 +3646,9 @@ def audit_database(
                 if row is None:
                     continue
                 raw_snapshots_checked += 1
-                relative = Path(clean_text(row["relative_path"]))
-                raw_path = relative if relative.is_absolute() else db_path.parent / relative
+                raw_path = regdocs_paths.resolve_stored_path(
+                    clean_text(row["relative_path"]), legacy_base=db_path.parent
+                )
                 key = (
                     str(raw_path), clean_text(row["content_sha256"]),
                     int(row["size_bytes"]), int(row["compressed_size_bytes"]),
@@ -3899,12 +3803,26 @@ def run_self_test() -> int:
     detail = parse_detail_page(detail_html, "123", DETAIL_URL_TEMPLATE.format(item_id="123"))
     assert detail.title == "Example Application"
     assert detail.fields["Filing Number"] == ["C40283"]
+    assert regdocs_paths.stored_path(regdocs_paths.SCOUT_RAW_DIR / "detail") == (
+        "workspace/1_scout/raw/regdocs/detail"
+    )
     with tempfile.TemporaryDirectory() as folder:
         root = Path(folder)
-        db = PipelineDB(root / "test.sqlite3")
+        assert regdocs_paths.resolve_stored_path(
+            "raw/regdocs/example.html.gz", legacy_base=root
+        ) == (root / "raw/regdocs/example.html.gz").resolve()
+        test_db_path = root / "test.sqlite3"
+        with sqlite3.connect(test_db_path) as seed_conn:
+            seed_conn.execute("CREATE TABLE analyses (id INTEGER PRIMARY KEY)")
+            seed_conn.execute("CREATE TABLE normalizations (id INTEGER PRIMARY KEY)")
+        db = PipelineDB(test_db_path)
         try:
             tables = {row[0] for row in db.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-            assert tables == {"documents", "runs", "errors", "raw_snapshots", "files"}
+            assert EXPECTED_USER_TABLES.issubset(tables)
+            assert {"analyses", "normalizations"}.issubset(tables)
+            schema_ok, schema_report = check_schema(db.path)
+            assert schema_ok, schema_report
+            assert schema_report["additional_tables"] == ["analyses", "normalizations"]
             run_id = db.start_run({"self_test": True})
             progress = ProgressMonitor(db=db, run_id=run_id, progress_file=root / "progress.json", database_path=db.path, persist_interval=0.0)
             record = rows[0]
@@ -4038,11 +3956,19 @@ def run_self_test() -> int:
             assert (root / "progress.json").exists()
         finally:
             db.close()
-    print("Self-test passed: five-table schema, container AJAX discovery, paper-only synthetic identity, explicit empty membership, bidirectional membership audit, metadata/status preservation, raw snapshots, errors, page-count progress, and progress persistence.")
+    print("Self-test passed: five required base tables with additive downstream tables, shared and legacy path resolution, container AJAX discovery, paper-only synthetic identity, explicit empty membership, bidirectional membership audit, metadata/status preservation, raw snapshots, errors, page-count progress, and progress persistence.")
     return 0
 
 
-async def async_main(args: argparse.Namespace, *, db_path: Path, raw_dir: Path, progress_file: Path, log_file: Path) -> int:
+async def async_main(
+    args: argparse.Namespace,
+    *,
+    db_path: Path,
+    raw_dir: Path,
+    progress_file: Path,
+    log_file: Path,
+    lock_file: Path,
+) -> int:
     db = PipelineDB(db_path)
     if args.repair_containers:
         start_date = end_date = date.today().isoformat()
@@ -4071,8 +3997,12 @@ async def async_main(args: argparse.Namespace, *, db_path: Path, raw_dir: Path, 
         raise ValueError("--start-date must not be after --end-date")
     parameters = asdict(config)
     parameters.update(
-        db_path=str(db_path), raw_dir=str(raw_dir), progress_file=str(progress_file),
-        log_file=str(log_file), requested_start_date=args.start_date,
+        db_path=regdocs_paths.stored_path(db_path),
+        raw_dir=regdocs_paths.stored_path(raw_dir),
+        progress_file=regdocs_paths.stored_path(progress_file),
+        log_file=regdocs_paths.stored_path(log_file),
+        lock_file=regdocs_paths.stored_path(lock_file),
+        requested_start_date=args.start_date,
         requested_end_date=args.end_date,
     )
     run_id = db.start_run(parameters)
@@ -4116,8 +4046,12 @@ async def async_main(args: argparse.Namespace, *, db_path: Path, raw_dir: Path, 
             summary.get("container_nested_relationships_total", 0),
         )
         summary.update(
-            elapsed_seconds=round(time.monotonic() - started, 2), database=str(db_path),
-            raw_directory=str(raw_dir), progress_file=str(progress_file), log_file=str(log_file),
+            elapsed_seconds=round(time.monotonic() - started, 2),
+            database=regdocs_paths.stored_path(db_path),
+            raw_directory=regdocs_paths.stored_path(raw_dir),
+            progress_file=regdocs_paths.stored_path(progress_file),
+            log_file=regdocs_paths.stored_path(log_file),
+            lock_file=regdocs_paths.stored_path(lock_file),
             start_date=None if config.repair_containers else start_date,
             end_date=None if config.repair_containers else end_date,
             date_mode=date_mode,
@@ -4180,10 +4114,13 @@ def main() -> int:
     args = build_parser().parse_args()
     try:
         validate_args(args)
-        db_path = Path(args.db).expanduser().resolve()
-        raw_dir = resolve_relative_path(args.raw_dir, base=db_path.parent)
-        progress_file = resolve_relative_path(args.progress_file, base=db_path.parent)
-        log_file = resolve_relative_path(args.log_file, base=db_path.parent)
+        db_path = regdocs_paths.resolve_stored_path(args.db)
+        raw_dir = regdocs_paths.resolve_stored_path(args.raw_dir, legacy_base=db_path.parent)
+        progress_file = regdocs_paths.resolve_stored_path(
+            args.progress_file, legacy_base=db_path.parent
+        )
+        log_file = regdocs_paths.resolve_stored_path(args.log_file, legacy_base=db_path.parent)
+        lock_file = regdocs_paths.resolve_stored_path(args.lock_file, legacy_base=db_path.parent)
         if args.version:
             print(json_dumps(script_identity(), pretty=True))
             return 0
@@ -4214,8 +4151,17 @@ def main() -> int:
             "Scout %s | script=%s | sha256=%s | database=%s",
             identity["script_version"], identity["script"], identity["sha256"][:12], db_path,
         )
-        with StageLock(db_path.with_suffix(db_path.suffix + ".scout.lock"), force=args.force_lock):
-            return asyncio.run(async_main(args, db_path=db_path, raw_dir=raw_dir, progress_file=progress_file, log_file=log_file))
+        with StageLock(lock_file, force=args.force_lock):
+            return asyncio.run(
+                async_main(
+                    args,
+                    db_path=db_path,
+                    raw_dir=raw_dir,
+                    progress_file=progress_file,
+                    log_file=log_file,
+                    lock_file=lock_file,
+                )
+            )
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
@@ -4225,4 +4171,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

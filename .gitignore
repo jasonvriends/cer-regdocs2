@@ -1,16 +1,13 @@
-# REGDOCS generated/runtime state
-/regdocs.db
-/regdocs.db-wal
-/regdocs.db-shm
-/regdocs.db-journal
-/regdocs.db-scout.lock
-/raw/
-/downloads/
-/analysis/
-/_audit/
+# REGDOCS database and persistent operational workspace
+/database/
+/workspace/
 
 .env
 
 # Ignore virtual environment folders
 .venv/
 venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
