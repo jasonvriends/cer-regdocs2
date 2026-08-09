@@ -8,7 +8,7 @@ The public command is a **single-threaded crash-resilient supervisor**. It
 launches exactly one short-lived child process per document through
 `regdocs_3_azure_worker.py`.
 
-Script version documented: **3.7.0**.
+Script version documented: **3.7.1**.
 
 ## Run ownership
 
@@ -84,19 +84,23 @@ Analyze every remaining eligible current document:
 python pipeline/regdocs_3_azure.py --all
 ```
 
-Normal progress is intentionally compact:
+Normal progress is intentionally compact. The left-hand progress index is
+zero-padded to the width of the selected total so long runs stay visually
+aligned. Successful lines retain the useful extraction summary while worker
+chatter remains hidden:
 
 ```text
-Run 42: Azure supervisor 3.7.0; 4070 document(s) selected
+Run 42: Azure supervisor 3.7.1; 4070 document(s) selected
 Concurrency:       1 child process
 Azure retries:     disabled
 Retry boundary:    next normal Stage 3 Azure rerun
 
-[1/4070] 4659390 ... SUCCEEDED pages=60
-[2/4070] 4659392 ... SUCCEEDED pages=2
-[3/4070] 4659394 ... SUCCEEDED pages=1
+[0001/4070] 4659390 ... SUCCEEDED pages=60 tables=2 sections=1 elapsed=15.5s
+[0002/4070] 4659392 ... SUCCEEDED pages=2 tables=0 sections=1 elapsed=3.9s
+[0003/4070] 4659394 ... SUCCEEDED pages=1 tables=1 sections=5 elapsed=3.9s
 ```
 
+For a 100-document selection, the same convention begins with `[001/100]`.
 Worker stdout/stderr is captured on normal successes. Detailed worker diagnostics
 are surfaced when a document fails, crashes, or has a configuration error.
 
