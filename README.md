@@ -4,7 +4,7 @@ REGDOCS Atlas is a proof-of-concept pipeline for collecting public Canada Energy
 
 Everything in this repository is POC work until explicitly declared otherwise. The project version stays at **0.0.1** until it is intentionally changed.
 
-For the complete CLI syntax, every public switch, safety labels, and examples, see **[SYNTAX.md](SYNTAX.md)**.
+For the complete CLI syntax, every public switch, Azure environment variables, safety labels, and examples, see **[SYNTAX.md](SYNTAX.md)**.
 
 ## Preserve the durable workspace
 
@@ -45,12 +45,29 @@ The current corpus has been side-by-side rebuilt and compared successfully throu
 ├── regdocs_atlas/           all application code
 ├── requirements.txt         one Python dependency set
 ├── README.md                architecture / POC operating rules
-├── SYNTAX.md                complete command and switch reference
+├── SYNTAX.md                complete command, ENV, and switch reference
 ├── RELEASE_NOTES.md         consolidated 0.0.1 POC baseline
 ├── VERSION                  stays 0.0.1 until explicitly changed
 ├── database/                ignored local ledger/backups
 └── workspace/               ignored durable artifacts
 ```
+
+Inside `regdocs_atlas/`, the split is intentional:
+
+```text
+regdocs_atlas/
+├── cli.py, paths.py, version.py, costs.py   shared application infrastructure
+├── db/                                      SQLite schema/migrations/ledger helpers
+├── runtime/                                 locks, atomic I/O, presentation helpers
+├── artifacts/                               artifact inventory/recovery planning
+├── stages/                                  executable Stage 1-5 implementations/workers
+├── scout_*.py                               Scout manifests/coverage/recovery helpers
+├── analysis_manifests.py                    Stage 3 durable analysis ledger export
+├── rebuild*.py, flatten.py                  disk -> SQLite recovery/flattening
+└── ...                                      other cross-stage orchestration helpers
+```
+
+`stages/` is therefore for code that **executes a pipeline stage**. Files at the package root are shared infrastructure or recovery/provenance logic used across stage boundaries. A Scout-specific recovery helper can live at the package root because it is part of the recovery system, not the normal Stage 1 crawler process.
 
 There is no second `pipeline/` implementation tree and no compatibility-launcher layer. `pipeline.py` launches the packaged stage implementations while retaining subprocess isolation for long-running/crash-prone work.
 
@@ -60,6 +77,21 @@ There is no second `pipeline/` implementation tree and no compatibility-launcher
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
+```
+
+Azure configuration is documented in [SYNTAX.md](SYNTAX.md#azure-environment-variables). The pipeline reads the process environment directly; it does not automatically load a `.env` file.
+
+## Versioning during the POC
+
+`VERSION` is the only project/release version and remains `0.0.1` until explicitly changed.
+
+Do not confuse that with compatibility identities embedded in durable artifacts. Values such as Scout/Download parser identities, Azure analyzer/API identity, Docling projection identity, and Normalize parser/config identity must remain specific enough to tell whether an existing artifact is compatible with current code. Those identities should not be reset merely to make display versions look uniform.
+
+The public CLI always reports the project version:
+
+```bash
+python pipeline.py version
+# 0.0.1
 ```
 
 ## CLI safety model
@@ -178,7 +210,9 @@ Only this explicit action permits billable Stage 3 work:
 python pipeline.py analyze azure run --all
 ```
 
-The analyzer uses current source SHA identity plus successful analysis state/artifacts to avoid unnecessarily resubmitting work. Azure rates remain configurable via environment variables and can be inspected with:
+The analyzer uses current source SHA identity plus successful analysis state/artifacts to avoid unnecessarily resubmitting work. Azure endpoints, authentication, API/analyzer defaults, Azure AI Search settings, and optional cost-rate variables are documented in [SYNTAX.md](SYNTAX.md#azure-environment-variables).
+
+Azure rates remain configurable via environment variables and can be inspected with:
 
 ```bash
 python pipeline.py cost rates
@@ -187,8 +221,8 @@ python pipeline.py cost azure
 
 ## Documentation roles
 
-- `README.md` — architecture, recovery boundary, POC operating rules.
-- `SYNTAX.md` — authoritative public CLI syntax, switches, safety labels, and examples.
+- `README.md` — architecture, package layout, recovery boundary, POC operating rules.
+- `SYNTAX.md` — authoritative public CLI syntax, environment variables, switches, safety labels, and examples.
 - `RELEASE_NOTES.md` — one consolidated description of the current `0.0.1` POC, not a history of internal iteration.
 
 No additional docs/roadmap tree is needed unless the project stops being a POC.
