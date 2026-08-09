@@ -12,6 +12,7 @@ from typing import Sequence
 from .artifacts import inventory as artifact_inventory
 from .artifacts import recovery_plan
 from .db import migrate, migration_status, open_ledger, verify_schema
+from .db.connection import table_exists
 from .paths import DATABASE_PATH, PIPELINE_DIR, PROJECT_ROOT
 from .version import release_version
 
@@ -94,9 +95,7 @@ def _db_command(args: Sequence[str]) -> int:
         if action == "status":
             result = migration_status(con)
             result["database"] = str(db_path)
-            if "pipeline_metadata" in {
-                str(row[0]) for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-            }:
+            if table_exists(con, "pipeline_metadata"):
                 row = con.execute(
                     "SELECT value, updated_at FROM pipeline_metadata WHERE key='release_version'"
                 ).fetchone()
@@ -130,16 +129,19 @@ def _status() -> int:
                 "migrations": migration_status(con),
                 "schema": verify_schema(con),
             }
-            columns = {str(row[1]) for row in con.execute("PRAGMA table_info(runs)").fetchall()}
-            release_expr = "release_version" if "release_version" in columns else "NULL AS release_version"
-            rows = con.execute(
-                f"""
-                SELECT id, stage, status, started_at, finished_at,
-                       {release_expr}, progress_message
-                FROM runs ORDER BY id DESC LIMIT 10
-                """
-            ).fetchall()
-            result["recent_runs"] = [dict(row) for row in rows]
+            if table_exists(con, "runs"):
+                columns = {str(row[1]) for row in con.execute("PRAGMA table_info(runs)").fetchall()}
+                release_expr = "release_version" if "release_version" in columns else "NULL AS release_version"
+                rows = con.execute(
+                    f"""
+                    SELECT id, stage, status, started_at, finished_at,
+                           {release_expr}, progress_message
+                    FROM runs ORDER BY id DESC LIMIT 10
+                    """
+                ).fetchall()
+                result["recent_runs"] = [dict(row) for row in rows]
+            else:
+                result["recent_runs"] = []
         finally:
             con.close()
     else:
