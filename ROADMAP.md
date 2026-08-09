@@ -335,6 +335,84 @@ The interface may start with Azure Search Explorer, the Stage 5 CLI, a notebook,
 or a lightweight web application. The research workflow should determine the
 UI rather than the reverse.
 
+#### Phase 1 Atlas web application direction
+
+Build the first user-facing Atlas surface as a thin Azure-hosted research
+workbench rather than adopting a generic chatbot shell.
+
+Target Phase 1 architecture:
+
+```text
+Browser
+   |
+   v
+Azure App Service
+Next.js + TypeScript
+   |
+   +--> Azure AI Search       search, filters, ranked evidence
+   +--> Azure Blob Storage    original source files / viewer assets
+   +--> Stage 4 provenance    page, chunk, region, polygon resolution
+   +--> conversational layer  Copilot Studio experiment or custom Foundry path
+```
+
+Phase 1 should deliberately have no application login, user database, saved
+conversations, or per-user research state. Keep the application boundary ready
+for Microsoft Entra ID SSO later, when identity-backed features such as saved
+searches, research projects, evidence baskets, annotations, conversation
+history, sharing, and alerts provide a reason to authenticate users.
+
+Use one full-stack Next.js/TypeScript deployment on Azure App Service where
+practical. Prefer server-side route handlers for search, document, provenance,
+and conversational endpoints rather than introducing a separate FastAPI service
+before a separate backend is operationally justified. Use managed identities
+for service-to-service Azure access wherever supported instead of application
+secrets or search keys.
+
+The Phase 1 interaction loop is:
+
+1. search or ask a regulatory question;
+2. retrieve ranked Atlas chunks with metadata and page identity;
+3. show conventional search results and/or a grounded answer;
+4. open the exact original document page; and
+5. resolve the selected result or citation through Stage 4 provenance to visibly
+   highlight the supporting source region.
+
+The document/evidence surface should render original PDFs/files rather than
+reconstructing an HTML facsimile in the first prototype. Overlay normalized
+page/polygon provenance on the rendered source page. Keep a normalized clean
+text/table view as a possible later complementary view, not the evidentiary
+source of truth.
+
+Evaluate reusable React components before building viewer/chat primitives from
+scratch. The current candidates are shadcn/ui for general interface components,
+Extend UI or a PDF.js-based implementation for document/evidence viewing and
+region overlays, and either a custom React chat surface such as assistant-ui or
+an embedded/custom-canvas Copilot Studio agent for conversational interaction.
+The choice of conversational implementation must not weaken Atlas citation
+identity or bypass the Stage 4 provenance resolver.
+
+Run a small Copilot Studio proof before committing to a custom Foundry chat
+stack. Specifically test an Atlas Azure AI Search index as Copilot Studio
+knowledge, citation URL behavior, query quality, controllability of retrieval,
+embedding into the custom Atlas web application, and whether a returned
+citation can carry enough Atlas identity to open the exact document/page/region.
+Use Blob Storage primarily for source-document delivery and provenance-backed
+viewer assets; do not create a second independently chunked Copilot knowledge
+corpus from the blobs unless it materially outperforms or simplifies the
+existing Stage 4 -> Stage 5 retrieval path.
+
+Exit criteria for the Phase 1 application:
+
+- keyword/filter search works against the published Atlas index;
+- search results open source documents at the correct page;
+- Stage 4 provenance can visibly highlight exact supporting regions;
+- the application can run as one Azure-hosted deployment without user login;
+- the conversational proof returns grounded answers with clickable citations;
+- Copilot Studio versus custom Foundry/chat implementation is selected based on
+  measured citation/retrieval fit rather than assumed framework preference; and
+- the application architecture can add Entra ID later without redesigning the
+  retrieval or evidence contracts.
+
 Exit condition:
 
 - a researcher can find a proceeding, understand its structure and chronology,
@@ -446,6 +524,10 @@ The prototype succeeds when reviewers can see that:
     corpus-health/retrieval report.
 12. Validate dossier, timeline, inspection, evidence-selection, and comparison
     workflows on the reference corpus.
+13. Build the thin Phase 1 Atlas web application and validate search -> source ->
+    page/region highlight before adding broader product features.
+14. Run a Copilot Studio proof against the Atlas Azure AI Search index and
+    compare its grounded citation behavior with a custom Foundry/chat path.
 
 ## Decision log
 
@@ -466,6 +548,9 @@ The prototype succeeds when reviewers can see that:
 | 2026-08-08 | Keep the Docling corpus supervisor strictly single-threaded with one document per child process | Limits resource contention while allowing crashes or native-library faults to be isolated and resumed durably |
 | 2026-08-08 | Make future canonical analyzer choice explicit per source-file version rather than inferred | Enables auditable mixed-provider normalized generations and avoids accidental selection based on artifact timing or availability |
 | 2026-08-08 | Require measured comparison before adding automatic `best` analyzer routing | Prevents heuristics or vendor assumptions from silently determining the authoritative normalized corpus |
+| 2026-08-08 | Prototype Atlas as one no-login Next.js application on Azure App Service, with Entra ID deferred until identity-backed features exist | Minimizes Phase 1 infrastructure while preserving a straightforward path to enterprise SSO |
+| 2026-08-08 | Keep original source documents plus Stage 4 page/polygon provenance as the Phase 1 evidence-viewing contract | Lets search and conversational citations resolve to exact visible evidence without reconstructing a competing document representation |
+| 2026-08-08 | Evaluate Copilot Studio against a custom Foundry/chat implementation before selecting the Phase 1 conversational layer | Copilot Studio can consume Azure AI Search directly, but Atlas-specific retrieval control and exact provenance navigation must be validated |
 
 ## Open questions
 
@@ -478,8 +563,11 @@ The prototype succeeds when reviewers can see that:
   advantage to justify automatic routing?
 - What retrieval evaluation set and success metrics should gate semantic and
   hybrid search?
-- Which user-facing surface should follow Search Explorer/CLI: a custom web UI,
-  a Microsoft sample adapted to REGDOCS, or another lightweight research tool?
+- Does Copilot Studio preserve enough Atlas search-result identity and citation
+  control to drive exact page/region navigation, or should the conversational
+  layer call Atlas retrieval through a custom Foundry/chat implementation?
+- Should the Phase 1 evidence viewer use Extend UI, PDF.js with a custom SVG
+  provenance overlay, or a combination after a focused technical spike?
 - What citation accuracy and completeness should gate generated briefs?
 - Which enrichment schema should represent commitments, conditions,
   organizations, legal references, and relationships?
