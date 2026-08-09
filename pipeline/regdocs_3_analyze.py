@@ -92,6 +92,32 @@ def safe_path_component(value: str) -> str:
     return cleaned or "unknown"
 
 
+def _read_lock_pid(path: Path) -> Optional[int]:
+    """Return a valid PID from a Stage 3 lock, or None when its state is uncertain."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    pid = payload.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    return pid
+
+
+def _pid_is_running(pid: int) -> bool:
+    """Return False only when the OS positively reports that *pid* does not exist."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        # Permission or another OS-level ambiguity is not enough evidence to delete a lock.
+        return True
+    return True
+
+
 class StageLock:
     """Exclusive lock preventing concurrent billable Stage 3 workers."""
 
@@ -104,6 +130,19 @@ class StageLock:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.force and self.path.exists():
             self.path.unlink()
+        elif self.path.exists():
+            existing_pid = _read_lock_pid(self.path)
+            if existing_pid is not None and not _pid_is_running(existing_pid):
+                try:
+                    self.path.unlink()
+                except FileNotFoundError:
+                    pass
+                else:
+                    print(
+                        f"Removing stale analyze lock: {self.path} "
+                        f"(PID {existing_pid} is not running).",
+                        file=sys.stderr,
+                    )
         payload = {"pid": os.getpid(), "created_at": utcnow()}
         try:
             fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -896,7 +935,6 @@ def detect_mime(path: Path, candidate: Candidate) -> str:
         return candidate.mime_type.split(";", 1)[0].strip()
     guessed, _ = mimetypes.guess_type(path.name)
     return guessed or "application/octet-stream"
-
 
 def upsert_analysis_start(
     con: sqlite3.Connection,
