@@ -1,49 +1,66 @@
 # `regdocs_3_azure.py`
 
-Stage 3 Azure provider for REGDOCS. It analyzes verified Stage 2 files with Azure
-AI Content Understanding while preserving raw JSON, Markdown, ledger provenance,
-and durable crash state.
+Stage 3 Azure provider for REGDOCS: analyze verified current Stage 2 files with
+Azure AI Content Understanding while preserving raw layout JSON, Markdown,
+ledger provenance, and crash-recovery state.
 
 The public command is a **single-threaded crash-resilient supervisor**. It
 launches exactly one short-lived child process per document through
 `regdocs_3_azure_worker.py`.
 
-Script version documented: **3.6.2**.
+Script version documented: **3.7.0**.
 
-## Files
+## Run ownership
 
-The Azure provider intentionally consists of only:
+One public supervisor invocation equals one row in the SQLite `runs` table.
+Workers are isolated execution units, not pipeline runs.
 
 ```text
-regdocs_3_azure.py          public durable supervisor
-regdocs_3_azure_worker.py   one-document Azure worker
-regdocs_3_azure.md          runbook
+python regdocs_3_azure.py --all
+        |
+        v
+Run 42  provider=azure
+        |
+        +--> document A worker --> analyses.run_id = 42
+        +--> document B worker --> analyses.run_id = 42
+        +--> document C worker --> analyses.run_id = 42
+        `--> ...
 ```
+
+The supervisor creates and finishes Run 42 and maintains its heartbeat, progress,
+summary, and final status. The child worker is bound to that parent run and does
+not allocate or finish another `runs` row during normal public execution.
+
+If the supervisor is interrupted, that run is recorded as `INTERRUPTED`. A later
+normal invocation creates a new run and skips already committed successful
+analysis identities.
 
 ## Cost-safe retry policy
 
-Azure retries are intentionally disabled because another submission may be
+Azure retries are intentionally conservative because another submission may be
 billable.
 
 ```text
 worker launches per document per run = 1
-application-level submissions per request/range = 1
+application-level Azure submission attempts per request/range = 1
 Azure SDK transport retries = 0
 automatic same-run retries = 0
 concurrency = 1
 ```
 
 A handled Azure failure, segmentation fault, OOM kill, or other worker crash is
-recorded and the supervisor advances to the next document. The failed document
-is not relaunched during the same run.
+recorded and the supervisor immediately advances to the next selected document.
+It does **not** relaunch that document during the same run.
 
-A later normal Azure Stage 3 invocation is the retry boundary. Intact
-`SUCCEEDED` analyses are skipped, while failed/crashed identities remain
-eligible.
+A later normal Azure Stage 3 invocation is the retry boundary. Failed/crashed
+analysis identities remain eligible because only intact `SUCCEEDED` identities
+are skipped.
+
+There is no Azure quarantine/retry queue.
 
 ## Normal commands
 
-Preview without Azure calls:
+Preview a bounded selection without Azure calls:
 
 ```bash
 python pipeline/regdocs_3_azure.py --dry-run --limit 10
@@ -61,26 +78,16 @@ Analyze a bounded batch:
 python pipeline/regdocs_3_azure.py --limit 1000
 ```
 
-Analyze every remaining eligible document:
+Analyze every remaining eligible current document:
 
 ```bash
 python pipeline/regdocs_3_azure.py --all
 ```
 
-To retry failures, run the normal command again. No special retry flag is
-required.
-
-## Console output
-
-The supervisor prints the selected count once and then one progress line per
-document. It does **not** dump the full selected ID list before processing.
-Normal successful child output is captured so the worker's internal run banner,
-endpoint, artifact paths, and `[1/1]` progress do not duplicate the supervisor.
-
-Typical output:
+Normal progress is intentionally compact:
 
 ```text
-Azure supervisor 3.6.2: 4070 document(s) selected
+Run 42: Azure supervisor 3.7.0; 4070 document(s) selected
 Concurrency:       1 child process
 Azure retries:     disabled
 Retry boundary:    next normal Stage 3 Azure rerun
@@ -90,8 +97,8 @@ Retry boundary:    next normal Stage 3 Azure rerun
 [3/4070] 4659394 ... SUCCEEDED pages=1
 ```
 
-If a worker fails or crashes, its captured stdout/stderr is printed as diagnostic
-context for that document.
+Worker stdout/stderr is captured on normal successes. Detailed worker diagnostics
+are surfaced when a document fails, crashes, or has a configuration error.
 
 ## Durable supervisor state
 
@@ -101,26 +108,24 @@ Default state file:
 workspace/3_analyze/content-understanding/supervisor-state.json
 ```
 
-It records processing identity, cumulative worker launches, last exit
-code/signal, timestamps, last run status, and cumulative crash count. The state
-file is written atomically through a `.partial` file.
-
-The state is diagnostic. It does not quarantine Azure failures across refresh
-runs.
+The state file records process-level history such as cumulative worker launches,
+last exit code/signal, timestamps, crash count, and the last parent pipeline run
+ID. It is diagnostic state; SQLite analysis identity and canonical artifacts
+determine whether a document is complete.
 
 ## Locking
 
-The supervisor owns:
+The supervisor owns the normal Stage 3 lock for the full run:
 
 ```text
 database/locks/3_analyze.lock
 ```
 
-for the full run. Each short-lived worker receives a derived worker lock. Stale
-PID detection removes locks whose owning process is no longer running.
+A worker receives a derived short-lived worker lock. Stale PID detection lets a
+later worker clean up a lock left by a crashed child.
 
-Do not use `--force-lock` unless you have independently confirmed no live Stage
-3 Azure process owns the lock.
+Do not use `--force-lock` unless you have independently confirmed that no live
+Stage 3 Azure process owns the lock.
 
 ## Azure configuration
 
@@ -138,33 +143,22 @@ export CONTENTUNDERSTANDING_ENDPOINT="https://<resource>.services.ai.azure.com"
 export CONTENTUNDERSTANDING_KEY="<key>"
 ```
 
-Do not place the key directly on the command line.
-
-Supported public settings include:
-
-| Variable | Purpose |
-|---|---|
-| `CONTENTUNDERSTANDING_ENDPOINT` | Azure resource endpoint |
-| `CONTENTUNDERSTANDING_KEY` | Optional API key |
-| `CONTENTUNDERSTANDING_API_VERSION` | API version override |
-| `CONTENTUNDERSTANDING_ANALYZER_ID` | Analyzer override |
-| `CONTENTUNDERSTANDING_POLLING_INTERVAL` | long-running-operation polling interval |
-
-The public supervisor ignores inherited retry-attempt overrides and always gives
-the worker `--max-attempts 1`. The worker also disables Azure SDK transport
-retries with `retry_total=0`, `retry_connect=0`, `retry_read=0`, and
-`retry_status=0`.
+The public supervisor ignores `CONTENTUNDERSTANDING_MAX_ATTEMPTS` and invokes the
+worker with one application-level submission attempt. The worker also constructs
+the Azure client with SDK transport retries disabled.
 
 ## Candidate identity
 
-Successful analysis identity is:
+Successful Azure analysis identity is:
 
 ```text
 file_id + file_sha256 + analyzer_id + api_version
 ```
 
-Unless `--force` is supplied, intact canonical successes are skipped. Stale
-artifacts can be reconciled locally when possible without another Azure call.
+Unless `--force` is supplied, intact canonical successes are skipped. A failed
+or crashed identity remains eligible on the next normal run. A stale or legacy
+success can be reconciled from matching local artifacts without another Azure
+call when possible.
 
 ## Artifacts
 
@@ -174,56 +168,51 @@ Default root:
 workspace/3_analyze/content-understanding/
 ```
 
-Canonical outputs are:
+Canonical outputs are keyed by analyzer, API version, document ID, and source
+SHA-256:
 
 ```text
-raw/<analyzer>/<api-version>/<document-id>/<sha256>.json
-markdown/<analyzer>/<api-version>/<document-id>/<sha256>.md
+workspace/3_analyze/content-understanding/
+├── raw/<analyzer>/<api-version>/<document-id>/<sha256>.json
+└── markdown/<analyzer>/<api-version>/<document-id>/<sha256>.md
 ```
 
 ## Large PDFs and Content-Range recovery
 
-PDFs over 300 pages are submitted as inclusive page ranges of at most 300 pages.
-The original PDF is not physically split.
+PDFs over 300 pages are analyzed through inclusive Azure `content_range`
+requests of at most 300 pages each. The original source PDF is not physically
+split.
 
-For a 986-page PDF:
+Every successful range is committed immediately under a `.parts/` directory.
+If a later range fails or the worker crashes, that document is not retried in
+the same run. On a later refresh, valid completed range artifacts can be reused
+without resubmitting those successful ranges.
 
-```text
-1-300
-301-600
-601-900
-901-986
-```
+`--force` and `--no-reconcile-artifacts` disable normal range-part reuse. Do not
+use `--force` merely to resume interrupted work.
 
-Every successful range is saved immediately below the canonical raw artifact's
-`.parts/` directory. If a later range fails or the worker crashes, the next
-normal refresh can reuse completed range artifacts and submit only unfinished
-ranges.
+## Remaining billing ambiguity
 
-`--force` and `--no-reconcile-artifacts` bypass this recovery and can cause
-unnecessary resubmission.
-
-## Remaining crash/billing ambiguity
-
-If Azure accepts a billable operation and the worker crashes before that
-operation ID/result is durably recorded, the next refresh cannot yet resume the
-accepted operation. A later run may therefore submit that document/range again.
-
-The next durability improvement is immediate accepted-operation-ID persistence
-and polling resume.
+If Azure accepts a billable operation and the worker dies before the operation
+ID/result is durably recorded, a later refresh cannot yet resume that accepted
+operation by ID. A future durability upgrade should persist accepted operation
+IDs immediately and resume polling rather than resubmitting uncertain work.
 
 ## Provider boundary
 
-The local Stage 3 alternative is:
+The local alternative is:
 
 ```text
 regdocs_3_docling.py
 regdocs_3_docling_worker.py
 ```
 
-Docling can use a different retry/quarantine policy because it does not create
-the same Azure per-submission billing risk.
+Both Stage 3 supervisors use the same run-ownership rule: **one public supervisor
+invocation equals one pipeline run**. Their retry policies differ because Azure
+has per-submission billing risk while Docling is local.
 
 Previous: [Stage 2 downloader](regdocs_2_download.md).
-Alternative: [Stage 3 Docling](regdocs_3_docling.md).
+
+Alternative Stage 3 provider: [Docling](regdocs_3_docling.md).
+
 Next: [Stage 4 normalizer](regdocs_4_normalize.md).
