@@ -8,7 +8,7 @@ REGDOCS Atlas provides one root CLI (`python pipeline.py ...`) and one applicati
 
 The public CLI is action-oriented for safety: naming a stage never performs work. Scout, Download, Azure analysis, Docling analysis, Normalize, and Index all require an explicit action before network or mutating work can begin. Examples include `scout run`, `download run`, `analyze azure run`, `analyze docling run`, `normalize run`, and `index publish`. Safe planning/status actions are separate. Azure Content Understanding work additionally requires an explicit candidate scope (`--all`, `--limit`, or `--document-id`).
 
-`SYNTAX.md` is the authoritative public command/switch reference. `README.md` remains the architectural and POC operating overview.
+`SYNTAX.md` is the authoritative public command/switch guide. It is written for operators who do not need Python knowledge, with stage-by-stage safety notes, copy/paste examples, and complete public switch tables. `README.md` remains the architectural and POC operating overview.
 
 The pipeline baseline includes:
 
@@ -17,6 +17,8 @@ The pipeline baseline includes:
 - Azure Content Understanding and local Docling analysis with single-document child-process isolation.
 - Azure analysis preserving provider-native JSON/Markdown artifacts and supporting large PDF Content-Range processing.
 - Normalize locally producing deterministic documents/pages/chunks/tables/provenance JSONL from Stage 3 artifacts.
+- Normalize supporting bounded isolated-worker concurrency with `--concurrency N` while retaining a safe default of `1`, deterministic final document order, and sequential `--stop-on-error` semantics.
+- Normalize streaming successful worker shards into canonical JSONL instead of loading whole shard files into memory, and recording selection, worker, merge, and total wall-clock timing in the run summary.
 - Index validating/publishing normalized chunks to Azure AI Search.
 - SQLite providing the operational ledger, named migrations, backups, integrity checks, run state, errors, analysis state, and normalization state.
 - A global pipeline lock and canonical `workspace/pipeline.log` coordinating normal root-CLI operation while stage locks remain defense-in-depth.
@@ -56,7 +58,7 @@ The repository intentionally has:
 - no GitHub Actions CI workflow;
 - no dedicated automated test suite for the POC;
 - one root `requirements.txt`;
-- two intentionally distinct documentation files: `README.md` for architecture/operating rules and `SYNTAX.md` for command reference;
+- two intentionally distinct documentation files: `README.md` for architecture/operating rules and `SYNTAX.md` for the public operator guide;
 - one consolidated `RELEASE_NOTES.md` baseline rather than an internal change diary;
 - one version (`0.0.1`) until explicitly changed.
 
