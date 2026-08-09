@@ -106,12 +106,12 @@ Normalize is a local rebuildable transformation from Stage 3 artifacts. Azure AI
 ├── docs/
 │   ├── DATABASE_RECOVERY.md
 │   └── stages/
-│       ├── scout.md
-│       ├── download.md
-│       ├── azure.md
-│       ├── docling.md
-│       ├── normalize.md
-│       └── index.md
+│       ├── regdocs_1_scout.md
+│       ├── regdocs_2_download.md
+│       ├── regdocs_3_azure.md
+│       ├── regdocs_3_docling.md
+│       ├── regdocs_4_normalize.md
+│       └── regdocs_5_index.md
 │
 ├── database/                ignored operational SQLite state
 └── workspace/               ignored durable corpus artifacts
@@ -205,12 +205,12 @@ See [docs/DATABASE_RECOVERY.md](docs/DATABASE_RECOVERY.md).
 
 ## Stage runbooks
 
-- [Scout](docs/stages/scout.md)
-- [Download](docs/stages/download.md)
-- [Azure Content Understanding](docs/stages/azure.md)
-- [Docling](docs/stages/docling.md)
-- [Normalize](docs/stages/normalize.md)
-- [Index](docs/stages/index.md)
+- [Scout](docs/stages/regdocs_1_scout.md)
+- [Download](docs/stages/regdocs_2_download.md)
+- [Azure Content Understanding](docs/stages/regdocs_3_azure.md)
+- [Docling](docs/stages/regdocs_3_docling.md)
+- [Normalize](docs/stages/regdocs_4_normalize.md)
+- [Index](docs/stages/regdocs_5_index.md)
 
 ## Azure Content Understanding cost visibility
 
@@ -242,7 +242,7 @@ python pipeline.py rebuild compare --source database/regdocs.db --rebuilt databa
 python pipeline.py status
 ```
 
-For a structural cleanup, also smoke-test the public stage entry points with their read-only modes (`--version`, `--diagnostics`, `--status`, or `--dry-run` as appropriate) before starting a long or billable run.
+For structural cleanup, smoke-test the public stage entry points with their read-only modes (`--version`, `--diagnostics`, `--status`, or `--dry-run` as appropriate) before starting a long or billable run.
 
 ## Principles
 
