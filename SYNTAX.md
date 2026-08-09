@@ -697,6 +697,7 @@ python pipeline.py analyze azure run --all
 ```
 
 **Safety:** NETWORK, DB WRITE, WORKSPACE WRITE, **AZURE CU COST**.
+
 ### All public Azure switches
 
 | Switch | Meaning | Default |
@@ -1069,40 +1070,16 @@ Checks migration state, schema, SQLite integrity, and foreign keys.
 
 ## 12.4 Useful SQLite queries
 
-These are direct SQLite inspection commands for quick operator questions that are more detailed than `pipeline.py status`.
+Each example below is a **single copy/paste command**. It opens the database read-only, runs the query, prints a table, and exits immediately.
 
-Use the SQLite CLI in **read-only mode**:
-
-```bash
-sqlite3 -readonly -header -column database/regdocs.db
-```
-
-Then paste any `SELECT` statement below. Exit with:
-
-```text
-.quit
-```
-
-For a one-command query, put the SQL after the database path:
-
-```bash
-sqlite3 -readonly -header -column database/regdocs.db "SELECT COUNT(*) AS documents FROM documents;"
-```
-
-> **Safety:** all examples in this section are `SELECT` queries. Keep the `-readonly` switch so an accidental `UPDATE`, `DELETE`, or `INSERT` cannot change the ledger.
+> **Safety:** every command uses `sqlite3 -readonly` and only runs `SELECT` statements.
 
 ### Quick corpus snapshot
 
-This is a useful first query when you just want the main corpus numbers:
+Documents, Scout file records, actual current downloaded files, downloaded size, and Scout snapshots:
 
-```sql
-SELECT
-  (SELECT COUNT(*) FROM documents) AS documents,
-  (SELECT COUNT(*) FROM documents WHERE is_file=1) AS file_records,
-  (SELECT COUNT(*) FROM files WHERE is_current=1) AS current_files,
-  (SELECT ROUND(COALESCE(SUM(size_bytes),0) / 1073741824.0, 2)
-     FROM files WHERE is_current=1) AS current_file_gib,
-  (SELECT COUNT(*) FROM raw_snapshots) AS scout_snapshots;
+```bash
+sqlite3 -readonly -header -column database/regdocs.db "SELECT (SELECT COUNT(*) FROM documents) AS documents, (SELECT COUNT(*) FROM documents WHERE is_file=1) AS file_records, (SELECT COUNT(*) FROM files WHERE is_current=1) AS current_files, (SELECT ROUND(COALESCE(SUM(size_bytes),0) / 1073741824.0, 2) FROM files WHERE is_current=1) AS current_file_gib, (SELECT COUNT(*) FROM raw_snapshots) AS scout_snapshots;"
 ```
 
 The terms are intentionally different:
@@ -1115,14 +1092,8 @@ For "how many downloaded files do I have?", `current_files` is normally the usef
 
 ### Total analyzed pages by analyzer
 
-```sql
-SELECT analyzer_id,
-       COUNT(*) AS successful_documents,
-       COALESCE(SUM(page_count),0) AS pages
-FROM analyses
-WHERE status='SUCCEEDED'
-GROUP BY analyzer_id
-ORDER BY pages DESC;
+```bash
+sqlite3 -readonly -header -column database/regdocs.db "SELECT analyzer_id, COUNT(*) AS successful_documents, COALESCE(SUM(page_count),0) AS pages FROM analyses WHERE status='SUCCEEDED' GROUP BY analyzer_id ORDER BY pages DESC;"
 ```
 
 Keep this grouped by `analyzer_id`. The same source file can have Azure and Docling analyses, or analyses from different analyzer configurations, so blindly summing every successful `analyses` row can double-count the corpus.
@@ -1131,124 +1102,65 @@ Keep this grouped by `analyzer_id`. The same source file can have Azure and Docl
 
 Top 20 unique REGDOCS documents, taking the largest successful recorded page count for each document:
 
-```sql
-SELECT a.document_id,
-       MAX(a.page_count) AS pages,
-       d.name
-FROM analyses AS a
-JOIN documents AS d ON d.id = a.document_id
-WHERE a.status='SUCCEEDED'
-  AND a.page_count IS NOT NULL
-GROUP BY a.document_id, d.name
-ORDER BY pages DESC, a.document_id
-LIMIT 20;
+```bash
+sqlite3 -readonly -header -column database/regdocs.db "SELECT a.document_id, MAX(a.page_count) AS pages, d.name FROM analyses AS a JOIN documents AS d ON d.id=a.document_id WHERE a.status='SUCCEEDED' AND a.page_count IS NOT NULL GROUP BY a.document_id, d.name ORDER BY pages DESC, a.document_id LIMIT 20;"
 ```
 
-To see which analyzer produced each page count instead of collapsing analyzers together:
+To see each analyzer separately instead of collapsing analyzer results together:
 
-```sql
-SELECT a.document_id,
-       a.analyzer_id,
-       a.page_count AS pages,
-       d.name
-FROM analyses AS a
-JOIN documents AS d ON d.id = a.document_id
-WHERE a.status='SUCCEEDED'
-  AND a.page_count IS NOT NULL
-ORDER BY a.page_count DESC, a.document_id
-LIMIT 20;
+```bash
+sqlite3 -readonly -header -column database/regdocs.db "SELECT a.document_id, a.analyzer_id, a.page_count AS pages, d.name FROM analyses AS a JOIN documents AS d ON d.id=a.document_id WHERE a.status='SUCCEEDED' AND a.page_count IS NOT NULL ORDER BY a.page_count DESC, a.document_id LIMIT 20;"
 ```
 
 ### Largest downloaded source files
 
-```sql
-SELECT f.document_id,
-       ROUND(f.size_bytes / 1048576.0, 1) AS mib,
-       f.extension,
-       d.name
-FROM files AS f
-JOIN documents AS d ON d.id = f.document_id
-WHERE f.is_current=1
-ORDER BY f.size_bytes DESC
-LIMIT 20;
+```bash
+sqlite3 -readonly -header -column database/regdocs.db "SELECT f.document_id, ROUND(f.size_bytes / 1048576.0, 1) AS mib, f.extension, d.name FROM files AS f JOIN documents AS d ON d.id=f.document_id WHERE f.is_current=1 ORDER BY f.size_bytes DESC LIMIT 20;"
 ```
 
 ### Current downloaded files by extension
 
-```sql
-SELECT COALESCE(extension,'(none)') AS extension,
-       COUNT(*) AS files,
-       ROUND(COALESCE(SUM(size_bytes),0) / 1073741824.0, 2) AS gib
-FROM files
-WHERE is_current=1
-GROUP BY extension
-ORDER BY files DESC;
+```bash
+sqlite3 -readonly -header -column database/regdocs.db "SELECT COALESCE(extension,'(none)') AS extension, COUNT(*) AS files, ROUND(COALESCE(SUM(size_bytes),0) / 1073741824.0, 2) AS gib FROM files WHERE is_current=1 GROUP BY extension ORDER BY files DESC;"
 ```
 
 ### Download status counts
 
-```sql
-SELECT download_status,
-       COUNT(*) AS documents
-FROM documents
-GROUP BY download_status
-ORDER BY documents DESC;
+```bash
+sqlite3 -readonly -header -column database/regdocs.db "SELECT download_status, COUNT(*) AS documents FROM documents GROUP BY download_status ORDER BY documents DESC;"
 ```
 
 ### Analysis status counts
 
 Useful for comparing Azure/Docling analyzer state:
 
-```sql
-SELECT analyzer_id,
-       status,
-       COUNT(*) AS analyses
-FROM analyses
-GROUP BY analyzer_id, status
-ORDER BY analyzer_id, status;
+```bash
+sqlite3 -readonly -header -column database/regdocs.db "SELECT analyzer_id, status, COUNT(*) AS analyses FROM analyses GROUP BY analyzer_id, status ORDER BY analyzer_id, status;"
 ```
 
 ### Unresolved errors by stage and severity
 
-```sql
-SELECT stage,
-       severity,
-       COUNT(*) AS errors
-FROM errors
-WHERE resolved_at IS NULL
-GROUP BY stage, severity
-ORDER BY errors DESC, stage, severity;
+```bash
+sqlite3 -readonly -header -column database/regdocs.db "SELECT stage, severity, COUNT(*) AS errors FROM errors WHERE resolved_at IS NULL GROUP BY stage, severity ORDER BY errors DESC, stage, severity;"
 ```
 
 ### Recent pipeline runs
 
-```sql
-SELECT id,
-       stage,
-       status,
-       started_at,
-       finished_at,
-       completed_units,
-       total_units
-FROM runs
-ORDER BY id DESC
-LIMIT 20;
+```bash
+sqlite3 -readonly -header -column database/regdocs.db "SELECT id, stage, status, started_at, finished_at, completed_units, total_units FROM runs ORDER BY id DESC LIMIT 20;"
 ```
 
 ### Scout raw-evidence storage
 
-This reports the logical raw HTML size and the actual gzip-compressed size recorded in SQLite:
+Logical raw HTML size and actual gzip-compressed size recorded in SQLite:
 
-```sql
-SELECT COUNT(*) AS snapshots,
-       ROUND(COALESCE(SUM(size_bytes),0) / 1073741824.0, 2) AS raw_gib,
-       ROUND(COALESCE(SUM(compressed_size_bytes),0) / 1073741824.0, 2) AS compressed_gib
-FROM raw_snapshots;
+```bash
+sqlite3 -readonly -header -column database/regdocs.db "SELECT COUNT(*) AS snapshots, ROUND(COALESCE(SUM(size_bytes),0) / 1073741824.0, 2) AS raw_gib, ROUND(COALESCE(SUM(compressed_size_bytes),0) / 1073741824.0, 2) AS compressed_gib FROM raw_snapshots;"
 ```
 
 ### Database file size on disk
 
-This is a shell command rather than SQL, but it is useful when checking local storage:
+This is not SQL, but it is also one command:
 
 ```bash
 du -h database/regdocs.db database/regdocs.db-wal database/regdocs.db-shm 2>/dev/null
