@@ -42,6 +42,7 @@ from .paths import (
 from .rebuild import recovery_queue
 from .rebuild_compare import compare_ledgers
 from .runtime.locks import ProcessLock
+from .runtime.log_rotation import rotate_pipeline_log
 from .runtime.presentation import banner, run_line, stage_label
 from .scout_manifests import export_scout_manifests
 from .version import release_version
@@ -56,7 +57,7 @@ STAGE_FILES = {
     "index": STAGES_DIR / "index.py",
 }
 STAGE_LOCKS = (SCOUT_LOCK_PATH, DOWNLOAD_LOCK_PATH, ANALYZE_LOCK_PATH, NORMALIZE_LOCK_PATH)
-READ_ONLY_STAGE_FLAGS = {"--help", "-h", "--version", "--diagnostics", "--status", "--status-json", "--dry-run"}
+READ_ONLY_STAGE_FLAGS = {"--help", "-h", "--version", "--diagnostics", "--status", "--status-json"}
 
 HELP = """REGDOCS Atlas POC
 
@@ -110,6 +111,19 @@ def _append_log(mode: str, text: str) -> None:
         handle.write(f"{_utcnow()} [{mode}] {clean}\n")
 
 
+def _prepare_pipeline_log() -> Path | None:
+    """Rotate the previous mutating-run log after the global lock is owned."""
+    try:
+        return rotate_pipeline_log(PIPELINE_LOG_PATH)
+    except Exception as exc:
+        print(
+            f"WARNING: pipeline log rotation failed; continuing with existing log: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -130,8 +144,20 @@ def _latest_run_id(db_path: Path = DATABASE_PATH) -> int:
         con.close()
 
 
-def _read_only_stage(args: Sequence[str]) -> bool:
-    return any(value in READ_ONLY_STAGE_FLAGS for value in args)
+def _read_only_stage(key: str, args: Sequence[str]) -> bool:
+    """Return True only when this stage invocation cannot alter durable state."""
+    if any(value in READ_ONLY_STAGE_FLAGS for value in args):
+        return True
+    values = set(args)
+    if key == "scout":
+        # Scout probe is internally --dry-run but still persists runs, errors,
+        # raw snapshots, and progress, so it must remain globally serialized.
+        return bool(values & {"--audit", "--check-schema"})
+    if key in {"download", "azure", "normalize", "index"} and "--dry-run" in values:
+        return True
+    if key == "index" and "--query" in values:
+        return True
+    return False
 
 
 def _stage_diagnostics(stage: str, provider: str | None = None) -> int:
@@ -237,20 +263,28 @@ def _run_stage(key: str, args: Sequence[str], *, stage: str, provider: str | Non
 
     mode = stage_label(stage, provider)
     print(banner(stage, provider=provider, log_path=str(PIPELINE_LOG_PATH.relative_to(PROJECT_ROOT))))
-    _append_log(mode, f"START version={release_version()} stage={key} args={list(args)!r}")
     command = _stage_command(key, args)
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["REGDOCS_STAGE"] = mode
     env["REGDOCS_PIPELINE_LOG"] = str(PIPELINE_LOG_PATH)
-    before_run_id = _latest_run_id()
-    read_only = _read_only_stage(args)
-    lock_context = contextlib.nullcontext() if read_only else ProcessLock(PIPELINE_LOCK_PATH, role=f"pipeline:{mode.lower()}")
+    read_only = _read_only_stage(key, args)
+    lock_context = contextlib.nullcontext() if read_only else ProcessLock(
+        PIPELINE_LOCK_PATH,
+        role=f"pipeline:{mode.lower()}",
+    )
     monitor_stop = threading.Event()
     monitor: threading.Thread | None = None
     return_code = 1
-    try:
-        with lock_context:
+
+    with lock_context:
+        before_run_id = _latest_run_id()
+        if not read_only:
+            archived = _prepare_pipeline_log()
+            if archived is not None:
+                print(f"LOG   archived {archived.relative_to(PROJECT_ROOT)}")
+            _append_log(mode, f"START version={release_version()} stage={key} args={list(args)!r}")
+        try:
             if provider in {"azure", "docling"} and not read_only:
                 monitor = threading.Thread(
                     target=_cost_monitor,
@@ -271,7 +305,8 @@ def _run_stage(key: str, args: Sequence[str], *, stage: str, provider: str | Non
             try:
                 for line in process.stdout:
                     print(line, end="")
-                    _append_log(mode, line)
+                    if not read_only:
+                        _append_log(mode, line)
                 return_code = process.wait()
             except KeyboardInterrupt:
                 with contextlib.suppress(ProcessLookupError):
@@ -279,13 +314,13 @@ def _run_stage(key: str, args: Sequence[str], *, stage: str, provider: str | Non
                 return_code = process.wait()
             if stage == "scout" and not read_only and return_code in {0, 2}:
                 _refresh_scout_manifests(mode)
-    finally:
-        monitor_stop.set()
-        if monitor is not None:
-            monitor.join(timeout=3.0)
-        if not read_only:
-            _finalize_provider_cost(provider, before_run_id, mode)
-    _append_log(mode, f"FINISH exit_code={return_code}")
+        finally:
+            monitor_stop.set()
+            if monitor is not None:
+                monitor.join(timeout=3.0)
+            if not read_only:
+                _finalize_provider_cost(provider, before_run_id, mode)
+                _append_log(mode, f"FINISH exit_code={return_code}")
     return int(return_code)
 
 
