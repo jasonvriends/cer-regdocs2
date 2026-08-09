@@ -3,10 +3,6 @@ from __future__ import annotations
 import json
 
 from regdocs_atlas import rebuild as rebuild_module
-from regdocs_atlas.artifacts import inventory as inventory_function
-from regdocs_atlas.artifacts import inventory as _inventory_export
-from regdocs_atlas.artifacts import inventory as _unused
-from regdocs_atlas.artifacts import inventory as _unused2
 from regdocs_atlas.db.connection import open_ledger
 from regdocs_atlas.db.migrations import migrate, verify_schema
 from regdocs_atlas.db.safety import backup_database, integrity_report
@@ -101,8 +97,6 @@ def test_rebuild_recovers_sidecar_source_and_stage3_and_queues_scout(tmp_path, m
     monkeypatch.setattr(rebuild_module, "DOWNLOAD_FILES_DIR", files)
     monkeypatch.setattr(rebuild_module, "CONTENT_UNDERSTANDING_DIR", azure)
     monkeypatch.setattr(rebuild_module, "DOCLING_DIR", docling)
-    # inventory/recovery_plan are informational inputs to the rebuild record; the
-    # reconstruction itself is driven by the patched paths above.
     monkeypatch.setattr(rebuild_module, "inventory", lambda: type("I", (), {"to_dict": lambda self: {}})())
     monkeypatch.setattr(rebuild_module, "recovery_plan", lambda: {"best_recovery_tier": "B"})
 
