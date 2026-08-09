@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import sys
+import threading
 from contextlib import contextmanager, redirect_stdout
 from typing import Iterator, TextIO
 
@@ -139,12 +140,14 @@ class StageConsoleStream:
     def __init__(self, stream: TextIO):
         self.stream = stream
         self._buffer = ""
+        self._lock = threading.Lock()
 
     def write(self, text: str) -> int:
         if not text:
             return 0
-        self._buffer += text
-        self._drain()
+        with self._lock:
+            self._buffer += text
+            self._drain()
         return len(text)
 
     def _drain(self) -> None:
@@ -177,13 +180,15 @@ class StageConsoleStream:
     def flush(self) -> None:
         # Do not emit a partial line here. Azure/Docling intentionally print
         # ``[n/N] id ... `` and flush before appending the terminal result.
-        self.stream.flush()
+        with self._lock:
+            self.stream.flush()
 
     def finish(self) -> None:
-        if self._buffer:
-            self._emit(self._buffer)
-            self._buffer = ""
-        self.stream.flush()
+        with self._lock:
+            if self._buffer:
+                self._emit(self._buffer)
+                self._buffer = ""
+            self.stream.flush()
 
     def isatty(self) -> bool:
         return bool(getattr(self.stream, "isatty", lambda: False)())
