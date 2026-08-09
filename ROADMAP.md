@@ -138,6 +138,90 @@ Focus:
   large-PDF range-boundary, restart, qualified-provenance, Docling child-process
   crash/restart/quarantine, and search-publication cases.
 
+#### SQLite ledger rebuild and disaster recovery
+
+Treat `database/regdocs.db` as a durable operational ledger that is backed up for
+fast recovery, but not as the only copy of corpus truth. Loss of the SQLite file
+must not require re-downloading preserved source files or rerunning expensive
+Azure Content Understanding or Docling analysis when their artifacts still
+exist.
+
+Classify persisted data by recovery value:
+
+```text
+Preserve as durable corpus evidence/artifacts
+  workspace/1_scout/raw/                  REGDOCS source evidence
+  workspace/2_download/files/             downloaded source bytes + versions
+  workspace/3_analyze/content-understanding/raw/
+                                           expensive Azure native analysis
+  workspace/3_analyze/docling/             expensive local analysis
+  manifested workspace/4_normalize/        deterministic normalized generations
+
+Back up for fast operational recovery
+  database/regdocs.db                      SQLite ledger
+
+Safe to recreate or expire when not needed
+  locks, partial files, transient job state, temporary conversion material,
+  publication scratch, and Azure AI Search indexes
+```
+
+Add a future rebuild utility, conceptually `pipeline/regdocs_db_rebuild.py`, with
+safe read-only audit and explicit rebuild modes. It should reconstruct a new
+ledger from preserved artifacts rather than modifying the only surviving DB in
+place. The rebuild sequence should:
+
+1. create the current schema through normal migrations;
+2. reconstruct Stage 1 document identities, relationships, source URLs, and raw
+   snapshot rows from preserved Stage 1 evidence/manifests;
+3. scan Stage 2 current and historical source files, verify SHA-256 values, and
+   reconstruct file/version rows without using filesystem mtimes as authority;
+4. scan Azure and Docling Stage 3 native artifacts and artifact-side metadata to
+   reconstruct successful analysis rows without making analyzer calls;
+5. reconstruct Stage 4 normalization rows from generation manifests and output
+   hashes;
+6. verify document ID, source-file SHA, analyzer identity/version, artifact path,
+   page/count metadata, and normalized-generation consistency across layers; and
+7. optionally republish Stage 5 only after the rebuilt Stages 1–4 ledger passes
+   integrity checks.
+
+Make durable artifacts self-describing enough that reconstruction does not depend
+on SQLite-only facts. Where a required field currently exists only in the ledger,
+add a small artifact-side manifest or sidecar rather than duplicating large
+payloads. Stage 3 manifests are especially important: a surviving Azure raw JSON
+must be sufficient to prove which document/file SHA, analyzer, API version,
+range/part identity, and output paths it represents.
+
+Historical `runs` and `errors` may be only partially reconstructable. Preserve
+normal SQLite backups for that operational history, but distinguish it from the
+minimum corpus state required to resume processing. A rebuild must prioritize
+current document/file identities, preserved source evidence, expensive Stage 3
+results, normalization generations, and their provenance.
+
+Target commands are conceptually:
+
+```text
+python pipeline/regdocs_db_rebuild.py --verify-rebuildable
+python pipeline/regdocs_db_rebuild.py --rebuild-new-db database/regdocs.rebuilt.db
+python pipeline/regdocs_db_rebuild.py --compare-ledger database/regdocs.db database/regdocs.rebuilt.db
+```
+
+The rebuild path must refuse to overwrite the active DB by default. Add a
+fault-injection test that copies the durable artifacts into a clean environment,
+removes the SQLite ledger, rebuilds it, and proves that the same current source
+file hashes and successful Azure/Docling analyses are recovered and that Stage 4
+and Stage 5 can continue without network re-acquisition or billable re-analysis.
+
+Exit criteria for ledger recovery:
+
+- a rebuildability audit identifies any SQLite-only corpus facts before disaster;
+- deleting a test copy of `regdocs.db` does not require rerunning Stage 3;
+- rebuilt current document, file-version, analysis, and normalization identities
+  match the preserved artifact set;
+- corruption or ambiguous artifact identities fail closed rather than guessing;
+  and
+- normal DB backups remain the fast recovery path while artifact reconstruction
+  is a tested disaster-recovery path.
+
 Exit condition:
 
 - interruption and restart paths are tested;
@@ -612,24 +696,26 @@ The prototype succeeds when reviewers can see that:
 3. Create representative discovery queries and relevance judgments.
 4. Measure the Azure AI Search keyword/filter baseline before adding vectors.
 5. Close the Stage 1–5 hardening items that block safe unattended or full runs.
-6. Add representative fixtures and test interruption, recovery, concurrency,
+6. Add a rebuildability audit and artifact-side manifests sufficient to recover
+   current corpus state without rerunning Stage 3.
+7. Add representative fixtures and test interruption, recovery, concurrency,
    parser drift, range boundaries, qualified provenance, Docling process crashes,
-   and publication.
-7. Select a deliberately varied Azure-versus-Docling benchmark set including
+   ledger loss/rebuild, and publication.
+8. Select a deliberately varied Azure-versus-Docling benchmark set including
    born-digital, scanned, table-heavy, long, and known-problem documents.
-8. Build analyzer comparison reports and inspect the divergent pages/structures.
-9. Select the reference project/proceeding corpus and define completeness.
-10. Freeze the first normalized-artifact and generation-manifest contract.
-11. Rebuild the reference corpus, publish it to search, and produce a
+9. Build analyzer comparison reports and inspect the divergent pages/structures.
+10. Select the reference project/proceeding corpus and define completeness.
+11. Freeze the first normalized-artifact and generation-manifest contract.
+12. Rebuild the reference corpus, publish it to search, and produce a
     corpus-health/retrieval report.
-12. Validate dossier, timeline, inspection, evidence-selection, and comparison
+13. Validate dossier, timeline, inspection, evidence-selection, and comparison
     workflows on the reference corpus.
-13. Build the thin Phase 1 Atlas web application and validate search -> source ->
+14. Build the thin Phase 1 Atlas web application and validate search -> source ->
     page/region highlight before adding broader product features.
-14. Run Copilot Studio first against a pilot Atlas Azure AI Search index and
+15. Run Copilot Studio first against a pilot Atlas Azure AI Search index and
     validate grounded answers, Atlas citation URLs, embedding, and exact
     page/region navigation before writing a custom Foundry chat layer.
-15. Implement the initial Atlas front page and three-surface research workspace
+16. Implement the initial Atlas front page and three-surface research workspace
     shell around Search, Document/Evidence, and Ask, keeping the chat adapter
     replaceable.
 
@@ -656,6 +742,7 @@ The prototype succeeds when reviewers can see that:
 | 2026-08-08 | Keep original source documents plus Stage 4 page/polygon provenance as the Phase 1 evidence-viewing contract | Lets search and conversational citations resolve to exact visible evidence without reconstructing a competing document representation |
 | 2026-08-08 | Use Copilot Studio as the first conversational prototype while keeping an Atlas-owned replaceable chat boundary | Tests the lowest-friction Azure-native path without coupling document identity, citations, provenance, or the front end to one conversational engine |
 | 2026-08-08 | Make the Phase 1 front page Search/Ask-first and transition into a Search + Document/Evidence + Ask research workspace | Keeps research and source inspection primary while still making conversational discovery immediately available |
+| 2026-08-09 | Make the SQLite ledger rebuildable from preserved corpus artifacts while retaining normal DB backups for fast recovery | Prevents ledger loss from forcing source re-acquisition or expensive Stage 3 recomputation and keeps artifact storage as an independent disaster-recovery path |
 
 ## Open questions
 
