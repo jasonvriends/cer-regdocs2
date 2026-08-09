@@ -90,6 +90,108 @@ DB WRITE: no
 
 ---
 
+# Azure environment variables
+
+The pipeline reads Azure configuration from the **process environment**. It does not automatically load a `.env` file. Export variables in your shell, source a private shell file, or configure them in the Azure host environment. Never commit keys or secrets.
+
+## Azure Content Understanding
+
+Used by:
+
+```bash
+python pipeline.py analyze azure plan ...
+python pipeline.py analyze azure run ...
+```
+
+Application-specific variables:
+
+| Variable | Required? | Purpose |
+|---|---:|---|
+| `CONTENTUNDERSTANDING_ENDPOINT` | yes for Azure execution unless `--endpoint` is passed | Azure Content Understanding endpoint |
+| `CONTENTUNDERSTANDING_KEY` | optional | API key; if omitted the worker uses `DefaultAzureCredential` |
+| `CONTENTUNDERSTANDING_API_VERSION` | optional | API version; default `2025-11-01` |
+| `CONTENTUNDERSTANDING_ANALYZER_ID` | optional | analyzer ID; default `prebuilt-layout` |
+| `CONTENTUNDERSTANDING_POLLING_INTERVAL` | optional | polling interval in seconds; default `3` |
+
+Typical key-based setup:
+
+```bash
+export CONTENTUNDERSTANDING_ENDPOINT="https://YOUR-RESOURCE.cognitiveservices.azure.com/"
+export CONTENTUNDERSTANDING_KEY="YOUR-KEY"
+```
+
+Optional explicit defaults:
+
+```bash
+export CONTENTUNDERSTANDING_API_VERSION="2025-11-01"
+export CONTENTUNDERSTANDING_ANALYZER_ID="prebuilt-layout"
+export CONTENTUNDERSTANDING_POLLING_INTERVAL="3"
+```
+
+If `CONTENTUNDERSTANDING_KEY` is omitted, Azure Identity's `DefaultAzureCredential` is used. For local development that can use an authenticated Azure CLI session (`az login`). For service-principal environment authentication, the standard Azure Identity variables are commonly:
+
+```bash
+export AZURE_TENANT_ID="..."
+export AZURE_CLIENT_ID="..."
+export AZURE_CLIENT_SECRET="..."
+```
+
+Those `AZURE_*` identity variables are Azure SDK conventions rather than REGDOCS-specific settings.
+
+## Azure Content Understanding cost estimates
+
+These are optional and affect **cost estimation only**; they do not affect Azure requests or artifact identity:
+
+```bash
+export REGDOCS_AZURE_CU_MINIMAL_PER_1000_USD="..."
+export REGDOCS_AZURE_CU_BASIC_PER_1000_USD="..."
+export REGDOCS_AZURE_CU_STANDARD_PER_1000_USD="..."
+```
+
+Inspect the configured values with:
+
+```bash
+python pipeline.py cost rates
+```
+
+## Azure AI Search
+
+Used by:
+
+```bash
+python pipeline.py index publish
+python pipeline.py index query "..."
+```
+
+| Variable | Required? | Purpose |
+|---|---:|---|
+| `AZURE_SEARCH_ENDPOINT` | yes for publish/query unless `--endpoint` is passed | Search service endpoint |
+| `AZURE_SEARCH_ADMIN_KEY` | optional | Search admin/query key; if omitted `DefaultAzureCredential` is used |
+| `AZURE_SEARCH_INDEX_NAME` | optional | index name; default `regdocs-chunks` |
+
+Typical key-based setup:
+
+```bash
+export AZURE_SEARCH_ENDPOINT="https://YOUR-SERVICE.search.windows.net"
+export AZURE_SEARCH_ADMIN_KEY="YOUR-KEY"
+export AZURE_SEARCH_INDEX_NAME="regdocs-chunks"
+```
+
+For managed identity / Entra ID instead of keys, omit the key variable and configure `DefaultAzureCredential` appropriately.
+
+Useful configuration checks:
+
+```bash
+python pipeline.py diagnostics
+python pipeline.py cost rates
+python pipeline.py analyze azure plan --all
+python pipeline.py index plan
+```
+
+`analyze azure plan` does not submit Content Understanding work. `index plan` does not contact Azure AI Search.
+
+---
+
 # Scout
 
 Bare command:
@@ -450,14 +552,14 @@ Public Azure switches:
 - `--endpoint URL` — defaults from `CONTENTUNDERSTANDING_ENDPOINT`.
 - `--key KEY` — defaults from `CONTENTUNDERSTANDING_KEY`.
 - `--api-version VERSION` — defaults from `CONTENTUNDERSTANDING_API_VERSION`, currently `2025-11-01`.
-- `--polling-interval SECONDS` — default `3`.
+- `--polling-interval SECONDS` — defaults from `CONTENTUNDERSTANDING_POLLING_INTERVAL`, then `3`.
 - `--download-dir PATH`
 - `--output-dir PATH`
 - `--lock-file PATH`
 - `--force-lock`
 - `--state-file PATH`
 - `--worker-sleep-seconds SECONDS` — default `0.25`.
-- `--analyzer-id ID` — default `prebuilt-layout`.
+- `--analyzer-id ID` — defaults from `CONTENTUNDERSTANDING_ANALYZER_ID`, then `prebuilt-layout`.
 - `--force` — ignore successful current analysis state and reselect; use with extreme care because it can cause billable reanalysis.
 - `--no-reconcile-artifacts`
 - `--no-verify-hash`
