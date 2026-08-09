@@ -1,5 +1,77 @@
 # REGDOCS Atlas release notes
 
+## 0.0.2 — Unified CLI and database migration foundation — 2026-08-09
+
+`0.0.2` begins the package refactor without changing the established Scout → Download → Analyze → Normalize → Index data contracts.
+
+### New command surface
+
+A root `pipeline.py` is now the preferred orchestration entry point:
+
+```bash
+python pipeline.py scout
+python pipeline.py download
+python pipeline.py analyze azure
+python pipeline.py analyze docling
+python pipeline.py normalize --provider azure
+python pipeline.py normalize --provider docling
+python pipeline.py index
+```
+
+The existing `pipeline/regdocs_*.py` commands remain supported. The unified CLI delegates stage execution to those existing entry points in this release so provider behavior, crash isolation, retry/billing semantics, and artifact formats are preserved while the internal package is introduced.
+
+New operational commands include:
+
+```bash
+python pipeline.py version
+python pipeline.py status
+python pipeline.py diagnostics
+python pipeline.py db migrate
+python pipeline.py db status
+python pipeline.py db verify
+python pipeline.py rebuild inventory
+python pipeline.py rebuild plan
+```
+
+### Central database migrations
+
+`regdocs_atlas/db/migrations.py` is now the target owner for SQLite schema evolution.
+
+The first migration chain is:
+
+```text
+001_base_ledger
+002_analyses
+003_normalizations
+004_release_tracking
+005_recovery_tracking
+```
+
+Migrations use a dedicated `schema_migrations` table rather than `PRAGMA user_version`, because the legacy Scout implementation already uses that pragma for its historical schema marker.
+
+The migration runner is intentionally adoption-friendly: on an existing current database, idempotent migration steps verify/make the current shape true and then record themselves without rewriting historical `runs.script_version`, parser versions, release stamps, source hashes, or analysis identities. On an empty SQLite file, the same migration chain creates the complete current Stage 1–4 + release/recovery schema without requiring Scout to run first.
+
+Run after pulling:
+
+```bash
+python pipeline.py db migrate
+python pipeline.py db verify
+```
+
+This also updates `pipeline_metadata['release_version']` to `0.0.2`. Historical run rows retain their prior release provenance; new rows continue to receive the current release through the existing release trigger.
+
+### Shared package foundation
+
+The new `regdocs_atlas` package introduces common modules for repository version/path resolution, SQLite connection policy, schema migrations, generic run/error lifecycle helpers, PID-aware process locks, atomic durable writes, stable hashing/JSON helpers, and durable artifact inventory/recovery planning.
+
+`python pipeline.py rebuild inventory` and `rebuild plan` are deliberately read-only first steps toward the artifact-layer SQLite disaster-recovery roadmap. They do not yet write a reconstructed ledger.
+
+### Refactor plan
+
+See [`roadmap/PIPELINE_REFACTOR.md`](roadmap/PIPELINE_REFACTOR.md). The next phases move existing stages onto shared infrastructure, replace worker monkey-patching with explicit parent-run contracts, extract the common Stage 3 supervisor, split Scout/Download, introduce provider-neutral normalization adapters, and finish artifact reconstruction.
+
+The large legacy implementations are intentionally retained in `0.0.2`; they will only be removed after regression, restart/failure, and artifact-reuse equivalence is demonstrated.
+
 ## 0.0.1 — Initial integrated pipeline baseline — 2026-08-09
 
 `0.0.1` establishes the first repository-wide release baseline for the REGDOCS Atlas processing pipeline. Earlier per-script numbers remain historical component identifiers rather than product release numbers.
