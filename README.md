@@ -20,8 +20,8 @@ Canada Energy Regulator REGDOCS
               |
               v
 3. Analyze
-   Azure Content Understanding JSON + Markdown
-   automatic 300-page Content-Range handling for large PDFs
+   Azure Content Understanding or local Docling
+   provider-native artifacts + durable per-document workers
               |
               v
 4. Normalize
@@ -52,8 +52,12 @@ independently.
 │   ├── regdocs_1_scout.md
 │   ├── regdocs_2_download.py
 │   ├── regdocs_2_download.md
-│   ├── regdocs_3_analyze.py
-│   ├── regdocs_3_analyze.md
+│   ├── regdocs_3_azure.py
+│   ├── regdocs_3_azure_worker.py
+│   ├── regdocs_3_azure.md
+│   ├── regdocs_3_docling.py
+│   ├── regdocs_3_docling_worker.py
+│   ├── regdocs_3_docling.md
 │   ├── regdocs_4_normalize.py
 │   ├── regdocs_4_normalize.md
 │   ├── regdocs_5_index.py
@@ -72,9 +76,10 @@ independently.
     │   │   └── _versions/
     │   └── run/
     ├── 3_analyze/
-    │   └── content-understanding/
-    │       ├── raw/
-    │       └── markdown/
+    │   ├── content-understanding/
+    │   │   ├── raw/
+    │   │   └── markdown/
+    │   └── docling/
     ├── 4_normalize/
     │   ├── documents.jsonl
     │   ├── pages.jsonl
@@ -132,27 +137,38 @@ Detailed documentation: [Stage 2 — Download](pipeline/regdocs_2_download.md).
 
 ### 3 — Analyze
 
-`pipeline/regdocs_3_analyze.py` sends current downloaded files to Azure AI
-Content Understanding using `prebuilt-layout`, preserves raw JSON and Markdown,
-and records analysis status and provenance in SQLite.
+Stage 3 has provider-specific analyzers.
+
+`pipeline/regdocs_3_azure.py` is the durable Azure AI Content Understanding
+supervisor. It launches exactly one `regdocs_3_azure_worker.py` child per
+document, preserves raw JSON and Markdown, and records analysis status and
+provenance in SQLite. If a worker segfaults or is OOM-killed, the supervisor can
+retry that document in a fresh process and quarantine repeated crash cases
+without terminating the remaining queue.
 
 PDFs over 300 pages are counted locally and analyzed automatically in inclusive
 `Content-Range` requests of at most 300 pages. The original PDF is not
 physically split. Each successful range is saved independently so an interrupted
 large document can normally resume without rebilling completed ranges.
 
+`pipeline/regdocs_3_docling.py` is the local Docling supervisor and similarly
+isolates each document in `regdocs_3_docling_worker.py`.
+
 Primary outputs:
 
 ```text
 database/regdocs.db
-workspace/3_analyze/content-understanding/raw/
-workspace/3_analyze/content-understanding/markdown/
+workspace/3_analyze/content-understanding/
+workspace/3_analyze/docling/
 ```
 
-Large PDFs additionally create per-range raw JSON and metadata below the
+Large Azure PDFs additionally create per-range raw JSON and metadata below the
 canonical raw JSON's `<sha256>.parts/` directory.
 
-Detailed documentation: [Stage 3 — Analyze](pipeline/regdocs_3_analyze.md).
+Detailed documentation:
+
+- [Stage 3 — Azure](pipeline/regdocs_3_azure.md)
+- [Stage 3 — Docling](pipeline/regdocs_3_docling.md)
 
 ### 4 — Normalize
 
@@ -202,13 +218,13 @@ Detailed documentation: [Stage 5 — Index](pipeline/regdocs_5_index.md).
 
 ## JSON, JSONL, and Markdown
 
-Stage 3 raw `.json` is the canonical machine-readable Azure analysis result. It
-contains pages, paragraphs, tables, sections, spans, source regions/polygons,
-Markdown, warnings, and analyzer metadata.
+Stage 3 Azure raw `.json` is the canonical machine-readable Azure analysis
+result. It contains pages, paragraphs, tables, sections, spans, source
+regions/polygons, Markdown, warnings, and analyzer metadata.
 
-Stage 3 `.md` is a human-readable derivative of that JSON. It is convenient for
-reading and inspection but does not preserve the full structural/coordinate
-contract.
+Stage 3 Azure `.md` is a human-readable derivative of that JSON. It is
+convenient for reading and inspection but does not preserve the full
+structural/coordinate contract.
 
 Stage 4 `.jsonl` files contain one JSON record per line. `chunks.jsonl` is the
 primary Stage 5 search input, joined with compact identities from
@@ -286,7 +302,7 @@ Download eligible files:
 python pipeline/regdocs_2_download.py
 ```
 
-### Run Stage 3
+### Run Stage 3 — Azure
 
 Configure Azure through the shell environment. Do not place an API key in a
 command line, script, or documentation.
@@ -294,32 +310,51 @@ command line, script, or documentation.
 ```bash
 export CONTENTUNDERSTANDING_ENDPOINT="https://<resource>.services.ai.azure.com"
 export CONTENTUNDERSTANDING_KEY="<key>"  # omit when using DefaultAzureCredential
-python pipeline/regdocs_3_analyze.py --dry-run --limit 10
-python pipeline/regdocs_3_analyze.py --limit 10
+python pipeline/regdocs_3_azure.py --dry-run --limit 10
+python pipeline/regdocs_3_azure.py --limit 10
 ```
 
 No special command is required for a large PDF. For example:
 
 ```bash
-python pipeline/regdocs_3_analyze.py --document-id 4647200
+python pipeline/regdocs_3_azure.py --document-id 4647200
 ```
 
 A 986-page PDF is automatically submitted as `1-300`, `301-600`, `601-900`,
 and `901-986`, then recombined into the normal canonical Stage 3 JSON and
 Markdown artifacts.
 
-Stage 3 can incur Azure charges and requires one explicit selection scope. Keep
+Stage 3 Azure can incur charges and requires one explicit selection scope. Keep
 initial runs bounded. After reviewing a complete no-Azure-call preview, run all
 remaining eligible files with:
 
 ```bash
-python pipeline/regdocs_3_analyze.py --all --dry-run
-python pipeline/regdocs_3_analyze.py --all
+python pipeline/regdocs_3_azure.py --all --dry-run
+python pipeline/regdocs_3_azure.py --all
 ```
 
-See the Stage 3 runbook before a full run, and do not use `--force` unless you
-intend to resubmit matching successful analyses. For a large PDF, `--force`
+If a document repeatedly crashes the worker, it is quarantined so the queue can
+continue. Retry quarantined documents explicitly with:
+
+```bash
+python pipeline/regdocs_3_azure.py --limit 1000 --retry-quarantined
+```
+
+See the Azure Stage 3 runbook before a full run, and do not use `--force` unless
+you intend to resubmit matching successful analyses. For a large PDF, `--force`
 also bypasses saved range-part recovery and resubmits every range.
+
+### Run Stage 3 — Docling
+
+The local Docling provider uses the same one-document-per-child durability
+pattern:
+
+```bash
+python pipeline/regdocs_3_docling.py --max-documents 10
+```
+
+See [Stage 3 — Docling](pipeline/regdocs_3_docling.md) for its installation and
+runtime requirements.
 
 ### Run Stage 4
 
@@ -419,9 +454,9 @@ python pipeline/regdocs_4_normalize.py --status
 python pipeline/regdocs_5_index.py --dry-run
 ```
 
-For a large-PDF Stage 3 run, verify the reported combined page count matches the
-source PDF page count before proceeding to Stage 4. Stage 3 enforces this
-invariant before publishing a ranged canonical artifact.
+For a large-PDF Azure Stage 3 run, verify the reported combined page count
+matches the source PDF page count before proceeding to Stage 4. The Azure
+worker enforces this invariant before publishing a ranged canonical artifact.
 
 For a Stage 4 ranged-PDF pilot, inspect a provenance record with
 `content_index > 0` and verify its evidence pointer begins with the same
