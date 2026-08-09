@@ -136,6 +136,20 @@ python pipeline.py rebuild compare \
 
 A successful Stage 1-3 comparison is the disaster-recovery target. Stage 4 normalization rows are intentionally not reconstructed from SQLite recovery; Normalize is local and can be rerun from the preserved Stage 3 artifacts. Azure AI Search is likewise a derivative publication layer.
 
+### Flat operational rebuild
+
+For a clean POC baseline with no historical `runs`, `errors`, rebuild provenance, or recovery queue, use the same verified artifact rebuild with `--flat`:
+
+```bash
+python pipeline.py rebuild create --flat
+```
+
+The default output is `database/regdocs.flat.db`. An explicit target can be supplied with `--output`.
+
+Flat mode first performs the normal manifest-backed Stage 1-3 reconstruction. Only when that reconstruction finishes with exact `SUCCEEDED` status does it remove execution/recovery history, strip recovery-only document metadata/state, stamp the current POC version, and `VACUUM` the new output database. If reconstruction has gaps, flattening is not applied and the recovery evidence is kept for diagnosis.
+
+Flat mode never contacts REGDOCS, Azure Content Understanding, Docling, or Azure AI Search, and it never overwrites the active database. Stage 4 normalization rows remain intentionally absent; rerun Normalize locally if a fresh Stage 4 ledger is desired.
+
 ## Azure cost protection
 
 Before any Azure rerun, use the dry run and inspect the ledger/artifact state:
