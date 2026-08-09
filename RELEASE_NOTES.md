@@ -1,5 +1,69 @@
 # REGDOCS Atlas release notes
 
+## 0.0.3 — Safe migrations and artifact-driven recovery — 2026-08-09
+
+`0.0.3` turns the database-recovery design into an executable recovery path while keeping normal stage behavior and expensive analyzer artifacts intact.
+
+### Migration safety
+
+`python pipeline.py db migrate` now:
+
+- supports `--plan` for a read-only migration preview;
+- refuses schema changes while a live Scout, Download, Analyze, or Normalize stage lock is present;
+- creates a transactionally consistent SQLite backup by default with the SQLite backup API, including committed WAL state;
+- stores migration backups under `database/backups/` by default;
+- runs schema verification, `PRAGMA integrity_check`, and `PRAGMA foreign_key_check` after migration; and
+- stores migration fingerprints/checksums so an already-applied migration cannot silently drift later.
+
+Use `--no-backup` only when intentionally suppressing the default safety copy. The compatibility command `python pipeline/regdocs_release.py --sync-db` now routes through the same safe migration path.
+
+### Recovery-state migration
+
+Migration `006_recovery_state` adds explicit recovery semantics without rewriting normal documents. Existing documents default to `acquisition_state='OBSERVED'` and `scout_refresh_needed=0`.
+
+Artifact-rebuilt documents can instead be represented as:
+
+```text
+RECOVERED_COMPLETE
+RECOVERED_PARTIAL
+RECOVERED_MINIMAL
+```
+
+with explicit missing-fact JSON, rebuild provenance, and a `recovery_tasks` queue. Unknown titles/URLs are left empty for minimal recovery instead of being fabricated.
+
+### Durable Stage 2 sidecars
+
+Normal Stage 2 public runs now enable deterministic `<document-id>.metadata.json` sidecars by default. Use `--no-sidecars` only to intentionally opt out. Existing `--sidecars-only` remains available to backfill/refresh sidecars without downloading source files.
+
+### Rebuild implementation
+
+The unified CLI now supports:
+
+```bash
+python pipeline.py rebuild inventory
+python pipeline.py rebuild plan
+python pipeline.py rebuild create --output database/regdocs.rebuilt.db
+python pipeline.py rebuild verify --db database/regdocs.rebuilt.db
+```
+
+`rebuild create` refuses to overwrite an existing target. It creates the new ledger through the same migration chain, hashes surviving current source files, validates matching Stage 2 sidecars, reconstructs `documents` and `files`, and reconstructs matching Azure/Docling `analyses` rows when canonical Stage 3 artifacts agree with the recovered document ID and source SHA-256.
+
+If only a source file survives, the document is recovered minimally and the missing Scout-derived facts are explicitly recorded. If a valid Stage 2 sidecar survives, current metadata is recovered from the sidecar but missing raw Scout evidence remains visible.
+
+Stage 4 `normalizations` rows are deliberately not invented from bare JSONL output yet. They will be reconstructed once generation/manifests can prove the normalizer/config/input identities. The existing Stage 4 files remain preserved on disk.
+
+### Scout recovery queue
+
+A rebuild queues missing acquisition work instead of treating partial data as either fully valid or unusable:
+
+```bash
+python pipeline.py recover scout --db database/regdocs.rebuilt.db
+python pipeline.py recover scout --db database/regdocs.rebuilt.db --priority HIGH
+python pipeline.py recover scout --db database/regdocs.rebuilt.db --ids-only
+```
+
+Source-only records receive HIGH-priority Scout repair work. Sidecar-recovered records with otherwise complete current metadata normally receive LOW-priority work for missing raw Scout evidence.
+
 ## 0.0.2 — Unified CLI and database migration foundation — 2026-08-09
 
 `0.0.2` begins the package refactor without changing the established Scout → Download → Analyze → Normalize → Index data contracts.
