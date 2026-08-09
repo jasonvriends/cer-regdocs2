@@ -1,6 +1,6 @@
 # REGDOCS Atlas versioning
 
-REGDOCS Atlas uses one repository-wide **release version** for each coherent pipeline checkpoint. The current release is read from the root [`VERSION`](VERSION) file; as of this document it is `0.0.2`.
+REGDOCS Atlas uses one repository-wide **release version** for each coherent pipeline checkpoint. The current release is read from the root [`VERSION`](VERSION) file; as of this document it is `0.0.3`.
 
 ## Release version
 
@@ -19,15 +19,16 @@ A release is a coherent checkpoint, not every commit. When a release is cut:
 
 1. update `VERSION` once;
 2. add the release entry to `RELEASE_NOTES.md`;
-3. run `python pipeline.py db migrate` for the local ledger;
-4. run `python pipeline.py db verify` and the relevant smoke/integrity tests; and
-5. optionally create the matching Git tag, for example `v0.0.2`.
+3. preview with `python pipeline.py db migrate --plan`;
+4. run `python pipeline.py db migrate` for the local ledger;
+5. run `python pipeline.py db verify` and the relevant smoke/integrity tests; and
+6. optionally create the matching Git tag, for example `v0.0.3`.
 
 All public pipeline stages belong to the same release. Do not independently call Stage 1, Stage 2, Stage 3, Stage 4, and Stage 5 versions different product releases.
 
 ## Preferred public command behavior
 
-The root command is now the preferred orchestration surface:
+The root command is the preferred orchestration surface:
 
 ```text
 python pipeline.py version
@@ -59,7 +60,7 @@ Examples:
 - sidecar/manifest schema versions identify persisted artifact contracts; and
 - normalizer contract/config identities determine whether normalized output may be reused.
 
-This distinction is important because bumping the repository from `0.0.1` to `0.0.2` must **not** by itself force expensive Azure Content Understanding or Docling analysis to be recomputed.
+A repository release bump by itself must **not** force expensive Azure Content Understanding or Docling analysis to be recomputed.
 
 The old internal constant name `SCRIPT_VERSION` remains a compatibility detail in legacy implementations. New/refactored modules should prefer purpose-specific names such as `COMPONENT_VERSION`, `NORMALIZER_CONTRACT_VERSION`, `PARSER_VERSION`, or `SCHEMA_VERSION` rather than creating new independent product-version sequences.
 
@@ -76,7 +77,7 @@ pipeline_metadata['release_version']
 
 Historical runs may remain `NULL` for `release_version` when they predate unified release tracking. New runs are stamped with the current repository release by the SQLite trigger.
 
-Starting in `0.0.2`, database shape is tracked separately in:
+Database shape is tracked separately in:
 
 ```text
 schema_migrations
@@ -85,16 +86,21 @@ schema_migrations
 The migration chain is applied with:
 
 ```bash
+python pipeline.py db migrate --plan
 python pipeline.py db migrate
 python pipeline.py db verify
 ```
+
+Starting in `0.0.3`, applied migration rows also carry a migration checksum/fingerprint. Existing pre-checksum rows are adopted once by backfilling the expected fingerprint; later mismatches fail closed instead of silently accepting migration drift.
+
+An existing ledger receives a consistent SQLite backup by default before migration. The migration command also refuses to run while a live stage lock exists and performs schema, SQLite integrity, and foreign-key verification afterward.
 
 Do not use `PRAGMA user_version` as the authoritative migration registry. The legacy Scout implementation historically owns that pragma, so centralized migrations deliberately use named migration IDs instead.
 
 This gives the ledger distinct dimensions:
 
 ```text
-release_version   integrated repository release, e.g. 0.0.2
+release_version   integrated repository release, e.g. 0.0.3
 script_version    legacy durable component implementation value
 parser_version    parser/projection contract where applicable
 migration_id      database schema evolution identity
