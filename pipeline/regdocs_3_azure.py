@@ -38,7 +38,7 @@ from regdocs_paths import (
     stored_path,
 )
 
-SCRIPT_VERSION = "3.7.0"
+SCRIPT_VERSION = "3.7.1"
 DEFAULT_API_VERSION = "2025-11-01"
 DEFAULT_ANALYZER_ID = "prebuilt-layout"
 DEFAULT_POLLING_INTERVAL = 3
@@ -527,7 +527,14 @@ def current_document_analysis(
         return None
     return con.execute(
         """
-        SELECT a.status, a.error_code, a.error_message, a.page_count
+        SELECT
+            a.status,
+            a.error_code,
+            a.error_message,
+            a.page_count,
+            a.table_count,
+            a.section_count,
+            a.elapsed_seconds
         FROM files f
         JOIN analyses a ON a.file_id=f.id AND a.file_sha256=f.sha256
         WHERE f.is_current=1 AND f.document_id=?
@@ -717,6 +724,8 @@ def main() -> int:
             )
             return 0
 
+        progress_width = len(str(total))
+
         for index, document_id in enumerate(selected, start=1):
             info = state["documents"].setdefault(document_id, {})
             if not isinstance(info, dict):
@@ -732,7 +741,11 @@ def main() -> int:
             save_state(args.state_file, state)
 
             launched += 1
-            print(f"[{index}/{total}] {document_id} ... ", end="", flush=True)
+            print(
+                f"[{index:0{progress_width}d}/{total}] {document_id} ... ",
+                end="",
+                flush=True,
+            )
 
             try:
                 result = subprocess.run(
@@ -806,8 +819,18 @@ def main() -> int:
                 if status == "SUCCEEDED":
                     succeeded += 1
                     doc_pages = int(analysis["page_count"] or 0) if analysis is not None else 0
+                    doc_tables = int(analysis["table_count"] or 0) if analysis is not None else 0
+                    doc_sections = int(analysis["section_count"] or 0) if analysis is not None else 0
+                    doc_elapsed = analysis["elapsed_seconds"] if analysis is not None else None
+                    elapsed_text = (
+                        f"{float(doc_elapsed):.1f}s" if doc_elapsed is not None else "n/a"
+                    )
                     pages_succeeded += doc_pages
-                    print(f"SUCCEEDED pages={doc_pages}", flush=True)
+                    print(
+                        f"SUCCEEDED pages={doc_pages} tables={doc_tables} "
+                        f"sections={doc_sections} elapsed={elapsed_text}",
+                        flush=True,
+                    )
                 else:
                     skipped += 1
                     print(f"{status or 'NO_ANALYSIS_ROW'}", flush=True)
