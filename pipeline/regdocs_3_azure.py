@@ -40,7 +40,7 @@ from regdocs_paths import (
     stored_path,
 )
 
-SCRIPT_VERSION = "3.6.0"
+SCRIPT_VERSION = "3.6.1"
 DEFAULT_API_VERSION = "2025-11-01"
 DEFAULT_ANALYZER_ID = "prebuilt-layout"
 DEFAULT_POLLING_INTERVAL = 3
@@ -308,9 +308,6 @@ def select_documents(
             info = {}
             state["documents"][doc_id] = info
 
-        # 3.5.x used persistent quarantine state. Azure 3.6+ deliberately does
-        # not suppress failed documents across runs: a later refresh is the
-        # explicit retry boundary.
         if info.pop("quarantined", False):
             info["legacy_quarantine_cleared_at"] = utcnow()
         info.pop("quarantined_at", None)
@@ -356,8 +353,6 @@ def child_command(args: argparse.Namespace, document_id: str) -> list[str]:
         "--db", str(args.db),
         "--api-version", args.api_version,
         "--polling-interval", str(args.polling_interval),
-        # Cost-safety invariant: the public Azure supervisor never asks its
-        # worker to resubmit a failed request/range during the same run.
         "--max-attempts", "1",
         "--download-dir", str(args.download_dir),
         "--output-dir", str(args.output_dir),
@@ -381,12 +376,9 @@ def child_environment(args: argparse.Namespace) -> dict[str, str]:
     if args.endpoint:
         env["CONTENTUNDERSTANDING_ENDPOINT"] = args.endpoint
     if args.key:
-        # Keep the API key out of the child command line / process listing.
         env["CONTENTUNDERSTANDING_KEY"] = args.key
     env["CONTENTUNDERSTANDING_API_VERSION"] = args.api_version
     env["CONTENTUNDERSTANDING_ANALYZER_ID"] = args.analyzer_id
-    # The worker receives --max-attempts 1 explicitly; remove an inherited
-    # override as defense in depth for the public supervisor path.
     env.pop("CONTENTUNDERSTANDING_MAX_ATTEMPTS", None)
     return env
 
@@ -568,6 +560,11 @@ def main() -> int:
         print(f"State:               {args.state_file}")
         print(f"Analyzer:            {args.analyzer_id}")
         print(f"API:                 {args.api_version}")
+        print()
+        print(f"Selected Azure queue ({len(selected)} document(s)):")
+        for queue_index, queue_document_id in enumerate(selected, start=1):
+            print(f"  {queue_index}/{len(selected)}  {queue_document_id}")
+        print()
 
         succeeded = 0
         handled_failed = 0
@@ -616,7 +613,6 @@ def main() -> int:
             info["last_signal"] = returncode_signal(returncode)
             save_state(args.state_file, state)
 
-            # Re-open after every child so the supervisor sees committed WAL changes.
             con.close()
             con = open_db(args.db)
             analysis = current_document_analysis(
