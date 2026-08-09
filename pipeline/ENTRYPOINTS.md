@@ -33,8 +33,16 @@ python pipeline.py db verify
 
 python pipeline.py rebuild inventory
 python pipeline.py rebuild plan
+
+# one-time/backfill preparation while the healthy ledger still exists:
+# export durable Scout document/snapshot manifests and verify preserved raw evidence
+python pipeline.py rebuild prepare
+
 python pipeline.py rebuild create --output database/regdocs.rebuilt.db
 python pipeline.py rebuild verify --db database/regdocs.rebuilt.db
+python pipeline.py rebuild compare \
+  --source database/regdocs.db \
+  --rebuilt database/regdocs.rebuilt.db
 
 # inspect the durable Scout recovery queue only
 python pipeline.py recover scout --db database/regdocs.rebuilt.db
@@ -42,6 +50,12 @@ python pipeline.py recover scout --db database/regdocs.rebuilt.db
 # selectively fetch fresh authoritative REGDOCS detail evidence for queued IDs
 python pipeline.py recover scout --execute --db database/regdocs.rebuilt.db --priority HIGH --limit 100
 ```
+
+`rebuild prepare` makes existing Stage 1 evidence independently reconstructable. Raw Scout gzip files are content-addressed, but the bytes alone do not preserve all request/document/timestamp/header associations that were held in SQLite. The command writes small durable Scout document and snapshot manifests under `workspace/1_scout/manifests/`, verifies raw gzip size/SHA by default, and makes true Tier A reconstruction possible without inventing missing acquisition provenance. Preferred future `pipeline.py scout` runs refresh those manifests automatically after successful/partial completion.
+
+`rebuild compare` compares the reference and rebuilt ledgers by document IDs, current source `(document_id, SHA-256)` identities, Scout snapshot `(source_kind, source_url, SHA-256)` identities, successful Stage 3 identities, container relationships, core document metadata, and SQLite integrity. Stage 4 normalization rows are reported separately because manifested normalization reconstruction is still the next recovery layer.
+
+Artifact inventory now distinguishes total Azure JSON from canonical analysis results and Content-Range result/metadata parts; total `*.json` count is not presented as a document count.
 
 Azure dollar estimates use usage meters preserved in Content Understanding results plus rates supplied through the documented `REGDOCS_AZURE_CU_*_PER_1000_USD` environment variables. No service price is hard-coded. Docling reports service cost as `n/a (local compute)`.
 
