@@ -97,7 +97,7 @@ def flatten_create(output_db: Path) -> dict[str, Any]:
         con.execute("DELETE FROM rebuilds")
         con.execute("DELETE FROM runs")
 
-        # Stage 4 is intentionally a rebuildable local derivative in this POC.
+        # Stage 4 is intentionally a rebuildable local derivative.
         # The artifact rebuild does not reconstruct normalization ledger rows.
         con.execute("DELETE FROM normalizations")
 
