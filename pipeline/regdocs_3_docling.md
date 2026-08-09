@@ -7,7 +7,7 @@ Azure Content Understanding.
 The public command is a durable, single-threaded supervisor. Exactly one child
 process analyzes one document at a time.
 
-Script version documented: **3d.2.0**.
+Script version documented: **3d.2.1**.
 
 ## Run ownership
 
@@ -98,8 +98,29 @@ Bound a pilot by child launches:
 python pipeline/regdocs_3_docling.py --max-documents 10
 ```
 
-Normal output identifies the parent pipeline run once and then shows child
-progress without creating a new run number for every document.
+Normal progress intentionally mirrors the Azure console shape. The progress
+position is zero-padded to the width of the selected document count, and the
+success line is built from the committed SQLite analysis row:
+
+```text
+Run 43: Docling supervisor 3d.2.1; 4048 document(s) eligible
+Concurrency:    1 child process
+Crash retries:  up to 3 attempt(s) per document
+
+[0001/4048] 4659445 ... SUCCEEDED pages=1 tables=1 sections=5 elapsed=3.9s
+[0002/4048] 4659447 ... SUCCEEDED pages=12 tables=0 sections=8 elapsed=6.2s
+```
+
+If a document needs another fresh child, its document position stays stable and
+the retry is made explicit:
+
+```text
+[0027/4048] 4660123 ... FAILED exit=-11 signal=SIGSEGV; retrying in fresh child
+[0027/4048] 4660123 attempt 2/3 ... SUCCEEDED pages=34 tables=3 sections=14 elapsed=11.4s
+```
+
+Worker stdout/stderr remains hidden on normal success and is surfaced for
+failure/crash diagnostics.
 
 ## Durable state
 
@@ -131,6 +152,26 @@ api_version = installed Docling package version
 artifact_source = docling
 run_id = supervisor-owned Docling run
 ```
+
+Both Azure and Docling persist the common extraction/result metrics used by the
+supervisor console and later comparison work, including:
+
+```text
+page_count
+table_count
+section_count
+warning_count
+elapsed_seconds
+attempt_count
+status
+error_code
+error_message
+raw_json_path
+markdown_path
+```
+
+So the console is only a view of durable ledger data; the SQLite row and native
+provider artifacts remain the source of truth.
 
 The raw JSON preserves the native `DoclingDocument.export_to_dict()` result
 under `regdocsDocling.native` and also contains a conservative REGDOCS
