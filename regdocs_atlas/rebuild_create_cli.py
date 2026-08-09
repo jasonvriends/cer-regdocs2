@@ -24,11 +24,26 @@ STAGE_LOCKS = (SCOUT_LOCK_PATH, DOWNLOAD_LOCK_PATH, ANALYZE_LOCK_PATH, NORMALIZE
 
 def main(args: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pipeline.py rebuild create")
-    parser.add_argument("--output", default=str(PROJECT_ROOT / "database" / "regdocs.rebuilt.db"))
+    parser.add_argument("--output")
+    parser.add_argument(
+        "--flat",
+        action="store_true",
+        help=(
+            "Create a clean Stage 1-3 operational baseline from durable workspace "
+            "artifacts, discarding historical runs/errors/recovery bookkeeping"
+        ),
+    )
     options = parser.parse_args(list(args) if args is not None else None)
+    default_name = "regdocs.flat.db" if options.flat else "regdocs.rebuilt.db"
+    output = Path(options.output) if options.output else PROJECT_ROOT / "database" / default_name
+
     with ProcessLock(PIPELINE_LOCK_PATH, role="pipeline:rebuild"):
         assert_no_active_stage_locks(STAGE_LOCKS)
-        result = rebuild_create(Path(options.output))
+        if options.flat:
+            from .flatten import flatten_create
+            result = flatten_create(output)
+        else:
+            result = rebuild_create(output)
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True, default=str))
     return 0 if result.get("status") == "SUCCEEDED" else 2
 
