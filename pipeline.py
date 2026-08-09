@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""REGDOCS Atlas POC command entry point.
+"""REGDOCS Atlas command entry point.
 
 Public stage commands are intentionally action-oriented: naming a stage never
 starts work. The root wrapper translates explicit public actions into the
@@ -20,7 +20,7 @@ from regdocs_atlas.runtime.console import standardized_stage_console
 from regdocs_atlas.scout_coverage import refresh_scout_coverage
 
 
-ROOT_HELP = """REGDOCS Atlas 0.0.1 POC
+ROOT_HELP = """REGDOCS Atlas
 
 Bare stage names are safe: they show help and never start work.
 See SYNTAX.md for every public switch and examples.
