@@ -79,6 +79,9 @@ The pipeline has:
   output and can feed the current normalizer through a compatibility projection;
 - a single-threaded Docling supervisor that isolates each document in a separate
   child process so crashes do not terminate the overall corpus run;
+- a Stage 4 public supervisor that chooses Azure or Docling input, launches one
+  isolated normalization child at a time, records one parent run, and continues
+  past document-level normalization failures;
 - Stage 4 provenance that keeps original page/polygon geometry and globally
   qualifies Azure element pointers across multiple `contents[]` entries;
 - Stage 5 validation that joins each indexed chunk back to its matching
@@ -125,6 +128,9 @@ Focus:
 - keep the Docling corpus runner strictly single-threaded while isolating each
   document in a child process, persisting supervisor state, and quarantining
   repeated crash/failure cases so one malformed document cannot stall a run;
+- keep Stage 4 provider selection and worker isolation in the public
+  `regdocs_4_normalize.py` supervisor so malformed Azure/Docling artifacts fail
+  one document rather than the entire normalization pass;
 - make inspection and no-op modes genuinely read-only where promised;
 - write Stage 4 as atomic, manifested generations;
 - prevent filtered normalization from replacing the canonical corpus by
@@ -136,7 +142,72 @@ Focus:
   exists; and
 - add fixture, regression, concurrency, and fault-injection tests, including
   large-PDF range-boundary, restart, qualified-provenance, Docling child-process
-  crash/restart/quarantine, and search-publication cases.
+  crash/restart/quarantine, Stage 4 malformed-artifact continuation, and
+  search-publication cases.
+
+#### Bounded Docling model reuse without concurrent document writers
+
+Keep the current production-safe rule of **one active Docling child process at a
+time**. SQLite does not require multiple document workers for throughput, and the
+single active child keeps writes serialized and crash behavior easy to reason
+about.
+
+After the one-document-per-child baseline is measured, evaluate a bounded worker
+recycling mode that amortizes Docling/PyTorch/model initialization while
+preserving that single-active-child rule:
+
+```text
+Supervisor
+   |
+   v
+Child #1
+   load Docling models once
+   process 25–100 documents sequentially
+   checkpoint after every document
+   exit/recycle
+   |
+   v
+Child #2
+   load Docling models once
+   process the next 25–100 documents sequentially
+   checkpoint after every document
+   exit/recycle
+   |
+   v
+...
+```
+
+This is **not** a plan to process multiple documents concurrently. There remains
+only one current Docling child and therefore one document-level SQLite writer at
+a time. The optimization is model reuse inside that child.
+
+Before adopting it:
+
+- benchmark one-document-per-child initialization cost against actual conversion
+  time on the RTX 4090;
+- choose a conservative configurable recycle boundary, initially around 25–100
+  documents rather than an unbounded long-lived worker;
+- commit each successful document's artifact and ledger row before starting the
+  next document in the child;
+- have the supervisor remember the first uncommitted document in a batch so a
+  segfault/OOM/crash requeues only unfinished work;
+- recycle early on memory growth, CUDA instability, or a configurable elapsed
+  time/memory threshold;
+- keep quarantine/retry semantics at document identity rather than batch
+  identity; and
+- record worker generation/recycle reason and per-document elapsed time so the
+  throughput benefit can be measured rather than assumed.
+
+Exit criteria for bounded model reuse:
+
+- exactly one Docling child is active at any moment;
+- a child crash loses no previously committed document result;
+- restart resumes from the first unfinished document rather than the start of
+  the batch;
+- GPU/model initialization overhead is materially reduced on the measured
+  corpus; and
+- output identity and comparison results are unchanged from one-document-per-
+  child execution for the same Docling version/configuration.
 
 #### SQLite ledger rebuild and disaster recovery
 
@@ -696,26 +767,28 @@ The prototype succeeds when reviewers can see that:
 3. Create representative discovery queries and relevance judgments.
 4. Measure the Azure AI Search keyword/filter baseline before adding vectors.
 5. Close the Stage 1–5 hardening items that block safe unattended or full runs.
-6. Add a rebuildability audit and artifact-side manifests sufficient to recover
+6. Benchmark Docling per-document model initialization overhead on the RTX 4090
+   before deciding whether bounded 25–100-document worker reuse is worthwhile.
+7. Add a rebuildability audit and artifact-side manifests sufficient to recover
    current corpus state without rerunning Stage 3.
-7. Add representative fixtures and test interruption, recovery, concurrency,
+8. Add representative fixtures and test interruption, recovery, concurrency,
    parser drift, range boundaries, qualified provenance, Docling process crashes,
-   ledger loss/rebuild, and publication.
-8. Select a deliberately varied Azure-versus-Docling benchmark set including
+   Stage 4 malformed-artifact continuation, ledger loss/rebuild, and publication.
+9. Select a deliberately varied Azure-versus-Docling benchmark set including
    born-digital, scanned, table-heavy, long, and known-problem documents.
-9. Build analyzer comparison reports and inspect the divergent pages/structures.
-10. Select the reference project/proceeding corpus and define completeness.
-11. Freeze the first normalized-artifact and generation-manifest contract.
-12. Rebuild the reference corpus, publish it to search, and produce a
+10. Build analyzer comparison reports and inspect the divergent pages/structures.
+11. Select the reference project/proceeding corpus and define completeness.
+12. Freeze the first normalized-artifact and generation-manifest contract.
+13. Rebuild the reference corpus, publish it to search, and produce a
     corpus-health/retrieval report.
-13. Validate dossier, timeline, inspection, evidence-selection, and comparison
+14. Validate dossier, timeline, inspection, evidence-selection, and comparison
     workflows on the reference corpus.
-14. Build the thin Phase 1 Atlas web application and validate search -> source ->
+15. Build the thin Phase 1 Atlas web application and validate search -> source ->
     page/region highlight before adding broader product features.
-15. Run Copilot Studio first against a pilot Atlas Azure AI Search index and
+16. Run Copilot Studio first against a pilot Atlas Azure AI Search index and
     validate grounded answers, Atlas citation URLs, embedding, and exact
     page/region navigation before writing a custom Foundry chat layer.
-16. Implement the initial Atlas front page and three-surface research workspace
+17. Implement the initial Atlas front page and three-surface research workspace
     shell around Search, Document/Evidence, and Ask, keeping the chat adapter
     replaceable.
 
@@ -743,6 +816,8 @@ The prototype succeeds when reviewers can see that:
 | 2026-08-08 | Use Copilot Studio as the first conversational prototype while keeping an Atlas-owned replaceable chat boundary | Tests the lowest-friction Azure-native path without coupling document identity, citations, provenance, or the front end to one conversational engine |
 | 2026-08-08 | Make the Phase 1 front page Search/Ask-first and transition into a Search + Document/Evidence + Ask research workspace | Keeps research and source inspection primary while still making conversational discovery immediately available |
 | 2026-08-09 | Make the SQLite ledger rebuildable from preserved corpus artifacts while retaining normal DB backups for fast recovery | Prevents ledger loss from forcing source re-acquisition or expensive Stage 3 recomputation and keeps artifact storage as an independent disaster-recovery path |
+| 2026-08-09 | Keep one active Docling child now and evaluate bounded 25–100-document model-reuse workers only after measuring initialization overhead | Preserves serialized SQLite writes and crash isolation while leaving a measured path to better RTX 4090 utilization without concurrent document workers |
+| 2026-08-09 | Make `regdocs_4_normalize.py` the provider-selecting Stage 4 supervisor and isolate each document in a child process | Keeps one Stage 4 run while allowing malformed analysis artifacts to fail individually instead of aborting the corpus pass |
 
 ## Open questions
 
