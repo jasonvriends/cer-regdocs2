@@ -4,17 +4,23 @@
 
 ## Current POC baseline
 
-REGDOCS Atlas provides one root CLI (`python pipeline.py ...`) and one application package (`regdocs_atlas/`) for the complete acquisition-to-search workflow:
+REGDOCS Atlas provides one root CLI (`python pipeline.py ...`) and one application package (`regdocs_atlas/`) for the complete acquisition-to-search workflow.
 
-- Scout preserves REGDOCS metadata and raw HTML evidence.
-- Download preserves current source files, SHA-256 identities, and deterministic metadata sidecars.
-- Analyze supports Azure Content Understanding and local Docling with single-document child-process isolation.
-- Azure analysis preserves provider-native JSON/Markdown artifacts and supports large PDF Content-Range processing.
-- Normalize locally produces deterministic documents/pages/chunks/tables/provenance JSONL from Stage 3 artifacts.
-- Index publishes normalized chunks to Azure AI Search.
-- SQLite provides the operational ledger, named migrations, backups, integrity checks, run state, errors, analysis state, and normalization state.
-- A global pipeline lock and canonical `workspace/pipeline.log` coordinate normal root-CLI operation while existing stage locks remain defense-in-depth inside the current stage implementations.
-- Azure Content Understanding usage/cost can be inspected from saved result usage with configurable rates; Docling is local compute.
+The public CLI is action-oriented for safety: naming a stage never performs work. Scout, Download, Azure analysis, Docling analysis, Normalize, and Index all require an explicit action before network or mutating work can begin. Examples include `scout run`, `download run`, `analyze azure run`, `analyze docling run`, `normalize run`, and `index publish`. Safe planning/status actions are separate. Azure Content Understanding work additionally requires an explicit candidate scope (`--all`, `--limit`, or `--document-id`).
+
+`SYNTAX.md` is the authoritative public command/switch reference. `README.md` remains the architectural and POC operating overview.
+
+The pipeline baseline includes:
+
+- Scout preserving REGDOCS metadata, raw HTML evidence, recovery manifests, and a durable date-range coverage watermark.
+- Download preserving current source files, SHA-256 identities, and deterministic metadata sidecars.
+- Azure Content Understanding and local Docling analysis with single-document child-process isolation.
+- Azure analysis preserving provider-native JSON/Markdown artifacts and supporting large PDF Content-Range processing.
+- Normalize locally producing deterministic documents/pages/chunks/tables/provenance JSONL from Stage 3 artifacts.
+- Index validating/publishing normalized chunks to Azure AI Search.
+- SQLite providing the operational ledger, named migrations, backups, integrity checks, run state, errors, analysis state, and normalization state.
+- A global pipeline lock and canonical `workspace/pipeline.log` coordinating normal root-CLI operation while stage locks remain defense-in-depth.
+- Azure Content Understanding usage/cost inspection from saved result usage with configurable rates; Docling remains local compute.
 
 ## Durable recovery boundary
 
@@ -23,6 +29,7 @@ The POC treats Stages 1-3 as durable because they contain source evidence, sourc
 Durable recovery artifacts include:
 
 - Scout document/snapshot manifests plus raw HTML;
+- Scout coverage metadata independent of historical SQLite run rows;
 - downloaded files plus Stage 2 sidecars;
 - successful Stage 3 analysis manifests plus Azure/Docling provider artifacts.
 
@@ -49,7 +56,8 @@ The repository intentionally has:
 - no GitHub Actions CI workflow;
 - no dedicated automated test suite for the POC;
 - one root `requirements.txt`;
-- one documentation source (`README.md`);
+- two intentionally distinct documentation files: `README.md` for architecture/operating rules and `SYNTAX.md` for command reference;
+- one consolidated `RELEASE_NOTES.md` baseline rather than an internal change diary;
 - one version (`0.0.1`) until explicitly changed.
 
 `workspace/` and `database/` are Git-ignored local state. They must not be deleted as part of repository cleanup, especially `workspace/3_analyze/`, because reproducing Azure analysis can be expensive.
