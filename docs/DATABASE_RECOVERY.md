@@ -1,6 +1,6 @@
 # Database migration and recovery
 
-REGDOCS Atlas treats `database/regdocs.db` as the fast operational ledger, but durable corpus artifacts are also designed to support disaster recovery.
+REGDOCS Atlas treats `database/regdocs.db` as the fast operational ledger, while durable corpus artifacts are designed to support independent disaster recovery.
 
 ## Safe schema migration
 
@@ -18,12 +18,13 @@ python pipeline.py db migrate
 
 For an existing database, the default migration path:
 
-1. refuses to run while a live Scout, Download, Analyze, or Normalize stage lock exists;
-2. creates a consistent SQLite backup with SQLite's backup API under `database/backups/`;
-3. applies only pending named migrations;
-4. verifies the expected schema;
-5. runs `PRAGMA integrity_check`; and
-6. runs `PRAGMA foreign_key_check`.
+1. takes the canonical `database/locks/pipeline.lock` orchestration lock;
+2. refuses to run while a live legacy Scout, Download, Analyze, or Normalize stage lock exists;
+3. creates a consistent SQLite backup with SQLite's backup API under `database/backups/`;
+4. applies only pending named migrations;
+5. verifies the expected schema;
+6. runs `PRAGMA integrity_check`; and
+7. runs `PRAGMA foreign_key_check`.
 
 Use `--no-backup` only when intentionally suppressing that safety copy.
 
@@ -58,14 +59,14 @@ Only an artifact rebuild creates `RECOVERED_*` states and recovery tasks.
 
 ## Durable Stage 2 sidecars
 
-Normal Stage 2 public runs now write deterministic metadata sidecars by default:
+Normal Stage 2 public runs write deterministic metadata sidecars by default:
 
 ```text
 workspace/2_download/files/4710492.pdf
 workspace/2_download/files/4710492.metadata.json
 ```
 
-The sidecar preserves current document metadata plus the source SHA-256 and file facts needed for stronger reconstruction. Opt out only when intentional:
+The sidecar preserves current document metadata plus source SHA-256 and file facts needed for stronger reconstruction. Opt out only intentionally:
 
 ```bash
 python pipeline.py download --no-sidecars
@@ -77,39 +78,41 @@ Backfill or refresh sidecars without downloads:
 python pipeline.py download --sidecars-only
 ```
 
-## Rebuild workflow
+## Safest rebuild test: do not delete the working DB first
 
-Inventory surviving artifacts:
+To prove recovery, build a second ledger beside the working one. This is safer and gives you something to compare against:
 
 ```bash
 python pipeline.py rebuild inventory
-```
-
-Preview the best available recovery tier:
-
-```bash
 python pipeline.py rebuild plan
+python pipeline.py rebuild create --output database/regdocs.rebuilt.db
+python pipeline.py rebuild verify --db database/regdocs.rebuilt.db
 ```
 
-Create a new database; the command refuses to overwrite an existing target:
+Keep the original `database/regdocs.db` until the rebuilt ledger has been inspected. A filesystem copy of a SQLite database taken while writers are active is not the preferred safety copy; use the migration backup API or stop all writers first.
 
-```bash
-python pipeline.py rebuild create \
-  --output database/regdocs.rebuilt.db
+For a meaningful disaster-recovery test, preserve at least:
+
+```text
+workspace/1_scout/          # raw Scout evidence, if available
+workspace/2_download/       # source files + sidecars + historical versions
+workspace/3_analyze/        # Azure and Docling artifacts
+workspace/4_normalize/      # normalized corpus
+VERSION
+RELEASE_NOTES.md
 ```
 
-Verify it:
+Also preserve any non-repository secrets/configuration you need to contact REGDOCS/Azure later. Azure AI Search itself is a rebuildable publication target and does not need to be part of the local recovery backup.
 
-```bash
-python pipeline.py rebuild verify \
-  --db database/regdocs.rebuilt.db
-```
+If you intentionally want to simulate complete SQLite loss after a successful side-by-side test, stop every pipeline writer first, retain the original DB/backup outside the active path, remove any old `-wal`/`-shm` only after SQLite is closed, and promote the verified rebuilt DB only after comparison.
 
-The current rebuild implementation reconstructs current `documents` and `files` from surviving Stage 2 source files. A matching valid Stage 2 sidecar restores current metadata. Without a sidecar, the record is explicitly `RECOVERED_MINIMAL`; unknown title/URL/filing metadata remains empty rather than being fabricated.
+## What rebuild-create currently reconstructs
 
-Matching canonical Azure and Docling Stage 3 JSON artifacts are reconstructed into `analyses` when their artifact path/payload identity agrees with the recovered document ID and source SHA-256. This does not call Azure or rerun Docling.
+`rebuild create` refuses to overwrite an existing target. It creates the new ledger through the same migration chain, hashes surviving current Stage 2 source files, validates matching Stage 2 sidecars, reconstructs `documents` and `files`, and reconstructs matching Azure/Docling `analyses` rows when canonical Stage 3 artifacts agree with the recovered document ID and source SHA-256.
 
-Stage 4 JSONL is preserved but `normalizations` rows are not yet reconstructed from bare JSONL because the current outputs do not independently prove every normalizer/config/input identity. Generation manifests are the next requirement for that layer.
+If only a source file survives, the document is explicitly `RECOVERED_MINIMAL`; unknown title/URL/filing metadata remains empty rather than being fabricated. If a valid Stage 2 sidecar survives, current metadata is recovered from that sidecar but missing raw Scout evidence remains visible.
+
+Stage 4 JSONL is preserved but `normalizations` rows are not yet reconstructed from bare JSONL because the current outputs do not independently prove every normalizer/config/input identity. Generation manifests are still required before that layer can be reconstructed safely.
 
 ## Missing Scout data
 
@@ -126,34 +129,30 @@ recovery_tasks
 Typical states:
 
 ```text
-OBSERVED             normal document created by the acquisition pipeline
-RECOVERED_COMPLETE   artifact recovery contains the required current facts
-RECOVERED_PARTIAL    useful metadata recovered, but acquisition evidence/facts are missing
+OBSERVED             normal document backed by acquisition evidence
+RECOVERED_COMPLETE   recovery artifacts contain required current facts
+RECOVERED_PARTIAL    useful facts exist but acquisition evidence/facts remain missing
 RECOVERED_MINIMAL    only minimal source/file identity can be proven
 ```
 
-Inspect queued Scout repair work:
+Inspect queued Scout work without network requests:
 
 ```bash
-python pipeline.py recover scout \
-  --db database/regdocs.rebuilt.db
+python pipeline.py recover scout --db database/regdocs.rebuilt.db
+python pipeline.py recover scout --db database/regdocs.rebuilt.db --priority HIGH
+python pipeline.py recover scout --db database/regdocs.rebuilt.db --priority HIGH --ids-only
 ```
 
-Prioritize source-only records:
+Execute a selective authoritative REGDOCS detail refresh for the queued records:
 
 ```bash
 python pipeline.py recover scout \
-  --db database/regdocs.rebuilt.db \
-  --priority HIGH
-```
-
-Export just the IDs:
-
-```bash
-python pipeline.py recover scout \
+  --execute \
   --db database/regdocs.rebuilt.db \
   --priority HIGH \
-  --ids-only
+  --limit 100
 ```
 
-At release 0.0.3 this command exposes the durable repair queue; it does not yet issue selective REGDOCS network requests. The next Scout refactor should consume this queue and complete tasks only after fresh authoritative evidence is stored.
+The selective recovery path only processes queued numeric REGDOCS item IDs. For each successful fetch it preserves the fresh detail HTML under `workspace/1_scout/raw/regdocs/recovery-detail/`, inserts a `raw_snapshots` row, parses current detail metadata with the existing Scout parser, and updates only facts supported by that response. It marks a recovery task `PARTIAL` when facts such as container relationships are still unproven rather than claiming the document is fully observed.
+
+This is intentionally different from rerunning the historical date crawl: recovery repairs known surviving document identities first, while missing historical search/container evidence remains visible until separately reacquired.
