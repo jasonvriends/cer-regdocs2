@@ -5,15 +5,29 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Sequence
 
 from .artifacts import inventory as artifact_inventory
 from .artifacts import recovery_plan
-from .db import migrate, migration_status, open_ledger, verify_schema
+from .db import migrate, migration_plan, migration_status, open_ledger, verify_schema
 from .db.connection import table_exists
-from .paths import DATABASE_PATH, PIPELINE_DIR, PROJECT_ROOT
+from .db.safety import assert_no_active_stage_locks, backup_database, integrity_report
+from .paths import (
+    ANALYZE_LOCK_PATH,
+    DATABASE_BACKUP_DIR,
+    DATABASE_PATH,
+    DOWNLOAD_LOCK_PATH,
+    MIGRATION_LOCK_PATH,
+    NORMALIZE_LOCK_PATH,
+    PIPELINE_DIR,
+    PROJECT_ROOT,
+    SCOUT_LOCK_PATH,
+)
+from .rebuild import rebuild_create, recovery_queue
+from .runtime.locks import ProcessLock
 from .version import release_version
 
 LEGACY_STAGE_SCRIPTS = {
@@ -24,6 +38,7 @@ LEGACY_STAGE_SCRIPTS = {
     "normalize": "regdocs_4_normalize.py",
     "index": "regdocs_5_index.py",
 }
+STAGE_LOCKS = (SCOUT_LOCK_PATH, DOWNLOAD_LOCK_PATH, ANALYZE_LOCK_PATH, NORMALIZE_LOCK_PATH)
 
 HELP = """REGDOCS Atlas unified pipeline
 
@@ -39,12 +54,16 @@ Usage:
   python pipeline.py normalize [--provider azure|docling] [stage options...]
   python pipeline.py index [stage options...]
 
-  python pipeline.py db migrate [--db PATH]
+  python pipeline.py db migrate [--db PATH] [--plan] [--no-backup]
   python pipeline.py db status [--db PATH]
   python pipeline.py db verify [--db PATH]
 
   python pipeline.py rebuild inventory
   python pipeline.py rebuild plan
+  python pipeline.py rebuild create [--output database/regdocs.rebuilt.db]
+  python pipeline.py rebuild verify [--db database/regdocs.rebuilt.db]
+
+  python pipeline.py recover scout [--db PATH] [--priority HIGH|NORMAL|LOW] [--limit N]
 
 The existing pipeline/regdocs_* scripts remain supported compatibility entry points.
 """
@@ -62,31 +81,89 @@ def _exec_legacy(script_name: str, args: Sequence[str]) -> int:
     return 0
 
 
-def _db_path(args: Sequence[str]) -> Path:
+def _db_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--db", default=str(DATABASE_PATH))
-    parsed, unknown = parser.parse_known_args(list(args))
+    return parser
+
+
+def _migration_args(args: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="pipeline.py db migrate")
+    parser.add_argument("--db", default=str(DATABASE_PATH))
+    parser.add_argument("--plan", action="store_true", help="Show pending migrations without writing")
+    parser.add_argument("--no-backup", action="store_true", help="Skip the default consistent SQLite backup")
+    parser.add_argument("--backup-dir", default=str(DATABASE_BACKUP_DIR))
+    parser.add_argument("--force-lock", action="store_true")
+    return parser.parse_args(list(args))
+
+
+def _db_path(args: Sequence[str]) -> Path:
+    parsed, unknown = _db_parser().parse_known_args(list(args))
     if unknown:
         raise SystemExit(f"Unknown database option(s): {' '.join(unknown)}")
     return Path(parsed.db).expanduser().resolve()
 
 
-def _db_command(args: Sequence[str]) -> int:
-    if not args or args[0] in {"-h", "--help"}:
-        print("Usage: python pipeline.py db migrate|status|verify [--db PATH]")
-        return 0
-    action = args[0]
-    db_path = _db_path(args[1:])
-    if action == "migrate":
-        con = open_ledger(db_path)
+def _migration_lock_for(db_path: Path) -> Path:
+    return MIGRATION_LOCK_PATH if db_path == DATABASE_PATH.resolve() else db_path.with_suffix(db_path.suffix + ".migrate.lock")
+
+
+def _migration_plan_for(db_path: Path) -> dict[str, object]:
+    if db_path.is_file():
+        con = open_ledger(db_path, readonly=True)
         try:
-            result = migrate(con, release_version())
-            result["database"] = str(db_path)
-            result["verification"] = verify_schema(con)
-            _print_json(result)
-            return 0 if result["verification"]["ok"] else 1
+            result = migration_plan(con)
         finally:
             con.close()
+    else:
+        con = sqlite3.connect(":memory:")
+        con.row_factory = sqlite3.Row
+        try:
+            result = migration_plan(con)
+        finally:
+            con.close()
+    result["database"] = str(db_path)
+    result["database_exists"] = db_path.is_file()
+    result["backup_would_be_created"] = db_path.is_file()
+    return result
+
+
+def _db_command(args: Sequence[str]) -> int:
+    if not args or args[0] in {"-h", "--help"}:
+        print("Usage: python pipeline.py db migrate|status|verify [options]")
+        return 0
+    action = args[0]
+    if action == "migrate":
+        options = _migration_args(args[1:])
+        db_path = Path(options.db).expanduser().resolve()
+        if options.plan:
+            _print_json(_migration_plan_for(db_path))
+            return 0
+        lock = _migration_lock_for(db_path)
+        with ProcessLock(lock, role="database_migration", force=options.force_lock):
+            assert_no_active_stage_locks(STAGE_LOCKS)
+            backup_path: Path | None = None
+            if db_path.is_file() and not options.no_backup:
+                backup_path = backup_database(
+                    db_path,
+                    Path(options.backup_dir),
+                    release=release_version(),
+                )
+            con = open_ledger(db_path)
+            try:
+                result = migrate(con, release_version())
+                result["database"] = str(db_path)
+                result["backup"] = str(backup_path) if backup_path else None
+                result["verification"] = verify_schema(con)
+                result["integrity"] = integrity_report(con)
+                ok = bool(result["verification"]["ok"]) and bool(result["integrity"]["ok"])
+                result["ok"] = ok
+                _print_json(result)
+                return 0 if ok else 1
+            finally:
+                con.close()
+
+    db_path = _db_path(args[1:])
     if not db_path.is_file():
         print(f"Database not found: {db_path}", file=sys.stderr)
         return 1
@@ -106,7 +183,9 @@ def _db_command(args: Sequence[str]) -> int:
             return 0
         if action == "verify":
             result = verify_schema(con)
+            result["integrity"] = integrity_report(con)
             result["database"] = str(db_path)
+            result["ok"] = bool(result["ok"]) and bool(result["integrity"]["ok"])
             _print_json(result)
             return 0 if result["ok"] else 1
     finally:
@@ -142,6 +221,11 @@ def _status() -> int:
                 result["recent_runs"] = [dict(row) for row in rows]
             else:
                 result["recent_runs"] = []
+            if table_exists(con, "recovery_tasks"):
+                rows = con.execute(
+                    "SELECT status, priority, COUNT(*) AS n FROM recovery_tasks GROUP BY status, priority"
+                ).fetchall()
+                result["recovery_tasks"] = [dict(row) for row in rows]
         finally:
             con.close()
     else:
@@ -158,6 +242,7 @@ def _diagnostics() -> int:
         "project_root": str(PROJECT_ROOT),
         "pipeline_dir": str(PIPELINE_DIR),
         "artifacts": artifact_inventory().to_dict(),
+        "migration_backup_dir": str(DATABASE_BACKUP_DIR),
     }
     if DATABASE_PATH.is_file():
         con = open_ledger(DATABASE_PATH, readonly=True)
@@ -174,16 +259,61 @@ def _diagnostics() -> int:
 
 def _rebuild_command(args: Sequence[str]) -> int:
     if not args or args[0] in {"-h", "--help"}:
-        print("Usage: python pipeline.py rebuild inventory|plan")
+        print("Usage: python pipeline.py rebuild inventory|plan|create|verify")
         return 0
-    if args[0] == "inventory":
+    action = args[0]
+    if action == "inventory":
         _print_json(artifact_inventory().to_dict())
         return 0
-    if args[0] == "plan":
+    if action == "plan":
         _print_json(recovery_plan())
         return 0
-    print(f"Unknown rebuild command: {args[0]}", file=sys.stderr)
+    if action == "create":
+        parser = argparse.ArgumentParser(prog="pipeline.py rebuild create")
+        parser.add_argument("--output", default=str(PROJECT_ROOT / "database" / "regdocs.rebuilt.db"))
+        options = parser.parse_args(list(args[1:]))
+        _print_json(rebuild_create(Path(options.output)))
+        return 0
+    if action == "verify":
+        parser = argparse.ArgumentParser(prog="pipeline.py rebuild verify")
+        parser.add_argument("--db", default=str(PROJECT_ROOT / "database" / "regdocs.rebuilt.db"))
+        options = parser.parse_args(list(args[1:]))
+        db_path = Path(options.db).expanduser().resolve()
+        if not db_path.is_file():
+            print(f"Database not found: {db_path}", file=sys.stderr)
+            return 1
+        con = open_ledger(db_path, readonly=True)
+        try:
+            result = {"database": str(db_path), "schema": verify_schema(con), "integrity": integrity_report(con)}
+            result["ok"] = bool(result["schema"]["ok"]) and bool(result["integrity"]["ok"])
+            _print_json(result)
+            return 0 if result["ok"] else 1
+        finally:
+            con.close()
+    print(f"Unknown rebuild command: {action}", file=sys.stderr)
     return 2
+
+
+def _recover_command(args: Sequence[str]) -> int:
+    if not args or args[0] in {"-h", "--help"}:
+        print("Usage: python pipeline.py recover scout [--db PATH] [--priority ...] [--limit N] [--ids-only]")
+        return 0
+    if args[0] != "scout":
+        print(f"Unknown recovery type: {args[0]}", file=sys.stderr)
+        return 2
+    parser = argparse.ArgumentParser(prog="pipeline.py recover scout")
+    parser.add_argument("--db", default=str(DATABASE_PATH))
+    parser.add_argument("--priority", choices=("HIGH", "NORMAL", "LOW"))
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--ids-only", action="store_true")
+    options = parser.parse_args(list(args[1:]))
+    result = recovery_queue(Path(options.db), priority=options.priority, limit=options.limit)
+    if options.ids_only:
+        for task in result["tasks"]:
+            print(task["document_id"])
+    else:
+        _print_json(result)
+    return 0
 
 
 def _normalize_args(args: Sequence[str]) -> list[str]:
@@ -219,6 +349,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _db_command(rest)
     if command == "rebuild":
         return _rebuild_command(rest)
+    if command == "recover":
+        return _recover_command(rest)
     if command in {"scout", "download", "index"}:
         return _exec_legacy(LEGACY_STAGE_SCRIPTS[command], rest)
     if command == "analyze":
