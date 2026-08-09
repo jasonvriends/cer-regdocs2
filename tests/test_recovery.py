@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 
 from regdocs_atlas import rebuild as rebuild_module
+from regdocs_atlas import scout_manifests
 from regdocs_atlas.db.connection import open_ledger
 from regdocs_atlas.db.migrations import migrate, verify_schema
 from regdocs_atlas.db.safety import backup_database, integrity_report
+from regdocs_atlas.rebuild_compare import compare_ledgers
 from regdocs_atlas.runtime.hashing import sha256_file
 
 
@@ -38,6 +42,13 @@ def test_sqlite_backup_and_recovery_migration_preserve_existing_run(tmp_path):
         assert integrity_report(con)["ok"] is True
     finally:
         con.close()
+
+
+def _patch_rebuild_roots(monkeypatch, tmp_path, files, azure, docling):
+    monkeypatch.setattr(rebuild_module, "DOWNLOAD_FILES_DIR", files)
+    monkeypatch.setattr(rebuild_module, "CONTENT_UNDERSTANDING_DIR", azure)
+    monkeypatch.setattr(rebuild_module, "DOCLING_DIR", docling)
+    monkeypatch.setattr(rebuild_module, "inventory", lambda: type("I", (), {"to_dict": lambda self: {}})())
 
 
 def test_rebuild_recovers_sidecar_source_and_stage3_and_queues_scout(tmp_path, monkeypatch):
@@ -94,21 +105,21 @@ def test_rebuild_recovers_sidecar_source_and_stage3_and_queues_scout(tmp_path, m
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(rebuild_module, "DOWNLOAD_FILES_DIR", files)
-    monkeypatch.setattr(rebuild_module, "CONTENT_UNDERSTANDING_DIR", azure)
-    monkeypatch.setattr(rebuild_module, "DOCLING_DIR", docling)
-    monkeypatch.setattr(rebuild_module, "inventory", lambda: type("I", (), {"to_dict": lambda self: {}})())
+    _patch_rebuild_roots(monkeypatch, tmp_path, files, azure, docling)
     monkeypatch.setattr(rebuild_module, "recovery_plan", lambda: {"best_recovery_tier": "B"})
+    monkeypatch.setattr(rebuild_module, "document_manifests", lambda: [])
+    monkeypatch.setattr(rebuild_module, "snapshot_manifests", lambda: [])
 
     output = tmp_path / "rebuilt.db"
     result = rebuild_module.rebuild_create(output)
-    assert result["summary"]["documents_recovered"] == 1
+    assert result["summary"]["documents_recovered_total"] == 1
     assert result["summary"]["analyses_recovered"]["azure"] == 1
 
     queue = rebuild_module.recovery_queue(output)
     assert queue["pending"] == 1
     assert queue["tasks"][0]["document_id"] == "4710492"
-    assert queue["tasks"][0]["priority"] == "LOW"
+    assert queue["tasks"][0]["priority"] == "NORMAL"
+    assert "scout_raw_evidence" in queue["tasks"][0]["missing_facts"]
 
 
 def test_rebuild_source_only_is_explicitly_minimal(tmp_path, monkeypatch):
@@ -116,11 +127,10 @@ def test_rebuild_source_only_is_explicitly_minimal(tmp_path, monkeypatch):
     files.mkdir(parents=True)
     (files / "999.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
 
-    monkeypatch.setattr(rebuild_module, "DOWNLOAD_FILES_DIR", files)
-    monkeypatch.setattr(rebuild_module, "CONTENT_UNDERSTANDING_DIR", tmp_path / "azure")
-    monkeypatch.setattr(rebuild_module, "DOCLING_DIR", tmp_path / "docling")
-    monkeypatch.setattr(rebuild_module, "inventory", lambda: type("I", (), {"to_dict": lambda self: {}})())
+    _patch_rebuild_roots(monkeypatch, tmp_path, files, tmp_path / "azure", tmp_path / "docling")
     monkeypatch.setattr(rebuild_module, "recovery_plan", lambda: {"best_recovery_tier": "C"})
+    monkeypatch.setattr(rebuild_module, "document_manifests", lambda: [])
+    monkeypatch.setattr(rebuild_module, "snapshot_manifests", lambda: [])
 
     output = tmp_path / "minimal.db"
     rebuild_module.rebuild_create(output)
@@ -134,3 +144,156 @@ def test_rebuild_source_only_is_explicitly_minimal(tmp_path, monkeypatch):
         con.close()
     queue = rebuild_module.recovery_queue(output)
     assert queue["tasks"][0]["priority"] == "HIGH"
+
+
+def test_tier_a_manifests_restore_scout_snapshot_container_and_source(tmp_path, monkeypatch):
+    root = tmp_path / "corpus"
+    files = root / "workspace" / "2_download" / "files"
+    raw_dir = root / "workspace" / "1_scout" / "raw" / "regdocs" / "container" / "ab"
+    manifests = root / "workspace" / "1_scout" / "manifests"
+    doc_manifests = manifests / "documents"
+    snapshot_manifests = manifests / "snapshots"
+    azure = root / "workspace" / "3_analyze" / "content-understanding"
+    docling = root / "workspace" / "3_analyze" / "docling"
+    files.mkdir(parents=True)
+    raw_dir.mkdir(parents=True)
+
+    source = files / "101.pdf"
+    source.write_bytes(b"%PDF-1.4\nTier A\n%%EOF\n")
+    source_sha = sha256_file(source)
+    sidecar = {
+        "schema": "cer-regdocs-document-sidecar",
+        "schema_version": 1,
+        "document_id": "101",
+        "title": "Child PDF",
+        "source_url": "https://example.test/download/101",
+        "item_kind": "PDF Document",
+        "filing_date": "2026-08-01",
+        "submitter": "Example Co",
+        "company": "Example Co",
+        "project": "Project X",
+        "filing_number": "C10001",
+        "snippet": "child",
+        "sha256": source_sha,
+        "file": {
+            "path": str(source),
+            "original_filename": "child.pdf",
+            "content_type": "application/pdf",
+            "extension": "pdf",
+            "size_bytes": source.stat().st_size,
+            "sha256": source_sha,
+            "downloaded_at": "2026-08-02T00:00:00+00:00",
+        },
+        "pipeline": {
+            "first_seen_at": "2026-08-01T00:00:00+00:00",
+            "last_seen_at": "2026-08-02T00:00:00+00:00",
+            "created_at": "2026-08-01T00:00:00+00:00",
+        },
+        "metadata": {},
+    }
+    (files / "101.metadata.json").write_text(json.dumps(sidecar), encoding="utf-8")
+
+    raw_html = b"<div>Item(s) - 1 to 1 out of about 1</div><table><tbody></tbody></table>"
+    raw_sha = hashlib.sha256(raw_html).hexdigest()
+    raw_path = raw_dir / f"{raw_sha}.html.gz"
+    with gzip.open(raw_path, "wb") as stream:
+        stream.write(raw_html)
+
+    reference = root / "database" / "reference.db"
+    reference.parent.mkdir(parents=True)
+    con = open_ledger(reference)
+    try:
+        migrate(con, "0.0.4")
+        now = "2026-08-01T00:00:00+00:00"
+        con.execute(
+            """
+            INSERT INTO documents(
+                id,name,url,item_kind,is_file,filing_date,submitter,company,project,
+                filing_number,snippet,metadata,status,scout_status,download_status,
+                detail_status,first_seen_at,last_seen_at,created_at,updated_at
+            ) VALUES ('100','Container','https://example.test/item/100','Folder',0,
+                      '2026-08-01','Example Co','Example Co','Project X','C10001','parent',
+                      '{}','NEW','SUCCEEDED','NOT_APPLICABLE','SUCCEEDED',?,?,?,?)
+            """,
+            (now, now, now, now),
+        )
+        con.execute(
+            """
+            INSERT INTO documents(
+                id,name,url,item_kind,is_file,filing_date,submitter,company,project,
+                filing_number,snippet,metadata,status,scout_status,download_status,
+                detail_status,file_path,hash,first_seen_at,last_seen_at,created_at,updated_at
+            ) VALUES ('101','Child PDF','https://example.test/download/101','PDF Document',1,
+                      '2026-08-01','Example Co','Example Co','Project X','C10001','child',
+                      '{}','DOWNLOADED','SUCCEEDED','SUCCEEDED','SUCCEEDED',?,?, ?,?,?,?)
+            """,
+            (str(source), source_sha, now, now, now, now),
+        )
+        cursor = con.execute(
+            """
+            INSERT INTO raw_snapshots(
+                run_id,document_id,source_kind,source_url,final_url,fetched_at,http_status,
+                content_type,content_sha256,size_bytes,compressed_size_bytes,relative_path,
+                response_headers_json,parser_version
+            ) VALUES (NULL,'100','container','https://example.test/container/100',
+                      'https://example.test/container/100',?,200,'text/html',?,?,?,?, '{}','test-parser')
+            """,
+            (now, raw_sha, len(raw_html), raw_path.stat().st_size, str(raw_path)),
+        )
+        snapshot_id = int(cursor.lastrowid)
+        parent_metadata = {
+            "container": {
+                "is_container": True,
+                "member_ids": ["101"],
+                "membership_complete": True,
+                "snapshot_id": snapshot_id,
+                "snapshot_ids": [snapshot_id],
+                "result_endpoint": "https://example.test/container/100",
+            }
+        }
+        child_metadata = {
+            "container_memberships": [
+                {"container_id": "100", "snapshot_id": snapshot_id, "snapshot_ids": [snapshot_id]}
+            ]
+        }
+        con.execute("UPDATE documents SET metadata=? WHERE id='100'", (json.dumps(parent_metadata),))
+        con.execute("UPDATE documents SET metadata=? WHERE id='101'", (json.dumps(child_metadata),))
+        con.execute(
+            """
+            INSERT INTO files(document_id,path,original_filename,mime_type,extension,size_bytes,sha256,downloaded_at,is_current)
+            VALUES ('101',?,'child.pdf','application/pdf','pdf',?,?,?,1)
+            """,
+            (str(source), source.stat().st_size, source_sha, "2026-08-02T00:00:00+00:00"),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    monkeypatch.setattr(scout_manifests, "SCOUT_MANIFEST_DIR", manifests)
+    monkeypatch.setattr(scout_manifests, "SCOUT_DOCUMENT_MANIFEST_DIR", doc_manifests)
+    monkeypatch.setattr(scout_manifests, "SCOUT_SNAPSHOT_MANIFEST_DIR", snapshot_manifests)
+    exported = scout_manifests.export_scout_manifests(reference, verify_raw=True)
+    assert exported["ok"] is True
+    assert exported["document_manifests_written"] == 2
+    assert exported["snapshot_manifests_written"] == 1
+
+    _patch_rebuild_roots(monkeypatch, tmp_path, files, azure, docling)
+    monkeypatch.setattr(rebuild_module, "recovery_plan", lambda: {"best_recovery_tier": "A"})
+
+    rebuilt = root / "database" / "rebuilt.db"
+    result = rebuild_module.rebuild_create(rebuilt)
+    assert result["summary"]["documents_recovered_total"] == 2
+    assert result["summary"]["raw_snapshots_recovered"] == 1
+    assert result["summary"]["current_source_files_recovered"] == 1
+    assert result["summary"]["scout_snapshots_recovered"]["invalid"] == 0
+
+    comparison = compare_ledgers(reference, rebuilt)
+    assert comparison["document_ids"]["exact"] is True
+    assert comparison["current_file_identities"]["exact"] is True
+    assert comparison["raw_snapshot_identities"]["exact"] is True
+    assert comparison["container_relationships"]["exact"] is True
+    assert comparison["core_document_field_mismatches"]["exact"] is True
+    assert comparison["source_and_stage3_equivalent"] is True
+
+    queue = rebuild_module.recovery_queue(rebuilt)
+    assert queue["pending"] == 0
