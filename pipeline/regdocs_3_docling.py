@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 from regdocs_paths import ANALYZE_DIR, DATABASE_PATH, DOWNLOAD_DIR, resolve_stored_path, stored_path
 
-SCRIPT_VERSION = "3d.2.0"
+SCRIPT_VERSION = "3d.2.1"
 PARSER_VERSION = "regdocs-docling-projection-2026-08-08-v1"
 DEFAULT_ANALYZER_ID = "docling-standard"
 DEFAULT_OUTPUT_DIR = ANALYZE_DIR / "docling"
@@ -146,7 +146,14 @@ def current_analysis(
 ) -> Optional[sqlite3.Row]:
     return con.execute(
         """
-        SELECT a.status, a.error_code, a.error_message, a.page_count
+        SELECT
+            a.status,
+            a.error_code,
+            a.error_message,
+            a.page_count,
+            a.table_count,
+            a.section_count,
+            a.elapsed_seconds
         FROM analyses a
         JOIN files f ON f.id=a.file_id AND f.sha256=a.file_sha256
         WHERE f.is_current=1 AND a.document_id=? AND a.analyzer_id=? AND a.api_version=?
@@ -426,6 +433,12 @@ def main() -> int:
             )
             return 0
 
+        progress_width = len(str(total))
+        document_ordinals = {
+            document_id: index
+            for index, document_id in enumerate(initial_selected, start=1)
+        }
+
         while True:
             if args.max_documents is not None and launched >= args.max_documents:
                 break
@@ -448,8 +461,14 @@ def main() -> int:
             save_state(args.state_file, state)
 
             launched += 1
+            document_index = document_ordinals.get(document_id, min(completed + 1, total))
+            attempt = int(info["attempts"])
+            attempt_text = (
+                f" attempt {attempt}/{args.max_attempts}" if attempt > 1 else ""
+            )
             print(
-                f"[{launched}] {document_id} attempt {info['attempts']}/{args.max_attempts} ... ",
+                f"[{document_index:0{progress_width}d}/{total}] "
+                f"{document_id}{attempt_text} ... ",
                 end="",
                 flush=True,
             )
@@ -521,7 +540,17 @@ def main() -> int:
                 succeeded_run += 1
                 completed += 1
                 pages = int(analysis["page_count"] or 0) if analysis is not None else 0
-                print(f"SUCCEEDED pages={pages}", flush=True)
+                tables = int(analysis["table_count"] or 0) if analysis is not None else 0
+                sections = int(analysis["section_count"] or 0) if analysis is not None else 0
+                doc_elapsed = analysis["elapsed_seconds"] if analysis is not None else None
+                elapsed_text = (
+                    f"{float(doc_elapsed):.1f}s" if doc_elapsed is not None else "n/a"
+                )
+                print(
+                    f"SUCCEEDED pages={pages} tables={tables} "
+                    f"sections={sections} elapsed={elapsed_text}",
+                    flush=True,
+                )
             else:
                 failed_attempts += 1
                 extra = f" signal={info['last_signal']}" if info.get("last_signal") else ""
