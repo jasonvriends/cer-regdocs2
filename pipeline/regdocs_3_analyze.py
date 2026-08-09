@@ -47,7 +47,7 @@ from regdocs_paths import (
     stored_path,
 )
 
-SCRIPT_VERSION = "3.4.0"
+SCRIPT_VERSION = "3.4.1"
 DEFAULT_API_VERSION = "2025-11-01"
 PARSER_VERSION = f"azure-content-understanding-{DEFAULT_API_VERSION}"
 DEFAULT_ANALYZER_ID = "prebuilt-layout"
