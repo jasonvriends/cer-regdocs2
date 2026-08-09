@@ -27,6 +27,16 @@
 
 This release introduces a single repository-wide version in [`VERSION`](VERSION). See [`VERSIONING.md`](VERSIONING.md).
 
+All six primary public stage commands now share that release version contract. `--version` prints only `0.0.1`; `--diagnostics` exposes component/parser/schema/provider details separately. The public stage files are thin release-aware entry points and delegate normal execution to adjacent internal `*_core.py` implementations.
+
+This deliberately separates:
+
+```text
+release_version     whole REGDOCS Atlas release
+component_version   implementation identity
+parser/schema/API   data/provider compatibility identity
+```
+
 Do **not** rewrite old `runs.script_version`, parser versions, schema versions, Azure API versions, Docling versions, or artifact identities to `0.0.1`. Those values are historical or compatibility/provenance identifiers.
 
 The SQLite release uplift is intentionally additive:
@@ -50,6 +60,13 @@ Inspect the resulting release state with:
 python pipeline/regdocs_release.py --status
 ```
 
+Inspect any primary stage's implementation identity separately with, for example:
+
+```bash
+python pipeline/regdocs_3_azure.py --diagnostics
+python pipeline/regdocs_4_normalize.py --diagnostics
+```
+
 ### Known limitations at 0.0.1
 
 - the pipeline is still a prototype and not an unattended production service;
@@ -57,7 +74,7 @@ python pipeline/regdocs_release.py --status
 - Stage 4 still needs versioned manifested generations and stronger atomic publication before production use;
 - analyzer comparison and automatic canonical provider selection are not yet complete;
 - the SQLite artifact-rebuild path is planned and documented but is not yet a complete disaster-recovery implementation;
-- component constants still use older `SCRIPT_VERSION` naming in several files; future cleanup should rename those values according to their actual role rather than treating them as repository release numbers.
+- legacy internal `SCRIPT_VERSION` constants and the SQLite `script_version` column remain for compatibility with existing run/artifact provenance; new public surfaces call these component versions, and future implementation revisions should migrate those constants to purpose-specific names without rewriting history.
 
 ### Release policy going forward
 

@@ -6,6 +6,8 @@ questions. It is intentionally not an operations manual.
 For current behavior and commands, use:
 
 - [README.md](README.md) for repository orientation and quick start;
+- [VERSIONING.md](VERSIONING.md) and [RELEASE_NOTES.md](RELEASE_NOTES.md) for
+  repository-wide release/version semantics;
 - [Stage 1 — Scout](pipeline/regdocs_1_scout.md);
 - [Stage 2 — Download](pipeline/regdocs_2_download.md);
 - [Stage 3 — Azure](pipeline/regdocs_3_azure.md);
@@ -68,6 +70,9 @@ analysis backends:
 
 The pipeline has:
 
+- one repository-wide release version (`VERSION`) shared by every primary public
+  stage command; `--version` reports the release while `--diagnostics` exposes
+  component/parser/schema/provider identities separately;
 - one shared SQLite ledger for Stages 1–4 under `database/`;
 - persistent stage artifacts under `workspace/`;
 - version-controlled scripts and runbooks under `pipeline/`;
@@ -79,9 +84,6 @@ The pipeline has:
   output and can feed the current normalizer through a compatibility projection;
 - a single-threaded Docling supervisor that isolates each document in a separate
   child process so crashes do not terminate the overall corpus run;
-- a Stage 4 public supervisor that chooses Azure or Docling input, launches one
-  isolated normalization child at a time, records one parent run, and continues
-  past document-level normalization failures;
 - Stage 4 provenance that keeps original page/polygon geometry and globally
   qualifies Azure element pointers across multiple `contents[]` entries;
 - Stage 5 validation that joins each indexed chunk back to its matching
@@ -115,6 +117,12 @@ Focus:
 - stop persisting unnecessary cookies/headers and use explicit private file
   permissions;
 - centralize schema migrations, configuration, locking, and stale-run recovery;
+- keep repository release versioning separate from component/parser/schema/API
+  compatibility identities so a release bump alone never invalidates expensive
+  Stage 3 artifacts;
+- progressively rename legacy internal `SCRIPT_VERSION` constants to
+  purpose-specific component/contract identifiers as those implementations are
+  materially revised, while preserving historical SQLite provenance;
 - make Stage 2 file promotion and ledger updates crash-recoverable;
 - require bounded Stage 3 selection or explicit full-run acknowledgement;
 - preflight Stage 3 page/byte volume and projected cost before billable work;
@@ -767,28 +775,26 @@ The prototype succeeds when reviewers can see that:
 3. Create representative discovery queries and relevance judgments.
 4. Measure the Azure AI Search keyword/filter baseline before adding vectors.
 5. Close the Stage 1–5 hardening items that block safe unattended or full runs.
-6. Benchmark Docling per-document model initialization overhead on the RTX 4090
-   before deciding whether bounded 25–100-document worker reuse is worthwhile.
-7. Add a rebuildability audit and artifact-side manifests sufficient to recover
+6. Add a rebuildability audit and artifact-side manifests sufficient to recover
    current corpus state without rerunning Stage 3.
-8. Add representative fixtures and test interruption, recovery, concurrency,
+7. Add representative fixtures and test interruption, recovery, concurrency,
    parser drift, range boundaries, qualified provenance, Docling process crashes,
-   Stage 4 malformed-artifact continuation, ledger loss/rebuild, and publication.
-9. Select a deliberately varied Azure-versus-Docling benchmark set including
+   ledger loss/rebuild, and publication.
+8. Select a deliberately varied Azure-versus-Docling benchmark set including
    born-digital, scanned, table-heavy, long, and known-problem documents.
-10. Build analyzer comparison reports and inspect the divergent pages/structures.
-11. Select the reference project/proceeding corpus and define completeness.
-12. Freeze the first normalized-artifact and generation-manifest contract.
-13. Rebuild the reference corpus, publish it to search, and produce a
+9. Build analyzer comparison reports and inspect the divergent pages/structures.
+10. Select the reference project/proceeding corpus and define completeness.
+11. Freeze the first normalized-artifact and generation-manifest contract.
+12. Rebuild the reference corpus, publish it to search, and produce a
     corpus-health/retrieval report.
-14. Validate dossier, timeline, inspection, evidence-selection, and comparison
+13. Validate dossier, timeline, inspection, evidence-selection, and comparison
     workflows on the reference corpus.
-15. Build the thin Phase 1 Atlas web application and validate search -> source ->
+14. Build the thin Phase 1 Atlas web application and validate search -> source ->
     page/region highlight before adding broader product features.
-16. Run Copilot Studio first against a pilot Atlas Azure AI Search index and
+15. Run Copilot Studio first against a pilot Atlas Azure AI Search index and
     validate grounded answers, Atlas citation URLs, embedding, and exact
     page/region navigation before writing a custom Foundry chat layer.
-17. Implement the initial Atlas front page and three-surface research workspace
+16. Implement the initial Atlas front page and three-surface research workspace
     shell around Search, Document/Evidence, and Ask, keeping the chat adapter
     replaceable.
 
@@ -816,8 +822,7 @@ The prototype succeeds when reviewers can see that:
 | 2026-08-08 | Use Copilot Studio as the first conversational prototype while keeping an Atlas-owned replaceable chat boundary | Tests the lowest-friction Azure-native path without coupling document identity, citations, provenance, or the front end to one conversational engine |
 | 2026-08-08 | Make the Phase 1 front page Search/Ask-first and transition into a Search + Document/Evidence + Ask research workspace | Keeps research and source inspection primary while still making conversational discovery immediately available |
 | 2026-08-09 | Make the SQLite ledger rebuildable from preserved corpus artifacts while retaining normal DB backups for fast recovery | Prevents ledger loss from forcing source re-acquisition or expensive Stage 3 recomputation and keeps artifact storage as an independent disaster-recovery path |
-| 2026-08-09 | Keep one active Docling child now and evaluate bounded 25–100-document model-reuse workers only after measuring initialization overhead | Preserves serialized SQLite writes and crash isolation while leaving a measured path to better RTX 4090 utilization without concurrent document workers |
-| 2026-08-09 | Make `regdocs_4_normalize.py` the provider-selecting Stage 4 supervisor and isolate each document in a child process | Keeps one Stage 4 run while allowing malformed analysis artifacts to fail individually instead of aborting the corpus pass |
+| 2026-08-09 | Use one repository-wide release version for public pipeline commands while preserving component/parser/schema/API identities separately | Removes per-script product-version confusion without invalidating expensive analyzer artifacts or rewriting historical provenance |
 
 ## Open questions
 

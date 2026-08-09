@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Compatibility launcher for Stage 4 provider selection.
 
-The public entry point is now ``regdocs_4_normalize.py``.  This file remains so
-older commands continue to work unchanged.
+The public entry point is ``regdocs_4_normalize.py``. This file remains so
+older commands continue to work unchanged. ``--version`` and ``--diagnostics``
+therefore inherit the repository-wide release semantics from the primary entry
+point.
 """
 
 from __future__ import annotations
