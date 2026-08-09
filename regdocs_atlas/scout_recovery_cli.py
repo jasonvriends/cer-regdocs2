@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -22,6 +23,14 @@ def main(argv: Sequence[str]) -> int:
     args = parser.parse_args(list(argv))
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be at least 1")
+
+    # The selective recovery implementation intentionally reuses the proven
+    # Scout parser. That core now lives in the package's transitional legacy
+    # stage directory rather than under pipeline/.
+    legacy_stage_dir = Path(__file__).resolve().parent / "stages" / "legacy"
+    if str(legacy_stage_dir) not in sys.path:
+        sys.path.insert(0, str(legacy_stage_dir))
+
     with ProcessLock(PIPELINE_LOCK_PATH, role="pipeline:recover_scout", force=args.force_lock):
         result = execute_scout_recovery(
             Path(args.db).expanduser().resolve(),
