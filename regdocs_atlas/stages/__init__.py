@@ -1,5 +1,4 @@
-"""Canonical REGDOCS Atlas processing stages.
+"""Processing stages for the REGDOCS Atlas POC.
 
-Stage implementations move here one at a time from the transitional
-``pipeline/`` directory. ``pipeline.py`` remains the public command surface.
+`pipeline.py` is the public command surface; stage implementations live here.
 """

@@ -1,4 +1,0 @@
-# Compatibility redirect only. The single authoritative dependency set is now
-# pipeline/requirements.txt. This file remains temporarily because legacy
-# Docling diagnostics may still mention it during the package refactor.
--r requirements.txt

@@ -24,12 +24,9 @@ def main(argv: Sequence[str]) -> int:
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be at least 1")
 
-    # The selective recovery implementation intentionally reuses the proven
-    # Scout parser. That core now lives in the package's transitional legacy
-    # stage directory rather than under pipeline/.
-    legacy_stage_dir = Path(__file__).resolve().parent / "stages" / "legacy"
-    if str(legacy_stage_dir) not in sys.path:
-        sys.path.insert(0, str(legacy_stage_dir))
+    stages_dir = Path(__file__).resolve().parent / "stages"
+    if str(stages_dir) not in sys.path:
+        sys.path.insert(0, str(stages_dir))
 
     with ProcessLock(PIPELINE_LOCK_PATH, role="pipeline:recover_scout", force=args.force_lock):
         result = execute_scout_recovery(
