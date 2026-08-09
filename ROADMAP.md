@@ -8,8 +8,8 @@ For current behavior and commands, use:
 - [README.md](README.md) for repository orientation and quick start;
 - [Stage 1 — Scout](pipeline/regdocs_1_scout.md);
 - [Stage 2 — Download](pipeline/regdocs_2_download.md);
-- [Stage 3 — Analyze](pipeline/regdocs_3_analyze.md);
-- [Stage 3b — Docling](pipeline/regdocs_3_docling.md);
+- [Stage 3 — Azure](pipeline/regdocs_3_azure.md);
+- [Stage 3 — Docling](pipeline/regdocs_3_docling.md);
 - [Stage 4 — Normalize](pipeline/regdocs_4_normalize.md); and
 - [Stage 5 — Index](pipeline/regdocs_5_index.md).
 
