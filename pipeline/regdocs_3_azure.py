@@ -1,19 +1,10 @@
 #!/usr/bin/env python3
 """Single-threaded crash-resilient REGDOCS Azure analyzer.
 
-The public Stage 3 Azure command is a durable supervisor. It never imports the
-Azure SDK or parses source PDFs itself. Instead it launches exactly one child
-process per selected document through ``regdocs_3_azure_worker.py``.
-
-Azure is intentionally conservative about retries because a repeated submission
-can be billable. Each document gets one worker launch per supervisor run and
-each Azure request/range gets one application-level submission attempt. A
-handled failure, segfault, OOM kill, or other child crash is recorded and the
-supervisor advances to the next document. A later normal Stage 3 Azure run is
-the retry boundary.
-
-The worker preserves the existing Azure implementation, including artifact
-reconciliation, hash verification, Content-Range recovery, and ledger writes.
+The public Stage 3 Azure command is a durable supervisor. It launches exactly
+one child process per selected document through ``regdocs_3_azure_worker.py``.
+Azure retries are intentionally disabled because another submission may be
+billable. A later normal Stage 3 Azure run is the retry boundary.
 """
 
 from __future__ import annotations
@@ -40,7 +31,7 @@ from regdocs_paths import (
     stored_path,
 )
 
-SCRIPT_VERSION = "3.6.1"
+SCRIPT_VERSION = "3.6.2"
 DEFAULT_API_VERSION = "2025-11-01"
 DEFAULT_ANALYZER_ID = "prebuilt-layout"
 DEFAULT_POLLING_INTERVAL = 3
@@ -209,13 +200,7 @@ def canonical_success_is_usable(
     document_id: str,
     sha256: str,
 ) -> bool:
-    """Fast local check used only for supervisor queue selection.
-
-    The worker remains authoritative and performs the full reconciliation audit.
-    Requiring both canonical files here intentionally sends legacy/stale success
-    rows through a worker once so it can repair/canonicalize them without an
-    Azure call.
-    """
+    """Fast local check used only for supervisor queue selection."""
     raw_path, md_path = canonical_artifact_paths(
         output_dir, analyzer_id, api_version, document_id, sha256
     )
@@ -449,6 +434,21 @@ def returncode_signal(returncode: int) -> Optional[str]:
         return str(-returncode)
 
 
+def print_worker_diagnostics(stdout: str, stderr: str) -> None:
+    """Surface captured child output only when a worker needs investigation."""
+    blocks = []
+    if stdout.strip():
+        blocks.append(stdout.rstrip())
+    if stderr.strip():
+        blocks.append(stderr.rstrip())
+    if not blocks:
+        return
+    print("    worker diagnostics:", file=sys.stderr)
+    for block in blocks:
+        for line in block.splitlines():
+            print(f"      {line}", file=sys.stderr)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
@@ -552,18 +552,9 @@ def main() -> int:
         save_state(args.state_file, state)
 
         print(f"Azure supervisor {SCRIPT_VERSION}: {len(selected)} document(s) selected")
-        print("Concurrency:         1 child process")
-        print("Worker launches:     1 per document per run")
-        print("Azure app retries:   disabled (1 submission attempt per request/range)")
-        print("Retry boundary:      next normal Stage 3 Azure refresh/rerun")
-        print(f"Worker:              {worker}")
-        print(f"State:               {args.state_file}")
-        print(f"Analyzer:            {args.analyzer_id}")
-        print(f"API:                 {args.api_version}")
-        print()
-        print(f"Selected Azure queue ({len(selected)} document(s)):")
-        for queue_index, queue_document_id in enumerate(selected, start=1):
-            print(f"  {queue_index}/{len(selected)}  {queue_document_id}")
+        print("Concurrency:       1 child process")
+        print("Azure retries:     disabled")
+        print("Retry boundary:    next normal Stage 3 Azure rerun")
         print()
 
         succeeded = 0
@@ -586,24 +577,26 @@ def main() -> int:
             save_state(args.state_file, state)
 
             launched += 1
-            print(
-                f"[{index}/{len(selected)}] {document_id}: starting one Azure child; "
-                "no same-run retry",
-                flush=True,
-            )
+            print(f"[{index}/{len(selected)}] {document_id} ... ", end="", flush=True)
 
             try:
                 result = subprocess.run(
                     child_command(args, document_id),
                     env=child_environment(args),
                     check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
                 )
                 returncode = int(result.returncode)
+                worker_stdout = result.stdout or ""
+                worker_stderr = result.stderr or ""
             except KeyboardInterrupt:
                 info["last_run_status"] = "INTERRUPTED"
                 save_state(args.state_file, state)
+                print("INTERRUPTED")
                 print(
-                    "\nAzure supervisor interrupted; committed worker results and state are preserved.",
+                    "Azure supervisor interrupted; committed worker results and state are preserved.",
                     file=sys.stderr,
                 )
                 return 130
@@ -624,14 +617,14 @@ def main() -> int:
             if returncode == 130:
                 info["last_run_status"] = "INTERRUPTED"
                 save_state(args.state_file, state)
+                print("INTERRUPTED")
+                print_worker_diagnostics(worker_stdout, worker_stderr)
                 return 130
             if returncode == 2:
                 info["last_run_status"] = "CONFIG_ERROR"
                 save_state(args.state_file, state)
-                print(
-                    f"    {document_id}: worker configuration/input error; aborting supervisor",
-                    file=sys.stderr,
-                )
+                print("CONFIG_ERROR")
+                print_worker_diagnostics(worker_stdout, worker_stderr)
                 return 2
 
             if returncode == 0:
@@ -641,25 +634,18 @@ def main() -> int:
                 if status == "SUCCEEDED":
                     succeeded += 1
                     pages = analysis["page_count"] if analysis is not None else None
-                    print(f"    {document_id}: SUCCEEDED pages={pages}", flush=True)
+                    print(f"SUCCEEDED pages={pages}", flush=True)
                 else:
                     skipped += 1
-                    print(
-                        f"    {document_id}: worker completed exit=0 "
-                        f"status={status or 'NO_ANALYSIS_ROW'}",
-                        flush=True,
-                    )
+                    print(f"{status or 'NO_ANALYSIS_ROW'}", flush=True)
+                    print_worker_diagnostics(worker_stdout, worker_stderr)
             elif status == "FAILED" and error_code != "WORKER_CRASH":
                 info["last_run_status"] = "FAILED"
                 info["completed_at"] = utcnow()
                 save_state(args.state_file, state)
                 handled_failed += 1
-                print(
-                    f"    {document_id}: FAILED ({error_code or 'ANALYZE_FAILED'}); "
-                    "not retrying this run; next refresh may retry",
-                    file=sys.stderr,
-                    flush=True,
-                )
+                print(f"FAILED {error_code or 'ANALYZE_FAILED'}")
+                print_worker_diagnostics(worker_stdout, worker_stderr)
             else:
                 signal_name = info.get("last_signal")
                 detail = f" signal={signal_name}" if signal_name else ""
@@ -679,12 +665,8 @@ def main() -> int:
                 info["last_crashed_at"] = utcnow()
                 save_state(args.state_file, state)
                 crashed += 1
-                print(
-                    f"    {document_id}: {crash_message}; not retrying this run; "
-                    "next refresh may retry",
-                    file=sys.stderr,
-                    flush=True,
-                )
+                print(f"WORKER_CRASH exit={returncode}{detail}")
+                print_worker_diagnostics(worker_stdout, worker_stderr)
 
             if args.worker_sleep_seconds:
                 time.sleep(args.worker_sleep_seconds)
