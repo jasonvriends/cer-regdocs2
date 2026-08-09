@@ -1,4 +1,4 @@
-"""Unified command-line surface for the REGDOCS Atlas POC."""
+"""Unified command-line surface for REGDOCS Atlas."""
 
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ STAGE_FILES = {
 STAGE_LOCKS = (SCOUT_LOCK_PATH, DOWNLOAD_LOCK_PATH, ANALYZE_LOCK_PATH, NORMALIZE_LOCK_PATH)
 READ_ONLY_STAGE_FLAGS = {"--help", "-h", "--version", "--diagnostics", "--status", "--status-json"}
 
-HELP = """REGDOCS Atlas POC
+HELP = """REGDOCS Atlas
 
 Usage:
   python pipeline.py version
