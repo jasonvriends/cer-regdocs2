@@ -70,7 +70,7 @@ python -m pip install -r requirements.txt
 ## Main commands
 
 ```bash
-python pipeline.py scout
+python pipeline.py scout --start-date YYYY-MM-DD --end-date YYYY-MM-DD
 python pipeline.py download
 python pipeline.py analyze azure
 python pipeline.py analyze docling
@@ -109,6 +109,8 @@ Show or refresh it with:
 ```bash
 python pipeline.py scout --coverage
 ```
+
+A normal Scout acquisition never chooses a date range automatically. Both `--start-date` and `--end-date` are required, including for `--dry-run`. Running `python pipeline.py scout` by itself fails before any network request. Read-only/status commands and `--repair-containers` do not require a date range.
 
 Coverage advances only from non-dry-run Scout runs that finished `SUCCEEDED`, completed the base search, had zero failed base-search pages, and passed the post-run audit. Adjacent successful ranges are merged. The report shows any gaps plus `recommended_next_start_date`, so a flattened database does not need historical `runs` rows to remember which filing-date ranges were already acquired.
 
