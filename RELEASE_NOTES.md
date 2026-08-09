@@ -1,5 +1,63 @@
 # REGDOCS Atlas release notes
 
+## 0.0.5 — Tier A Scout recovery and rebuild comparison — 2026-08-09
+
+`0.0.5` closes the biggest Stage 1 disaster-recovery gap exposed by testing the real corpus: preserved Scout HTML is authoritative evidence, but content-addressed gzip bytes alone do not encode every request/document/timestamp/header association that lived in SQLite.
+
+### Durable Scout manifests
+
+A healthy ledger can now export self-describing Scout recovery manifests with:
+
+```bash
+python pipeline.py rebuild prepare
+```
+
+The command takes the pipeline mutation lock, refuses to run alongside legacy stage writers, exports current Scout document state and `raw_snapshots` provenance under `workspace/1_scout/manifests/`, and by default verifies each referenced raw gzip against compressed size, uncompressed size, and SHA-256.
+
+The manifest layer preserves the facts needed to reconstruct source/final URLs, document associations, fetch timestamps, response headers, parser identity, and original snapshot/run references without inventing them later. Preferred `pipeline.py scout` runs refresh these manifests automatically after successful or partial completion; the explicit `rebuild prepare` command is the verification/backfill path.
+
+### True Tier A reconstruction
+
+`rebuild create` now restores evidence in layer order:
+
+1. Scout snapshot manifests plus verified raw HTML into rebuilt `raw_snapshots` rows;
+2. Scout document manifests, including Folder/Compound/Paper-only entities and container metadata;
+3. Stage 2 source bytes plus matching sidecars into current file/download state; and
+4. canonical Azure/Docling Stage 3 artifacts when document ID and source SHA-256 agree.
+
+Historical `runs` rows are still not fabricated. Original snapshot IDs are mapped to new rebuilt SQLite IDs and snapshot references embedded in preserved document/container metadata are remapped. Recovery provenance retains original IDs/run references where useful.
+
+Artifact planning now reports `A_RAW_EVIDENCE_NEEDS_MANIFESTS` when raw Scout evidence exists but the self-describing manifest layer has not yet been prepared, instead of overstating raw bytes as a complete Tier A reconstruction source.
+
+### More accurate analyzer inventory
+
+`rebuild inventory` now distinguishes total Azure JSON files from canonical analysis results and large-PDF Content-Range parts:
+
+```text
+azure_analysis_json
+azure_canonical_analysis_json
+azure_range_result_json
+azure_range_metadata_json
+azure_other_json
+docling_canonical_analysis_json
+```
+
+This prevents range-part files from being mistaken for analyzed-document counts.
+
+### Quantitative rebuild comparison
+
+A rebuilt ledger can now be compared against the healthy reference ledger:
+
+```bash
+python pipeline.py rebuild compare \
+  --source database/regdocs.db \
+  --rebuilt database/regdocs.rebuilt.db
+```
+
+The comparison checks document IDs, current `(document_id, SHA-256)` file identities, Scout `(source_kind, source_url, content SHA-256)` identities, successful Stage 3 identities, container relationships, core document metadata, and SQLite integrity. Stage 4 normalization rows are reported as a separate expected gap until normalized generation manifests are available.
+
+A synthetic Tier A regression test now proves export → rebuild → compare across a raw Scout snapshot, a non-file container, a member source PDF, and current source identity. The GitHub Actions pipeline passed that test before the release bump.
+
 ## 0.0.4 — Unified operations, progress, logging, locking, and Azure cost visibility — 2026-08-09
 
 `0.0.4` makes the preferred `pipeline.py` path look and behave like one application rather than a collection of unrelated stage scripts.
@@ -280,6 +338,7 @@ For the prototype, bump the whole repository release once for each coherent chec
 0.0.2  unified CLI and migration foundation
 0.0.3  safe migration and artifact-driven recovery
 0.0.4  unified operations and cost visibility
+0.0.5  Tier A Scout recovery and rebuild comparison
 ```
 
 A release bump alone must not invalidate expensive Stage 3 artifacts. Artifact reuse continues to depend on source hashes, analyzer/provider identities, API/package versions, parser/projection contracts, and other relevant compatibility metadata.
