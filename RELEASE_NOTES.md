@@ -36,6 +36,8 @@ The current corpus recovery proof reached exact equivalence through Stage 3 for:
 - 15,114 container relationships; and
 - 7,958 successful Stage 3 analysis identities.
 
+A flat rebuild mode is available with `python pipeline.py rebuild create --flat`. It first performs the verified manifest-backed Stage 1-3 reconstruction, then removes historical runs, errors, rebuild/recovery bookkeeping, and recovery-only document state to produce a clean operational baseline. It does not contact external services and never overwrites the active database.
+
 Stage 4 normalization is intentionally rerun locally from preserved Stage 3 artifacts rather than adding another recovery-manifest layer. Azure AI Search is republished from Stage 4.
 
 ## Repository policy
