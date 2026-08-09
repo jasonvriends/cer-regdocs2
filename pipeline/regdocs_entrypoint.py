@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Shared release-aware facade for public REGDOCS pipeline commands.
-
-Public stage scripts use this helper so ``--version`` consistently reports the
-repository release while implementation/component identities remain available
-through ``--diagnostics`` and inside durable run/artifact provenance.
-"""
+"""Release-aware compatibility facade for transitional stage launchers."""
 
 from __future__ import annotations
 
@@ -19,6 +14,7 @@ from typing import Any, Mapping, Sequence
 from regdocs_paths import PIPELINE_LOG_PATH, PROJECT_ROOT, stored_path
 
 VERSION_PATH = PROJECT_ROOT / "VERSION"
+LEGACY_IMPLEMENTATION_DIR = PROJECT_ROOT / "regdocs_atlas" / "stages" / "legacy"
 
 
 def release_version() -> str:
@@ -36,20 +32,32 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def implementation_path(public_script: str | Path, implementation_name: str) -> Path:
+    sibling = Path(public_script).resolve().with_name(implementation_name)
+    if sibling.is_file():
+        return sibling
+    migrated = LEGACY_IMPLEMENTATION_DIR / implementation_name
+    if migrated.is_file():
+        return migrated.resolve()
+    raise RuntimeError(
+        f"Pipeline implementation is missing: checked {sibling} and {migrated}"
+    )
+
+
 def diagnostics(
     public_script: str | Path,
     implementation_name: str,
     component: Mapping[str, Any],
 ) -> dict[str, Any]:
     public_path = Path(public_script).resolve()
-    implementation_path = public_path.with_name(implementation_name).resolve()
+    implementation = implementation_path(public_path, implementation_name)
     result: dict[str, Any] = {
         "release_version": release_version(),
         "component": component.get("name"),
         "component_version": component.get("version"),
         "public_entrypoint": stored_path(public_path),
-        "implementation": stored_path(implementation_path),
-        "implementation_sha256": sha256_file(implementation_path),
+        "implementation": stored_path(implementation),
+        "implementation_sha256": sha256_file(implementation),
         "python_version": platform.python_version(),
         "python_executable": sys.executable,
         "canonical_pipeline_log": stored_path(PIPELINE_LOG_PATH),
@@ -80,19 +88,15 @@ def delegate(
         print(release_version())
         return 0
     if "--diagnostics" in arguments:
-        print(
-            json.dumps(
-                diagnostics(public_script, implementation_name, component),
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            )
-        )
+        print(json.dumps(
+            diagnostics(public_script, implementation_name, component),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ))
         return 0
 
     _direct_banner(component)
-    implementation_path = Path(public_script).resolve().with_name(implementation_name)
-    if not implementation_path.is_file():
-        raise RuntimeError(f"Pipeline implementation is missing: {implementation_path}")
-    os.execv(sys.executable, [sys.executable, str(implementation_path), *arguments])
+    implementation = implementation_path(public_script, implementation_name)
+    os.execv(sys.executable, [sys.executable, str(implementation), *arguments])
     return 0
