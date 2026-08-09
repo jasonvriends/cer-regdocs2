@@ -80,15 +80,21 @@ Current migration chain:
 
 ## Phase 2 — adopt shared infrastructure in existing stages
 
+**Started in release 0.0.2.**
+
+Completed:
+
+- legacy `regdocs_paths.py` is now a compatibility export of the single `regdocs_atlas.paths` contract;
+- the legacy `regdocs_release.py --sync-db` command now routes through the central migration engine instead of carrying its own release-schema ALTER/trigger implementation.
+
 Next:
 
-- make legacy `regdocs_paths.py` a compatibility export of `regdocs_atlas.paths`;
 - replace duplicated `open_db()` functions with `db.open_ledger()`;
 - replace duplicated PID/stale-lock implementations with `runtime.ProcessLock`;
 - replace duplicated hashing and atomic-write functions with shared helpers;
 - move generic run/error lifecycle behavior to `db.runs`;
 - ensure all stages call the migration runner before relying on tables they own;
-- stop Stage 1, Stage 3, Stage 4, and release utilities from independently creating or altering user tables.
+- stop Stage 1, Stage 3, and Stage 4 from independently creating or altering user tables.
 
 Exit condition: schema ownership exists only in migrations.
 
