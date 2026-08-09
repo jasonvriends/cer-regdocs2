@@ -16,6 +16,10 @@ from regdocs_atlas.scout_coverage import refresh_scout_coverage
 SCOUT_READ_ONLY_FLAGS = {
     "--help", "-h", "--version", "--diagnostics", "--status", "--status-json", "--dry-run"
 }
+SCOUT_NO_DATE_RANGE_FLAGS = {
+    "--help", "-h", "--version", "--diagnostics", "--status", "--status-json",
+    "--show-defaults", "--self-test", "--check-schema", "--audit", "--repair-containers",
+}
 
 
 def _coverage(args: list[str]) -> int:
@@ -27,6 +31,26 @@ def _coverage(args: list[str]) -> int:
     return 0
 
 
+def _has_option(args: list[str], name: str) -> bool:
+    return any(value == name or value.startswith(name + "=") for value in args)
+
+
+def _validate_scout_range(args: list[str]) -> int | None:
+    if any(flag in args for flag in SCOUT_NO_DATE_RANGE_FLAGS):
+        return None
+    has_start = _has_option(args, "--start-date")
+    has_end = _has_option(args, "--end-date")
+    if has_start and has_end:
+        return None
+    print(
+        "ERROR: Scout acquisition requires an explicit date range. "
+        "Provide both --start-date YYYY-MM-DD and --end-date YYYY-MM-DD.\n"
+        "Check the durable watermark first with: python pipeline.py scout --coverage",
+        file=sys.stderr,
+    )
+    return 2
+
+
 def main() -> int:
     args = list(sys.argv[1:])
     if args and args[0] == "scout":
@@ -34,6 +58,9 @@ def main() -> int:
             return _coverage(args[2:])
         if "--coverage" in args[1:]:
             return _coverage([value for value in args[1:] if value != "--coverage"])
+        range_error = _validate_scout_range(args[1:])
+        if range_error is not None:
+            return range_error
 
     code = int(cli_main(args))
 
