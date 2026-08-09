@@ -24,7 +24,8 @@ regdocs_atlas.cli
     +-- normalize
     +-- index
     +-- db migrate/status/verify
-    +-- rebuild inventory/plan
+    +-- rebuild inventory/plan/create/verify
+    +-- recover scout
     |
     v
 shared package
@@ -60,7 +61,7 @@ until the package stage modules have proven equivalent.
 
 ## Migration contract
 
-Schema changes now have one target home: `regdocs_atlas/db/migrations.py`.
+Schema changes have one target home: `regdocs_atlas/db/migrations.py`.
 
 A migration must have a stable ID, preserve existing provenance, be idempotent
 against current ledgers, fail closed on unknown old shapes, and be tested both
@@ -74,18 +75,24 @@ Current migration chain:
 003_normalizations
 004_release_tracking
 005_recovery_tracking
+006_recovery_state
 ```
+
+Release 0.0.3 adds migration fingerprints/checksums, a read-only migration plan,
+consistent SQLite backups before existing-ledger migration, live-stage lock
+checks, and post-migration schema/integrity/foreign-key verification.
 
 `PRAGMA user_version` is intentionally not the migration registry because legacy Scout currently uses it for its own schema marker.
 
 ## Phase 2 — adopt shared infrastructure in existing stages
 
-**Started in release 0.0.2.**
+**In progress.**
 
 Completed:
 
-- legacy `regdocs_paths.py` is now a compatibility export of the single `regdocs_atlas.paths` contract;
-- the legacy `regdocs_release.py --sync-db` command now routes through the central migration engine instead of carrying its own release-schema ALTER/trigger implementation.
+- legacy `regdocs_paths.py` is a compatibility export of the single `regdocs_atlas.paths` contract;
+- the legacy `regdocs_release.py --sync-db` command routes through the safe central migration CLI instead of carrying its own schema logic;
+- Stage 2 public runs now enable deterministic sidecars by default, giving the rebuild path a durable current-metadata artifact.
 
 Next:
 
@@ -114,7 +121,12 @@ model/GPU behavior provider-specific.
 
 ## Phase 5 — split Scout and Download
 
-Decompose Scout behind unchanged behavior into client/parser/container/identity/raw-store/service modules. Decompose Download into HTTP/filetype/reconcile/version/sidecar/service modules. Stage 2 sidecars must become reusable recovery artifacts.
+Decompose Scout behind unchanged behavior into client/parser/container/identity/raw-store/service modules. Decompose Download into HTTP/filetype/reconcile/version/sidecar/service modules. Stage 2 sidecars are now durable by default; the refactor should move their schema/write logic into a reusable package module without changing bytes.
+
+The Scout refactor must also add an explicit selective repair API that consumes
+`recovery_tasks` and marks tasks complete only after fresh authoritative REGDOCS
+evidence is stored. Release 0.0.3 creates and exposes this queue but deliberately
+does not issue selective repair requests yet.
 
 ## Phase 6 — provider-neutral normalization
 
@@ -124,9 +136,28 @@ for deterministic mixed-provider canonical selection.
 
 ## Phase 7 — finish SQLite artifact reconstruction
 
-Build on the migration and artifact inventory foundation. The rebuild command
-must create its target through the same migration runner and never maintain a
-private copy of schema SQL. See `roadmap/SQLITE_REBUILD.md` for recovery tiers.
+**Started in release 0.0.3.**
+
+Implemented:
+
+- `rebuild create` creates a new target through the normal migration chain and refuses overwrite;
+- current source bytes are re-hashed and reconstructed into `documents`/`files`;
+- valid Stage 2 sidecars restore current document metadata;
+- source-only records are explicitly `RECOVERED_MINIMAL` rather than populated with invented title/URL values;
+- matching Azure/Docling canonical Stage 3 artifacts can reconstruct successful `analyses` rows without provider calls;
+- every recovered document/file/analysis carries recovery provenance;
+- missing Scout facts become prioritized `recovery_tasks` visible through `pipeline.py recover scout`.
+
+Still required:
+
+- parse/preserve surviving Stage 1 raw evidence into `raw_snapshots` and authoritative Scout metadata where possible;
+- add selective Scout task execution and completion;
+- add Stage 3 artifact-side manifests where current native artifacts do not independently prove all identity fields;
+- add Stage 4 generation manifests and reconstruct `normalizations` only when normalizer/config/input identity can be proven;
+- compare rebuilt and original ledgers in fault-injection tests;
+- add recovery for historical source versions where artifact evidence is sufficient.
+
+See `roadmap/SQLITE_REBUILD.md` and `docs/DATABASE_RECOVERY.md`.
 
 ## Testing and removal rule
 
