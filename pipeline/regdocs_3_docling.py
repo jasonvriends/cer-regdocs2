@@ -6,7 +6,9 @@ at a time, and each child analyzes one document via ``regdocs_3_docling_worker``
 Children attach their ``analyses`` rows to the supervisor-owned run instead of
 creating a pipeline run per document.
 
-Unlike Azure, Docling is local and keeps its same-run retry/quarantine policy.
+Azure and Docling share the same Stage 3 process lock, so only one analysis
+provider can actively process the corpus at a time. Unlike Azure, Docling is
+local and keeps its same-run retry/quarantine policy.
 """
 
 from __future__ import annotations
@@ -26,9 +28,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from regdocs_paths import ANALYZE_DIR, DATABASE_PATH, DOWNLOAD_DIR, resolve_stored_path, stored_path
+from regdocs_paths import (
+    ANALYZE_DIR,
+    ANALYZE_LOCK_PATH,
+    DATABASE_PATH,
+    DOWNLOAD_DIR,
+    resolve_stored_path,
+    stored_path,
+)
 
-SCRIPT_VERSION = "3d.2.1"
+SCRIPT_VERSION = "3d.3.0"
 PARSER_VERSION = "regdocs-docling-projection-2026-08-08-v1"
 DEFAULT_ANALYZER_ID = "docling-standard"
 DEFAULT_OUTPUT_DIR = ANALYZE_DIR / "docling"
@@ -38,6 +47,87 @@ DEFAULT_MAX_ATTEMPTS = 3
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _read_lock_pid(path: Path) -> Optional[int]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    pid = payload.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    return pid
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
+
+
+class StageLock:
+    """Exclusive shared Stage 3 lock used by both Azure and Docling supervisors."""
+
+    def __init__(self, path: Path, *, force: bool = False):
+        self.path = path
+        self.force = force
+        self.owned = False
+
+    def __enter__(self) -> "StageLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.force and self.path.exists():
+            self.path.unlink()
+        elif self.path.exists():
+            existing_pid = _read_lock_pid(self.path)
+            if existing_pid is not None and not _pid_is_running(existing_pid):
+                try:
+                    self.path.unlink()
+                except FileNotFoundError:
+                    pass
+                else:
+                    print(
+                        f"Removing stale analyze lock: {self.path} "
+                        f"(PID {existing_pid} is not running).",
+                        file=sys.stderr,
+                    )
+
+        payload = {
+            "pid": os.getpid(),
+            "created_at": utcnow(),
+            "role": "docling_supervisor",
+            "script_version": SCRIPT_VERSION,
+        }
+        try:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError as exc:
+            detail = ""
+            with contextlib.suppress(OSError):
+                detail = self.path.read_text(encoding="utf-8")
+            raise RuntimeError(
+                f"Analyze lock already exists: {self.path}. Another Stage 3 provider may "
+                "already be running. Confirm no Azure or Docling analyzer is active before "
+                "using --force-lock."
+                + (f"\nLock contents: {detail}" if detail else "")
+            ) from exc
+
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=2)
+            stream.write("\n")
+        self.owned = True
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        if self.owned:
+            with contextlib.suppress(FileNotFoundError):
+                self.path.unlink()
+        self.owned = False
 
 
 def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
@@ -175,6 +265,7 @@ def create_supervisor_run(
         "db": stored_path(args.db),
         "download_dir": stored_path(args.download_dir),
         "output_dir": stored_path(args.output_dir),
+        "lock_file": stored_path(args.lock_file),
         "analyzer_id": args.analyzer_id,
         "docling_version": version,
         "max_attempts": args.max_attempts,
@@ -279,12 +370,7 @@ def update_supervisor_run(
 
 
 def child_bootstrap(worker: Path) -> str:
-    """Bind the existing worker to the supervisor-owned run.
-
-    The worker's analysis logic remains unchanged. This wrapper replaces its
-    per-process run allocator and suppresses worker-level ``UPDATE runs`` calls;
-    all other SQLite statements pass through to the real connection.
-    """
+    """Bind the existing worker to the supervisor-owned run."""
     return f"""
 import sys
 sys.path.insert(0, {str(worker.parent)!r})
@@ -346,6 +432,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--download-dir", default=stored_path(DOWNLOAD_DIR))
     p.add_argument("--output-dir", default=stored_path(DEFAULT_OUTPUT_DIR))
     p.add_argument("--state-file", default=stored_path(DEFAULT_STATE_FILE))
+    p.add_argument("--lock-file", default=stored_path(ANALYZE_LOCK_PATH))
+    p.add_argument("--force-lock", action="store_true")
     p.add_argument("--analyzer-id", default=DEFAULT_ANALYZER_ID)
     p.add_argument("--max-attempts", type=int, default=DEFAULT_MAX_ATTEMPTS)
     p.add_argument("--max-documents", type=int, help="Stop after launching N child documents")
@@ -372,6 +460,7 @@ def main() -> int:
     args.download_dir = resolve_stored_path(args.download_dir)
     args.output_dir = resolve_stored_path(args.output_dir)
     args.state_file = resolve_stored_path(args.state_file)
+    args.lock_file = resolve_stored_path(args.lock_file)
 
     try:
         version = importlib.metadata.version("docling")
@@ -379,6 +468,37 @@ def main() -> int:
         raise SystemExit("Docling is not installed. Run: pip install -r pipeline/requirements-docling.txt")
 
     state = load_state(args.state_file)
+
+    if args.status:
+        con = open_db(args.db)
+        try:
+            current = current_document_ids(con)
+            done = successful_ids(con, args.analyzer_id, version)
+            quarantined = sorted(
+                doc_id for doc_id, info in state["documents"].items()
+                if isinstance(info, dict) and info.get("quarantined")
+            )
+            print(json.dumps({
+                "docling_version": version,
+                "current_documents": len(current),
+                "succeeded_current": len(done),
+                "remaining_current": len([x for x in current if x not in done]),
+                "quarantined": quarantined,
+                "state_file": stored_path(args.state_file),
+                "shared_stage3_lock": stored_path(args.lock_file),
+                "concurrency": 1,
+            }, indent=2, sort_keys=True))
+            return 0
+        finally:
+            con.close()
+
+    try:
+        lock = StageLock(args.lock_file, force=args.force_lock)
+        lock.__enter__()
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
     if args.retry_quarantined:
         for info in state["documents"].values():
             if isinstance(info, dict) and info.get("quarantined"):
@@ -393,24 +513,6 @@ def main() -> int:
     started = time.monotonic()
 
     try:
-        if args.status:
-            current = current_document_ids(con)
-            done = successful_ids(con, args.analyzer_id, version)
-            quarantined = sorted(
-                doc_id for doc_id, info in state["documents"].items()
-                if isinstance(info, dict) and info.get("quarantined")
-            )
-            print(json.dumps({
-                "docling_version": version,
-                "current_documents": len(current),
-                "succeeded_current": len(done),
-                "remaining_current": len([x for x in current if x not in done]),
-                "quarantined": quarantined,
-                "state_file": stored_path(args.state_file),
-                "concurrency": 1,
-            }, indent=2, sort_keys=True))
-            return 0
-
         initial_selected = selectable_ids(
             con, state, args.analyzer_id, version, args.max_attempts
         )
@@ -423,6 +525,7 @@ def main() -> int:
         )
         print("Concurrency:    1 child process")
         print(f"Crash retries:  up to {args.max_attempts} attempt(s) per document")
+        print(f"Stage 3 lock:   {args.lock_file}")
         print()
 
         if total == 0:
@@ -650,6 +753,7 @@ def main() -> int:
         return 1
     finally:
         con.close()
+        lock.__exit__()
 
 
 if __name__ == "__main__":
