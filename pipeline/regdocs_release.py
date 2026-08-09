@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
-from regdocs_paths import DATABASE_PATH, resolve_stored_path, stored_path
-from regdocs_atlas.db import migrate, migration_status, open_ledger
+from regdocs_paths import DATABASE_PATH, PROJECT_ROOT, resolve_stored_path, stored_path
+from regdocs_atlas.db import migration_status, open_ledger
 from regdocs_atlas.db.connection import column_names, table_exists
 from regdocs_atlas.version import RELEASE_NOTES_PATH, VERSION_PATH, release_version
 
@@ -62,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument(
         "--sync-db",
         action="store_true",
-        help="Compatibility alias: apply central migrations and sync the current release",
+        help="Compatibility alias: run the safe central database migration command",
     )
     group.add_argument("--status", action="store_true", help="Show repository, migration, and SQLite release state")
     group.add_argument("--version", action="store_true", help="Print the repository release version")
@@ -82,13 +83,12 @@ def main() -> int:
         return 1
 
     if args.sync_db:
-        con = open_ledger(db)
-        try:
-            result = migrate(con, version)
-            print(json.dumps(result, indent=2, sort_keys=True))
-            return 0
-        finally:
-            con.close()
+        target = PROJECT_ROOT / "pipeline.py"
+        os.execv(
+            sys.executable,
+            [sys.executable, str(target), "db", "migrate", "--db", str(db)],
+        )
+        return 0
 
     con = open_ledger(db, readonly=True)
     try:
