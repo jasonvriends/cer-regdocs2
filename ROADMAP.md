@@ -9,6 +9,7 @@ For current behavior and commands, use:
 - [Stage 1 — Scout](pipeline/regdocs_1_scout.md);
 - [Stage 2 — Download](pipeline/regdocs_2_download.md);
 - [Stage 3 — Analyze](pipeline/regdocs_3_analyze.md);
+- [Stage 3b — Docling](pipeline/regdocs_3_docling.md);
 - [Stage 4 — Normalize](pipeline/regdocs_4_normalize.md); and
 - [Stage 5 — Index](pipeline/regdocs_5_index.md).
 
@@ -53,12 +54,14 @@ The near-term goal is an internal proof of value strong enough to answer:
 
 ## Current baseline
 
-The repository now contains a runnable five-stage pipeline:
+The repository now contains a runnable five-stage pipeline with two Stage 3
+analysis backends:
 
 ```text
 1. Scout      REGDOCS metadata and raw HTML evidence
 2. Download   validated, hashed, versioned source files
-3. Analyze    Azure Content Understanding JSON and Markdown
+3a. Analyze   Azure Content Understanding JSON and Markdown
+3b. Analyze   local Docling native JSON plus REGDOCS compatibility projection
 4. Normalize  deterministic documents/pages/chunks/tables/provenance JSONL
 5. Index      Azure AI Search full-text/filter/facet chunk index
 ```
@@ -72,6 +75,10 @@ The pipeline has:
 - pinned direct Python dependencies;
 - automatic resumable `Content-Range` analysis for PDFs over 300 pages while
   preserving one Stage 2 source identity;
+- an experimental local Docling Stage 3 backend that preserves native Docling
+  output and can feed the current normalizer through a compatibility projection;
+- a single-threaded Docling supervisor that isolates each document in a separate
+  child process so crashes do not terminate the overall corpus run;
 - Stage 4 provenance that keeps original page/polygon geometry and globally
   qualifies Azure element pointers across multiple `contents[]` entries;
 - Stage 5 validation that joins each indexed chunk back to its matching
@@ -115,6 +122,9 @@ Focus:
   estimate from configurable meter prices so operators do not need to rely on
   delayed Azure Cost Management totals;
 - persist accepted Azure operation IDs and preserve attempts append-only;
+- keep the Docling corpus runner strictly single-threaded while isolating each
+  document in a child process, persisting supervisor state, and quarantining
+  repeated crash/failure cases so one malformed document cannot stall a run;
 - make inspection and no-op modes genuinely read-only where promised;
 - write Stage 4 as atomic, manifested generations;
 - prevent filtered normalization from replacing the canonical corpus by
@@ -125,8 +135,8 @@ Focus:
 - add Stage 5 incremental deletion/change detection after generation identity
   exists; and
 - add fixture, regression, concurrency, and fault-injection tests, including
-  large-PDF range-boundary, restart, qualified-provenance, and search-publication
-  cases.
+  large-PDF range-boundary, restart, qualified-provenance, Docling child-process
+  crash/restart/quarantine, and search-publication cases.
 
 Exit condition:
 
@@ -152,6 +162,110 @@ Focus:
   provenance coverage;
 - produce corpus-health and integrity reports; and
 - validate stable identities and repeatable output.
+
+#### Multi-provider document analysis and canonical selection
+
+Use the reference corpus to evaluate document analysis as a replaceable,
+measurable Stage 3 capability rather than permanently coupling normalization to
+one provider.
+
+The target architecture is:
+
+```text
+                         +--> Azure Content Understanding --+
+Stage 2 source document -+                                  +--> comparison/evaluation
+                         +--> Docling standard/VLM ----------+
+                                                                  |
+                                                                  v
+                                                        canonical selection
+                                                                  |
+                         +--> Azure adapter -----------------------+
+                         |                                        |
+                         +--> Docling adapter ---------------------+--> common REGDOCS analysis model
+                                                                  |
+                                                                  v
+                                                             Stage 4 normalize
+                                                                  |
+                                                                  v
+                                                             mixed-provider corpus
+```
+
+Preserve every analyzer's native output. Do not make Docling permanently mimic
+Azure or make Azure's response schema the long-term normalized input contract.
+Provider-specific adapters should project native analyzer results into a common
+REGDOCS intermediate analysis model containing the concepts Stage 4 actually
+needs: pages, text blocks, sections, tables, figures, geometry, reading order,
+Markdown, and exact provider provenance.
+
+Build a permanent comparison harness that can run two or more analyzers against
+the exact same Stage 2 file identity and report both structural and downstream
+quality measures. At minimum compare:
+
+- success/failure and crash behavior;
+- pages and text recovered;
+- page-level text similarity and divergence;
+- headings, sections, reading order, headers, and footers;
+- tables, dimensions, cells, and table text fidelity;
+- figures and other structured elements where available;
+- geometry/provenance coverage;
+- processing time and resource use;
+- Azure billable usage/cost versus local Docling compute cost; and
+- the resulting Stage 4 page/chunk/table/provenance records and retrieval quality.
+
+Comparison results must be auditable rather than silently choosing a winner.
+Store machine-readable per-document metrics and a human-readable report that
+highlights divergent pages and structures for inspection.
+
+Add an explicit canonical-analysis selection table rather than inferring the
+winner from artifact existence or timestamps. A target contract is conceptually:
+
+```text
+analysis_selections
+  document_id
+  file_sha256
+  purpose              # canonical, experiment, etc.
+  analysis_id
+  provider              # azure, docling, ...
+  analyzer_id
+  analyzer_version
+  selection_method      # manual, rule, benchmark
+  reason
+  selected_at
+```
+
+Stage 4 should ultimately support:
+
+```text
+--analysis-provider azure
+--analysis-provider docling
+--analysis-provider selected
+```
+
+`selected` means that each current source document is normalized from its
+explicitly designated canonical Stage 3 analysis. One normalized generation may
+therefore legitimately contain Azure-derived documents beside Docling-derived
+documents. Stage 5 must not need to know which analyzer produced a document;
+provider identity and exact source-analysis provenance remain carried in the
+normalized records.
+
+Do not add automatic `best` selection until the comparison corpus has produced
+credible metrics and failure cases. Initial canonical choices may be manual.
+Later policy may route classes of documents differently, for example born-digital
+PDFs to Docling and difficult scans or layouts to Azure, with fallback behavior
+only when the routing rules are measurable and auditable.
+
+Exit criteria for the multi-provider work:
+
+- the same Stage 2 file can be analyzed independently by Azure and Docling
+  without overwriting either result;
+- native analyzer outputs remain preserved and inspectable;
+- provider adapters expose one versioned REGDOCS analysis contract;
+- comparison reports identify meaningful content/structure divergence;
+- canonical selections are explicit, versioned, and explainable;
+- Stage 4 can build a deterministic mixed-provider generation from those
+  selections; and
+- retrieval evaluation determines whether provider choice materially changes
+  research quality, rather than relying only on raw extraction counts.
 
 Exit condition:
 
@@ -321,12 +435,16 @@ The prototype succeeds when reviewers can see that:
 4. Measure the Azure AI Search keyword/filter baseline before adding vectors.
 5. Close the Stage 1–5 hardening items that block safe unattended or full runs.
 6. Add representative fixtures and test interruption, recovery, concurrency,
-   parser drift, range boundaries, qualified provenance, and publication.
-7. Select the reference project/proceeding corpus and define completeness.
-8. Freeze the first normalized-artifact and generation-manifest contract.
-9. Rebuild the reference corpus, publish it to search, and produce a
-   corpus-health/retrieval report.
-10. Validate dossier, timeline, inspection, evidence-selection, and comparison
+   parser drift, range boundaries, qualified provenance, Docling process crashes,
+   and publication.
+7. Select a deliberately varied Azure-versus-Docling benchmark set including
+   born-digital, scanned, table-heavy, long, and known-problem documents.
+8. Build analyzer comparison reports and inspect the divergent pages/structures.
+9. Select the reference project/proceeding corpus and define completeness.
+10. Freeze the first normalized-artifact and generation-manifest contract.
+11. Rebuild the reference corpus, publish it to search, and produce a
+    corpus-health/retrieval report.
+12. Validate dossier, timeline, inspection, evidence-selection, and comparison
     workflows on the reference corpus.
 
 ## Decision log
@@ -344,12 +462,20 @@ The prototype succeeds when reviewers can see that:
 | 2026-08-08 | Qualify normalized Azure element pointers by `contents[]` index | Keeps exact analyzer-element provenance unambiguous across ranged large PDFs while retaining original page geometry |
 | 2026-08-08 | Publish Stage 4 chunks directly to Azure AI Search with a controlled Stage 5 push API | Keeps REGDOCS chunking/provenance authoritative while making the normalized corpus searchable without Azure re-chunking it |
 | 2026-08-08 | Measure keyword/filter retrieval before adding semantic, vector, or LLM layers | Prevents retrieval defects from being hidden behind more complex AI behavior |
+| 2026-08-08 | Treat Stage 3 analysis as a multi-provider boundary and preserve native Azure/Docling outputs | Allows extraction quality, cost, and reliability to be measured without coupling the corpus contract to one provider |
+| 2026-08-08 | Keep the Docling corpus supervisor strictly single-threaded with one document per child process | Limits resource contention while allowing crashes or native-library faults to be isolated and resumed durably |
+| 2026-08-08 | Make future canonical analyzer choice explicit per source-file version rather than inferred | Enables auditable mixed-provider normalized generations and avoids accidental selection based on artifact timing or availability |
+| 2026-08-08 | Require measured comparison before adding automatic `best` analyzer routing | Prevents heuristics or vendor assumptions from silently determining the authoritative normalized corpus |
 
 ## Open questions
 
 - Which project or proceeding should anchor the first internal demonstration?
 - What is the minimum complete, versioned normalized-corpus contract?
 - What normalization coverage threshold is acceptable before broader indexing?
+- Which analyzer comparison metrics best predict downstream retrieval and
+  provenance quality rather than merely extraction volume?
+- Which document classes, if any, show a reliable enough Azure-versus-Docling
+  advantage to justify automatic routing?
 - What retrieval evaluation set and success metrics should gate semantic and
   hybrid search?
 - Which user-facing surface should follow Search Explorer/CLI: a custom web UI,
