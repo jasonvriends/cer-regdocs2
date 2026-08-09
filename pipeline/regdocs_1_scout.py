@@ -5,11 +5,15 @@ from __future__ import annotations
 
 from regdocs_entrypoint import delegate
 
+COMPONENT_NAME = "stage-1-scout"
+COMPONENT_VERSION = "1.1.2"
+PARSER_VERSION = "document-ledger-scout-2026-08-07-v1-container-tree-audit-progress"
+SCHEMA_VERSION = 2
 COMPONENT = {
-    "name": "stage-1-scout",
-    "version": "1.1.2",
-    "parser_version": "document-ledger-scout-2026-08-07-v1-container-tree-audit-progress",
-    "schema_version": 2,
+    "name": COMPONENT_NAME,
+    "version": COMPONENT_VERSION,
+    "parser_version": PARSER_VERSION,
+    "schema_version": SCHEMA_VERSION,
 }
 
 

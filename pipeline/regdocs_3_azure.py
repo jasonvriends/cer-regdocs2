@@ -5,13 +5,19 @@ from __future__ import annotations
 
 from regdocs_entrypoint import delegate
 
+COMPONENT_NAME = "stage-3-azure"
+COMPONENT_VERSION = "3.7.1"
+WORKER_COMPONENT_VERSION = "3.6.2"
+ANALYZER_ID = "prebuilt-layout"
+API_VERSION = "2025-11-01"
+PARSER_VERSION = "azure-content-understanding-2025-11-01"
 COMPONENT = {
-    "name": "stage-3-azure",
-    "version": "3.7.1",
-    "worker_component_version": "3.6.2",
-    "analyzer_id": "prebuilt-layout",
-    "api_version": "2025-11-01",
-    "parser_version": "azure-content-understanding-2025-11-01",
+    "name": COMPONENT_NAME,
+    "version": COMPONENT_VERSION,
+    "worker_component_version": WORKER_COMPONENT_VERSION,
+    "analyzer_id": ANALYZER_ID,
+    "api_version": API_VERSION,
+    "parser_version": PARSER_VERSION,
 }
 
 

@@ -5,12 +5,17 @@ from __future__ import annotations
 
 from regdocs_entrypoint import delegate
 
+COMPONENT_NAME = "stage-2-download"
+COMPONENT_VERSION = "1.1.2"
+PARSER_VERSION = "document-ledger-download-2026-08-07-v1.1.1-sidecars-docs"
+SIDECAR_SCHEMA = "cer-regdocs-document-sidecar"
+SIDECAR_SCHEMA_VERSION = 1
 COMPONENT = {
-    "name": "stage-2-download",
-    "version": "1.1.2",
-    "parser_version": "document-ledger-download-2026-08-07-v1.1.1-sidecars-docs",
-    "sidecar_schema": "cer-regdocs-document-sidecar",
-    "sidecar_schema_version": 1,
+    "name": COMPONENT_NAME,
+    "version": COMPONENT_VERSION,
+    "parser_version": PARSER_VERSION,
+    "sidecar_schema": SIDECAR_SCHEMA,
+    "sidecar_schema_version": SIDECAR_SCHEMA_VERSION,
 }
 
 

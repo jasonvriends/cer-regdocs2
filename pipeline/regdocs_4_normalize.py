@@ -5,11 +5,15 @@ from __future__ import annotations
 
 from regdocs_entrypoint import delegate
 
+COMPONENT_NAME = "stage-4-normalize"
+COMPONENT_VERSION = "4.2.0"
+WORKER_COMPONENT_VERSION = "4.1.0"
+PARSER_VERSION = "regdocs-normalizer-2026-08-08-v2"
 COMPONENT = {
-    "name": "stage-4-normalize",
-    "version": "4.2.0",
-    "worker_component_version": "4.1.0",
-    "parser_version": "regdocs-normalizer-2026-08-08-v2",
+    "name": COMPONENT_NAME,
+    "version": COMPONENT_VERSION,
+    "worker_component_version": WORKER_COMPONENT_VERSION,
+    "parser_version": PARSER_VERSION,
     "providers": ["azure", "docling"],
 }
 

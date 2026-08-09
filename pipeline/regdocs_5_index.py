@@ -5,11 +5,15 @@ from __future__ import annotations
 
 from regdocs_entrypoint import delegate
 
+COMPONENT_NAME = "stage-5-index"
+COMPONENT_VERSION = "5.0.1"
+INDEX_CONTRACT = "keyword-filter-facet-v1"
+DEFAULT_INDEX_NAME = "regdocs-chunks"
 COMPONENT = {
-    "name": "stage-5-index",
-    "version": "5.0.1",
-    "index_contract": "keyword-filter-facet-v1",
-    "default_index_name": "regdocs-chunks",
+    "name": COMPONENT_NAME,
+    "version": COMPONENT_VERSION,
+    "index_contract": INDEX_CONTRACT,
+    "default_index_name": DEFAULT_INDEX_NAME,
 }
 
 
