@@ -294,17 +294,41 @@ def select_documents(
     force: bool,
 ) -> list[str]:
     selected: list[str] = []
+    seen: set[str] = set()
     for row in current_files(con, document_id):
         doc_id = str(row["document_id"])
-        info = state["documents"].get(doc_id, {})
-        if isinstance(info, dict) and info.get("quarantined"):
+        if doc_id in seen:
+            continue
+        seen.add(doc_id)
+
+        sha256 = str(row["sha256"])
+        info = state["documents"].setdefault(doc_id, {})
+        if not isinstance(info, dict):
+            info = {}
+            state["documents"][doc_id] = info
+
+        identity_changed = (
+            (info.get("file_sha256") and info.get("file_sha256") != sha256)
+            or (info.get("analyzer_id") and info.get("analyzer_id") != analyzer_id)
+            or (info.get("api_version") and info.get("api_version") != api_version)
+        )
+        if identity_changed:
+            info["quarantined"] = False
+            info["crash_attempts"] = 0
+            info["identity_changed_at"] = utcnow()
+
+        info["file_sha256"] = sha256
+        info["analyzer_id"] = analyzer_id
+        info["api_version"] = api_version
+
+        if info.get("quarantined"):
             continue
 
         if not force:
             analysis = matching_analysis_status(
                 con,
                 int(row["file_id"]),
-                str(row["sha256"]),
+                sha256,
                 analyzer_id,
                 api_version,
             )
@@ -314,7 +338,7 @@ def select_documents(
                     analyzer_id,
                     api_version,
                     doc_id,
-                    str(row["sha256"]),
+                    sha256,
                 ):
                     continue
 
@@ -537,13 +561,6 @@ def main() -> int:
     if args.retry_max_delay < args.retry_base_delay:
         print("ERROR: --retry-max-delay must be >= --retry-base-delay", file=sys.stderr)
         return 2
-    if not args.dry_run and not args.endpoint:
-        print(
-            "ERROR: Azure endpoint is required. Pass --endpoint or set "
-            "CONTENTUNDERSTANDING_ENDPOINT.",
-            file=sys.stderr,
-        )
-        return 2
 
     worker = Path(__file__).with_name("regdocs_3_analyze_worker.py")
     if not worker.is_file():
@@ -580,6 +597,7 @@ def main() -> int:
             args.limit,
             args.force,
         )
+        save_state(args.state_file, state)
         quarantined_existing = sorted(
             doc_id for doc_id, info in state["documents"].items()
             if isinstance(info, dict) and info.get("quarantined")
@@ -648,6 +666,7 @@ def main() -> int:
                     con, document_id, args.analyzer_id, args.api_version
                 )
                 status = str(analysis["status"]) if analysis is not None else None
+                error_code = str(analysis["error_code"] or "") if analysis is not None else ""
 
                 if returncode == 130:
                     return 130
@@ -675,7 +694,7 @@ def main() -> int:
                         )
                     break
 
-                if status == "FAILED":
+                if status == "FAILED" and error_code != "WORKER_CRASH":
                     # The worker survived long enough to record a normal per-document failure.
                     # Azure-level retry policy already ran inside that worker, so advance.
                     info["crash_attempts"] = 0
@@ -683,9 +702,8 @@ def main() -> int:
                     info["completed_at"] = utcnow()
                     save_state(args.state_file, state)
                     handled_failed += 1
-                    code = analysis["error_code"] if analysis is not None else None
                     print(
-                        f"    {document_id}: FAILED normally ({code or 'ANALYZE_FAILED'}); advancing",
+                        f"    {document_id}: FAILED normally ({error_code or 'ANALYZE_FAILED'}); advancing",
                         file=sys.stderr,
                         flush=True,
                     )
