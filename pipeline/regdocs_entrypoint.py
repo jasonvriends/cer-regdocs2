@@ -3,8 +3,7 @@
 
 Public stage scripts use this helper so ``--version`` consistently reports the
 repository release while implementation/component identities remain available
-through ``--diagnostics`` and inside the durable run/artifact provenance written
-by the delegated core implementation.
+through ``--diagnostics`` and inside durable run/artifact provenance.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from regdocs_paths import PROJECT_ROOT, stored_path
+from regdocs_paths import PIPELINE_LOG_PATH, PROJECT_ROOT, stored_path
 
 VERSION_PATH = PROJECT_ROOT / "VERSION"
 
@@ -53,11 +52,21 @@ def diagnostics(
         "implementation_sha256": sha256_file(implementation_path),
         "python_version": platform.python_version(),
         "python_executable": sys.executable,
+        "canonical_pipeline_log": stored_path(PIPELINE_LOG_PATH),
     }
     for key, value in component.items():
         if key not in {"name", "version"} and value is not None:
             result[key] = value
     return result
+
+
+def _direct_banner(component: Mapping[str, Any]) -> None:
+    if os.environ.get("REGDOCS_STAGE"):
+        return
+    name = str(component.get("name") or "pipeline").upper().replace("_", "/").replace("-", "/")
+    print(f"REGDOCS ATLAS {release_version()}")
+    print(f"MODE  {name}")
+    print(f"LOG   {stored_path(PIPELINE_LOG_PATH)} (canonical when launched through pipeline.py)")
 
 
 def delegate(
@@ -81,11 +90,9 @@ def delegate(
         )
         return 0
 
+    _direct_banner(component)
     implementation_path = Path(public_script).resolve().with_name(implementation_name)
     if not implementation_path.is_file():
         raise RuntimeError(f"Pipeline implementation is missing: {implementation_path}")
-    os.execv(
-        sys.executable,
-        [sys.executable, str(implementation_path), *arguments],
-    )
+    os.execv(sys.executable, [sys.executable, str(implementation_path), *arguments])
     return 0
