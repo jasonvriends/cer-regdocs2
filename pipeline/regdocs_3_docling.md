@@ -15,82 +15,73 @@ and model dependencies are much heavier:
 python -m pip install -r pipeline/requirements-docling.txt
 ```
 
-## Recommended durable run
+## Durable single-threaded execution
 
-For corpus work, use the supervisor rather than a long-lived multi-document
-Docling worker:
-
-```bash
-python pipeline/regdocs_3_docling_supervisor.py
-```
-
-The supervisor is intentionally **single-threaded**. It launches exactly one
-child process for exactly one document, blocks until that child exits, then
-launches the next child. There is never more than one Docling conversion in
-flight.
+`regdocs_3_docling.py` is the public entry point. It is intentionally a
+durable, single-threaded launcher: exactly one document is analyzed in one
+child process at a time.
 
 ```text
-supervisor
-    |
-    +--> child: document A ---- exits ----+
-    |                                     |
-    +--> child: document B ---- exits ----+
-    |                                     |
-    +--> child: document C ---- exits ----+
-                                          v
-                                   continue until done
+regdocs_3_docling.py
+        |
+        +--> regdocs_3_docling_worker.py --document-id A
+        |        wait for child exit
+        |
+        +--> regdocs_3_docling_worker.py --document-id B
+        |        wait for child exit
+        |
+        +--> ...
 ```
 
-This isolates native-library crashes, segmentation faults, process aborts, and
-OOM kills to one document. A child crash does not destroy the supervisor or
-completed work. Successful analyses are committed to the shared `analyses`
-ledger and are skipped on restart.
+The worker implementation is internal plumbing. Normal operations should call
+`regdocs_3_docling.py`, not `regdocs_3_docling_worker.py`.
 
-Supervisor progress is also stored atomically in:
+This process boundary is deliberate. A Docling/native-library crash, segfault,
+or OOM kill can terminate the current child without terminating the launcher.
+Completed analysis artifacts and ledger rows remain committed, and the launcher
+continues or retries from durable state.
+
+There is never more than one Docling worker process at a time.
+
+## Run
+
+Process the remaining current corpus:
+
+```bash
+python pipeline/regdocs_3_docling.py
+```
+
+Inspect progress:
+
+```bash
+python pipeline/regdocs_3_docling.py --status
+```
+
+Bound a pilot by number of launched documents:
+
+```bash
+python pipeline/regdocs_3_docling.py --max-documents 10
+```
+
+By default a document is attempted up to three times. If it still does not
+produce a matching successful `analyses` row, it is quarantined and processing
+continues with the next document instead of getting stuck forever.
+
+Retry quarantined documents later with:
+
+```bash
+python pipeline/regdocs_3_docling.py --retry-quarantined
+```
+
+Durable launcher state is stored at:
 
 ```text
 workspace/3_analyze/docling/supervisor-state.json
 ```
 
-The state records per-document attempts, exit codes/signals, timestamps, and
-quarantine state. A document is retried up to `--max-attempts` (default 3).
-After repeated failure it is quarantined so one pathological file cannot block
-the rest of the corpus.
-
-Inspect progress with:
-
-```bash
-python pipeline/regdocs_3_docling_supervisor.py --status
-```
-
-Retry quarantined documents in a later pass with:
-
-```bash
-python pipeline/regdocs_3_docling_supervisor.py --retry-quarantined
-```
-
-For a bounded pilot:
-
-```bash
-python pipeline/regdocs_3_docling_supervisor.py --max-documents 10
-```
-
-Restarting the same supervisor command is safe: successful current
-`file_sha256 + analyzer_id + Docling version` identities are read from the
-ledger and are not resubmitted.
-
-## Direct worker
-
-The underlying worker can still be run directly for debugging or one-off tests:
-
-```bash
-python pipeline/regdocs_3_docling.py --document-id 4647200
-python pipeline/regdocs_3_docling.py --limit 10
-```
-
-Use `--dry-run` to inspect selection without conversion. For larger runs,
-prefer the supervisor because a native crash in a direct multi-document worker
-would terminate that process.
+The SQLite `analyses` ledger remains authoritative for completed analysis
+identity; the state file records launcher attempts, abnormal exits, signals,
+and quarantine state.
 
 ## Artifacts and ledger identity
 
