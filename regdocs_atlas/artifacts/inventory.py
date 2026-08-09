@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..paths import (
+    ANALYSIS_MANIFEST_DIR,
     CONTENT_UNDERSTANDING_DIR,
     DOCLING_DIR,
     DOWNLOAD_FILES_DIR,
@@ -37,6 +38,8 @@ class ArtifactInventory:
     azure_other_json: int
     docling_analysis_json: int
     docling_canonical_analysis_json: int
+    stage3_analysis_manifests: int
+    stage3_manifest_export_summary_present: bool
     normalized_outputs_present: list[str]
 
     def to_dict(self) -> dict[str, Any]:
@@ -125,6 +128,8 @@ def inventory() -> ArtifactInventory:
         azure_other_json=azure["other"],
         docling_analysis_json=_count_files(docling_raw, "*.json"),
         docling_canonical_analysis_json=_canonical_analysis_count(docling_raw),
+        stage3_analysis_manifests=_count_files(ANALYSIS_MANIFEST_DIR, "*.json") - (1 if (ANALYSIS_MANIFEST_DIR / "export-summary.json").is_file() else 0),
+        stage3_manifest_export_summary_present=(ANALYSIS_MANIFEST_DIR / "export-summary.json").is_file(),
         normalized_outputs_present=outputs,
     )
 
@@ -173,11 +178,14 @@ def recovery_plan() -> dict[str, Any]:
         "source_files_with_sidecars": with_sidecar,
         "source_files_minimal_identity_only": minimal,
         "can_rebuild_analysis_inventory_without_rerun": bool(
-            inv.azure_canonical_analysis_json or inv.docling_canonical_analysis_json
+            inv.stage3_analysis_manifests
+            or inv.azure_canonical_analysis_json
+            or inv.docling_canonical_analysis_json
         ),
         "notes": [
             "Recovered facts must be supported by surviving artifacts.",
             "Raw Scout HTML proves content but needs durable manifests to reconstruct request/document provenance exactly.",
+            "Successful Stage 3 manifests preserve ledger identity/counts while artifact hashes prove the analyzer bytes.",
             "Missing Scout metadata must remain explicitly unavailable rather than inferred.",
             "A rebuild must target a new SQLite file by default.",
         ],
