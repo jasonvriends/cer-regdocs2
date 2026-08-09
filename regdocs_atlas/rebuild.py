@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 import mimetypes
 import re
@@ -15,8 +17,15 @@ from .artifacts.inventory import inventory, recovery_plan
 from .db.connection import open_ledger, table_exists
 from .db.migrations import migrate, verify_schema
 from .db.safety import integrity_report
-from .paths import CONTENT_UNDERSTANDING_DIR, DOCLING_DIR, DOWNLOAD_FILES_DIR, stored_path
+from .paths import (
+    CONTENT_UNDERSTANDING_DIR,
+    DOCLING_DIR,
+    DOWNLOAD_FILES_DIR,
+    resolve_stored_path,
+    stored_path,
+)
 from .runtime.hashing import sha256_file
+from .scout_manifests import document_manifests, snapshot_manifests
 from .version import release_version
 
 SIDECAR_SCHEMA = "cer-regdocs-document-sidecar"
@@ -36,6 +45,18 @@ def _json_object(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"Expected JSON object: {path}")
     return value
+
+
+def _parse_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if value in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _current_source_files() -> list[Path]:
@@ -74,8 +95,8 @@ def _trusted_sidecar(document_id: str, source_sha: str) -> tuple[dict[str, Any] 
     return payload, []
 
 
-def _missing_from_sidecar(sidecar: dict[str, Any]) -> list[str]:
-    missing = ["scout_raw_evidence"]
+def _missing_from_sidecar(sidecar: dict[str, Any], *, scout_available: bool) -> list[str]:
+    missing: list[str] = [] if scout_available else ["scout_raw_evidence"]
     for key in (
         "title", "source_url", "item_kind", "filing_date", "submitter",
         "company", "project", "filing_number",
@@ -142,6 +163,8 @@ def _queue_scout_repair(
     priority: str,
     reason: str,
 ) -> None:
+    if not missing_facts:
+        return
     now = utcnow()
     con.execute(
         """
@@ -154,42 +177,285 @@ def _queue_scout_repair(
     )
 
 
+def _verify_snapshot_artifact(payload: dict[str, Any]) -> Path:
+    raw_path = resolve_stored_path(str(payload["relative_path"]))
+    if not raw_path.is_file():
+        raise FileNotFoundError(raw_path)
+    compressed_size = int(payload["compressed_size_bytes"])
+    if raw_path.stat().st_size != compressed_size:
+        raise ValueError(
+            f"compressed size mismatch for {raw_path}: "
+            f"{raw_path.stat().st_size} != {compressed_size}"
+        )
+    with gzip.open(raw_path, "rb") as stream:
+        raw = stream.read()
+    expected_size = int(payload["size_bytes"])
+    if len(raw) != expected_size:
+        raise ValueError(f"uncompressed size mismatch for {raw_path}: {len(raw)} != {expected_size}")
+    digest = hashlib.sha256(raw).hexdigest()
+    expected_sha = str(payload["content_sha256"]).lower()
+    if digest.lower() != expected_sha:
+        raise ValueError(f"content SHA-256 mismatch for {raw_path}")
+    return raw_path
+
+
+def _recover_scout_snapshots(
+    con: sqlite3.Connection,
+    rebuild_id: int,
+) -> tuple[dict[str, int], dict[int, int]]:
+    counts = {"recovered": 0, "invalid": 0}
+    original_to_new: dict[int, int] = {}
+    for manifest in snapshot_manifests():
+        try:
+            raw_path = _verify_snapshot_artifact(manifest)
+            source_kind = str(manifest["source_kind"])
+            source_url = str(manifest["source_url"])
+            content_sha = str(manifest["content_sha256"]).lower()
+            con.execute(
+                """
+                INSERT OR IGNORE INTO raw_snapshots(
+                    run_id, document_id, source_kind, source_url, final_url,
+                    fetched_at, http_status, content_type, content_sha256,
+                    size_bytes, compressed_size_bytes, relative_path,
+                    response_headers_json, parser_version
+                ) VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    manifest.get("document_id"), source_kind, source_url,
+                    manifest.get("final_url"), str(manifest["fetched_at"]),
+                    manifest.get("http_status"), manifest.get("content_type"),
+                    content_sha, int(manifest["size_bytes"]),
+                    int(manifest["compressed_size_bytes"]), stored_path(raw_path),
+                    stable_json(manifest.get("response_headers") or {}),
+                    str(manifest["parser_version"]),
+                ),
+            )
+            row = con.execute(
+                """
+                SELECT id FROM raw_snapshots
+                WHERE source_kind=? AND source_url=? AND content_sha256=?
+                """,
+                (source_kind, source_url, content_sha),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("snapshot insert could not be resolved")
+            new_id = int(row[0])
+            original = manifest.get("original_snapshot_id")
+            if original is not None:
+                original_to_new[int(original)] = new_id
+            missing = ["original_run_row"] if manifest.get("original_run_id") is not None else []
+            _insert_recovery_provenance(
+                con, rebuild_id=rebuild_id, entity_type="raw_snapshot",
+                entity_key=str(new_id), recovered_from="scout_snapshot_manifest+raw_html",
+                completeness="partial" if missing else "complete", missing_facts=missing,
+                evidence={
+                    "manifest_path": manifest.get("_manifest_path"),
+                    "raw_path": stored_path(raw_path),
+                    "content_sha256": content_sha,
+                    "original_snapshot_id": original,
+                    "original_run_id": manifest.get("original_run_id"),
+                },
+            )
+            counts["recovered"] += 1
+        except Exception:
+            counts["invalid"] += 1
+    return counts, original_to_new
+
+
+def _mapped_snapshot_id(value: Any, mapping: dict[int, int]) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return mapping.get(int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _remap_snapshot_references(value: Any, mapping: dict[int, int]) -> Any:
+    if isinstance(value, list):
+        return [_remap_snapshot_references(item, mapping) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in {"snapshot_id", "detail_snapshot_id"}:
+            result[key] = _mapped_snapshot_id(item, mapping)
+        elif key == "snapshot_ids" and isinstance(item, list):
+            result[key] = [
+                mapped for raw in item
+                if (mapped := _mapped_snapshot_id(raw, mapping)) is not None
+            ]
+        else:
+            result[key] = _remap_snapshot_references(item, mapping)
+    return result
+
+
+def _recover_scout_documents(
+    con: sqlite3.Connection,
+    rebuild_id: int,
+    snapshot_mapping: dict[int, int],
+) -> dict[str, int]:
+    counts = {"recovered": 0, "partial": 0, "invalid": 0, "non_files": 0}
+    now = utcnow()
+    for manifest in document_manifests():
+        try:
+            document_id = str(manifest["document_id"])
+            document = manifest.get("document")
+            if not isinstance(document, dict) or str(document.get("id") or "") != document_id:
+                raise ValueError("document manifest identity mismatch")
+            metadata = _remap_snapshot_references(
+                _parse_json_object(document.get("metadata")), snapshot_mapping
+            )
+            detail_snapshot_id = _mapped_snapshot_id(
+                document.get("detail_snapshot_id"), snapshot_mapping
+            )
+            missing: list[str] = []
+            if document.get("detail_snapshot_id") is not None and detail_snapshot_id is None:
+                missing.append("detail_snapshot_evidence")
+            scout_status = str(document.get("scout_status") or "PENDING")
+            if scout_status != "SUCCEEDED":
+                missing.append(f"scout_status:{scout_status}")
+            completeness = "complete" if not missing else "partial"
+            acquisition_state = "RECOVERED_COMPLETE" if not missing else "RECOVERED_PARTIAL"
+            scout_refresh_needed = 0 if not missing else 1
+            metadata["recovery"] = {
+                "rebuild_id": rebuild_id,
+                "recovered_from": "scout_document_manifest",
+                "completeness": completeness,
+                "missing_facts": sorted(set(missing)),
+                "recovered_at": now,
+            }
+            first_seen = str(document.get("first_seen_at") or now)
+            last_seen = str(document.get("last_seen_at") or first_seen)
+            created_at = str(document.get("created_at") or first_seen)
+            updated_at = str(document.get("updated_at") or now)
+            is_file = 1 if bool(document.get("is_file")) else 0
+            con.execute(
+                """
+                INSERT INTO documents(
+                    id, name, url, item_kind, is_file, filing_date, submitter,
+                    company, project, filing_number, snippet, metadata, status,
+                    scout_status, download_status, process_status, export_status,
+                    detail_status, detail_last_attempt_at, detail_succeeded_at,
+                    detail_snapshot_id, file_path, hash, last_error, retry_count,
+                    first_seen_at, last_seen_at, created_at, updated_at,
+                    acquisition_state, scout_refresh_needed, recovery_rebuild_id,
+                    recovery_missing_facts_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING',
+                          'PENDING', 'PENDING', ?, ?, ?, ?, NULL, NULL, NULL, 0,
+                          ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    document_id, str(document.get("name") or ""),
+                    str(document.get("url") or ""), document.get("item_kind"), is_file,
+                    document.get("filing_date"), document.get("submitter"),
+                    document.get("company"), document.get("project"),
+                    document.get("filing_number"), document.get("snippet"),
+                    stable_json(metadata), str(document.get("status") or "RECOVERED"),
+                    scout_status, str(document.get("detail_status") or "PENDING"),
+                    document.get("detail_last_attempt_at"),
+                    document.get("detail_succeeded_at"), detail_snapshot_id,
+                    first_seen, last_seen, created_at, updated_at, acquisition_state,
+                    scout_refresh_needed, rebuild_id, stable_json(sorted(set(missing))),
+                ),
+            )
+            _insert_recovery_provenance(
+                con, rebuild_id=rebuild_id, entity_type="document",
+                entity_key=document_id, recovered_from="scout_document_manifest",
+                completeness=completeness, missing_facts=missing,
+                evidence={
+                    "manifest_path": manifest.get("_manifest_path"),
+                    "release_version": manifest.get("release_version"),
+                },
+            )
+            if missing:
+                _queue_scout_repair(
+                    con, rebuild_id=rebuild_id, document_id=document_id,
+                    missing_facts=sorted(set(missing)), priority="NORMAL",
+                    reason="Scout manifest records an incomplete acquisition state",
+                )
+                counts["partial"] += 1
+            if not is_file:
+                counts["non_files"] += 1
+            counts["recovered"] += 1
+        except Exception:
+            counts["invalid"] += 1
+    return counts
+
+
 def _recover_source(con: sqlite3.Connection, rebuild_id: int, source: Path) -> RecoveredFile:
     document_id = source.stem
     source_sha = sha256_file(source)
     size_bytes = source.stat().st_size
     sidecar, sidecar_issues = _trusted_sidecar(document_id, source_sha)
     now = utcnow()
+    existing = con.execute(
+        """
+        SELECT id, name, url, item_kind, filing_date, submitter, company, project,
+               filing_number, snippet, metadata, status, scout_status,
+               first_seen_at, last_seen_at, created_at, acquisition_state,
+               scout_refresh_needed, recovery_missing_facts_json
+        FROM documents WHERE id=?
+        """,
+        (document_id,),
+    ).fetchone()
+    scout_available = existing is not None
 
     if sidecar is not None:
-        missing = _missing_from_sidecar(sidecar)
-        completeness = "partial" if missing else "complete"
-        recovered_from = "stage2_sidecar+source_file"
+        missing = _missing_from_sidecar(sidecar, scout_available=scout_available)
+        recovered_from = (
+            "scout_document_manifest+stage2_sidecar+source_file"
+            if scout_available else "stage2_sidecar+source_file"
+        )
         pipeline = sidecar.get("pipeline") if isinstance(sidecar.get("pipeline"), dict) else {}
         file_info = sidecar.get("file") if isinstance(sidecar.get("file"), dict) else {}
-        metadata = dict(sidecar.get("metadata") or {}) if isinstance(sidecar.get("metadata"), dict) else {}
-        title = str(sidecar.get("title") or "")
-        url = str(sidecar.get("source_url") or "")
-        item_kind = str(sidecar.get("item_kind") or "") or None
-        filing_date = sidecar.get("filing_date")
-        submitter = sidecar.get("submitter")
-        company = sidecar.get("company")
-        project = sidecar.get("project")
-        filing_number = sidecar.get("filing_number")
-        snippet = sidecar.get("snippet")
-        first_seen = str(pipeline.get("first_seen_at") or now)
-        last_seen = str(pipeline.get("last_seen_at") or first_seen)
-        created_at = str(pipeline.get("created_at") or first_seen)
+        sidecar_metadata = dict(sidecar.get("metadata") or {}) if isinstance(sidecar.get("metadata"), dict) else {}
+        if existing is not None:
+            metadata = _parse_json_object(existing["metadata"])
+            for key, value in sidecar_metadata.items():
+                metadata.setdefault(key, value)
+            title = str(existing["name"] or sidecar.get("title") or "")
+            url = str(existing["url"] or sidecar.get("source_url") or "")
+            item_kind = existing["item_kind"] or sidecar.get("item_kind")
+            filing_date = existing["filing_date"] or sidecar.get("filing_date")
+            submitter = existing["submitter"] or sidecar.get("submitter")
+            company = existing["company"] or sidecar.get("company")
+            project = existing["project"] or sidecar.get("project")
+            filing_number = existing["filing_number"] or sidecar.get("filing_number")
+            snippet = existing["snippet"] or sidecar.get("snippet")
+            first_seen = str(existing["first_seen_at"] or pipeline.get("first_seen_at") or now)
+            last_seen = str(existing["last_seen_at"] or pipeline.get("last_seen_at") or first_seen)
+            created_at = str(existing["created_at"] or pipeline.get("created_at") or first_seen)
+            acquisition_state = str(existing["acquisition_state"] or "RECOVERED_COMPLETE")
+            scout_refresh_needed = int(existing["scout_refresh_needed"] or 0)
+            try:
+                existing_missing = json.loads(existing["recovery_missing_facts_json"] or "[]")
+            except json.JSONDecodeError:
+                existing_missing = []
+            if isinstance(existing_missing, list):
+                missing = sorted(set(missing) | {str(item) for item in existing_missing})
+        else:
+            metadata = sidecar_metadata
+            title = str(sidecar.get("title") or "")
+            url = str(sidecar.get("source_url") or "")
+            item_kind = str(sidecar.get("item_kind") or "") or None
+            filing_date = sidecar.get("filing_date")
+            submitter = sidecar.get("submitter")
+            company = sidecar.get("company")
+            project = sidecar.get("project")
+            filing_number = sidecar.get("filing_number")
+            snippet = sidecar.get("snippet")
+            first_seen = str(pipeline.get("first_seen_at") or now)
+            last_seen = str(pipeline.get("last_seen_at") or first_seen)
+            created_at = str(pipeline.get("created_at") or first_seen)
+            acquisition_state = "RECOVERED_PARTIAL" if missing else "RECOVERED_COMPLETE"
+            scout_refresh_needed = 1 if missing else 0
         downloaded_at = str(file_info.get("downloaded_at") or now)
         mime_type = str(file_info.get("content_type") or sidecar.get("content_type") or "") or None
         extension = str(file_info.get("extension") or sidecar.get("extension") or source.suffix).lstrip(".")
         original_filename = file_info.get("original_filename")
-        acquisition_state = "RECOVERED_PARTIAL" if missing else "RECOVERED_COMPLETE"
-        priority = "LOW" if missing == ["scout_raw_evidence"] else "NORMAL"
-        reason = "Scout evidence/metadata is incomplete after sidecar recovery"
     else:
         missing = _minimal_missing() + sidecar_issues
-        completeness = "minimal"
         recovered_from = "source_file"
         metadata = {}
         title = ""
@@ -201,9 +467,9 @@ def _recover_source(con: sqlite3.Connection, rebuild_id: int, source: Path) -> R
         extension = source.suffix.lstrip(".") or None
         original_filename = source.name
         acquisition_state = "RECOVERED_MINIMAL"
-        priority = "HIGH"
-        reason = "Only source-file identity was recoverable; Scout metadata is required"
+        scout_refresh_needed = 1
 
+    completeness = "minimal" if sidecar is None and not scout_available else "partial" if missing else "complete"
     metadata["recovery"] = {
         "rebuild_id": rebuild_id,
         "recovered_from": recovered_from,
@@ -212,25 +478,44 @@ def _recover_source(con: sqlite3.Connection, rebuild_id: int, source: Path) -> R
         "recovered_at": now,
     }
     stored = stored_path(source)
-    con.execute(
-        """
-        INSERT INTO documents(
-            id, name, url, item_kind, is_file, filing_date, submitter, company, project,
-            filing_number, snippet, metadata, status, scout_status, download_status,
-            process_status, export_status, detail_status, file_path, hash, retry_count,
-            first_seen_at, last_seen_at, created_at, updated_at, acquisition_state,
-            scout_refresh_needed, recovery_rebuild_id, recovery_missing_facts_json
-        ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 'RECOVERED', 'RECOVERY_NEEDED',
-                  'SUCCEEDED', 'PENDING', 'PENDING', 'RECOVERY_NEEDED', ?, ?, 0,
-                  ?, ?, ?, ?, ?, 1, ?, ?)
-        """,
-        (
-            document_id, title, url, item_kind, filing_date, submitter, company, project,
-            filing_number, snippet, stable_json(metadata), stored, source_sha,
-            first_seen, last_seen, created_at, now, acquisition_state, rebuild_id,
-            stable_json(sorted(set(missing))),
-        ),
-    )
+    if existing is None:
+        con.execute(
+            """
+            INSERT INTO documents(
+                id, name, url, item_kind, is_file, filing_date, submitter, company, project,
+                filing_number, snippet, metadata, status, scout_status, download_status,
+                process_status, export_status, detail_status, file_path, hash, retry_count,
+                first_seen_at, last_seen_at, created_at, updated_at, acquisition_state,
+                scout_refresh_needed, recovery_rebuild_id, recovery_missing_facts_json
+            ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 'RECOVERED', 'RECOVERY_NEEDED',
+                      'SUCCEEDED', 'PENDING', 'PENDING', 'RECOVERY_NEEDED', ?, ?, 0,
+                      ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                document_id, title, url, item_kind, filing_date, submitter, company, project,
+                filing_number, snippet, stable_json(metadata), stored, source_sha,
+                first_seen, last_seen, created_at, now, acquisition_state,
+                scout_refresh_needed, rebuild_id, stable_json(sorted(set(missing))),
+            ),
+        )
+    else:
+        con.execute(
+            """
+            UPDATE documents
+            SET name=?, url=?, item_kind=?, is_file=1, filing_date=?, submitter=?,
+                company=?, project=?, filing_number=?, snippet=?, metadata=?,
+                download_status='SUCCEEDED', file_path=?, hash=?, updated_at=?,
+                acquisition_state=?, scout_refresh_needed=?, recovery_rebuild_id=?,
+                recovery_missing_facts_json=?
+            WHERE id=?
+            """,
+            (
+                title, url, item_kind, filing_date, submitter, company, project,
+                filing_number, snippet, stable_json(metadata), stored, source_sha, now,
+                acquisition_state, scout_refresh_needed, rebuild_id,
+                stable_json(sorted(set(missing))), document_id,
+            ),
+        )
     cursor = con.execute(
         """
         INSERT INTO files(
@@ -238,21 +523,12 @@ def _recover_source(con: sqlite3.Connection, rebuild_id: int, source: Path) -> R
             size_bytes, sha256, downloaded_at, is_current
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
         """,
-        (
-            document_id, stored, original_filename, mime_type, extension,
-            size_bytes, source_sha, downloaded_at,
-        ),
+        (document_id, stored, original_filename, mime_type, extension, size_bytes, source_sha, downloaded_at),
     )
     file_id = int(cursor.lastrowid)
-
     _insert_recovery_provenance(
-        con,
-        rebuild_id=rebuild_id,
-        entity_type="document",
-        entity_key=document_id,
-        recovered_from=recovered_from,
-        completeness=completeness,
-        missing_facts=missing,
+        con, rebuild_id=rebuild_id, entity_type="document", entity_key=document_id,
+        recovered_from=recovered_from, completeness=completeness, missing_facts=missing,
         evidence={
             "source_path": stored,
             "source_sha256": source_sha,
@@ -261,23 +537,22 @@ def _recover_source(con: sqlite3.Connection, rebuild_id: int, source: Path) -> R
     )
     sidecar_file = sidecar.get("file") if sidecar is not None and isinstance(sidecar.get("file"), dict) else {}
     _insert_recovery_provenance(
-        con,
-        rebuild_id=rebuild_id,
-        entity_type="file",
-        entity_key=f"{document_id}:{source_sha}",
-        recovered_from="source_file",
-        completeness="complete",
-        missing_facts=[] if sidecar_file.get("downloaded_at") else ["original_downloaded_at"],
+        con, rebuild_id=rebuild_id, entity_type="file",
+        entity_key=f"{document_id}:{source_sha}", recovered_from="source_file",
+        completeness="complete", missing_facts=[] if sidecar_file.get("downloaded_at") else ["original_downloaded_at"],
         evidence={"path": stored, "sha256": source_sha, "size_bytes": size_bytes},
     )
-    _queue_scout_repair(
-        con,
-        rebuild_id=rebuild_id,
-        document_id=document_id,
-        missing_facts=sorted(set(missing)),
-        priority=priority,
-        reason=reason,
-    )
+    if missing and scout_refresh_needed:
+        _queue_scout_repair(
+            con, rebuild_id=rebuild_id, document_id=document_id,
+            missing_facts=sorted(set(missing)), priority="HIGH" if completeness == "minimal" else "NORMAL",
+            reason="Scout evidence/metadata remains incomplete after artifact recovery",
+        )
+    else:
+        con.execute(
+            "DELETE FROM recovery_tasks WHERE rebuild_id=? AND document_id=? AND task_type='SCOUT_REFRESH'",
+            (rebuild_id, document_id),
+        )
     return RecoveredFile(document_id, file_id, source_sha, source, completeness, sorted(set(missing)))
 
 
@@ -357,26 +632,17 @@ def _recover_analyses(
                     ),
                 )
                 row = con.execute(
-                    """
-                    SELECT id FROM analyses
-                    WHERE file_id=? AND file_sha256=? AND analyzer_id=? AND api_version=?
-                    """,
+                    "SELECT id FROM analyses WHERE file_id=? AND file_sha256=? AND analyzer_id=? AND api_version=?",
                     (current.file_id, source_sha, analyzer_id, version),
                 ).fetchone()
                 analysis_id = int(row[0]) if row is not None else int(cursor.lastrowid)
                 _insert_recovery_provenance(
-                    con,
-                    rebuild_id=rebuild_id,
-                    entity_type="analysis",
-                    entity_key=f"{analysis_id}",
-                    recovered_from=f"{provider}_analysis_artifact",
-                    completeness="partial",
+                    con, rebuild_id=rebuild_id, entity_type="analysis", entity_key=f"{analysis_id}",
+                    recovered_from=f"{provider}_analysis_artifact", completeness="partial",
                     missing_facts=["original_run", "original_timing", "operation_history"],
                     evidence={
-                        "document_id": document_id,
-                        "file_sha256": source_sha,
-                        "analyzer_id": analyzer_id,
-                        "api_version": version,
+                        "document_id": document_id, "file_sha256": source_sha,
+                        "analyzer_id": analyzer_id, "api_version": version,
                         "raw_json_path": stored_path(raw_path),
                     },
                 )
@@ -387,7 +653,7 @@ def _recover_analyses(
 
 
 def rebuild_create(output_db: Path) -> dict[str, Any]:
-    """Create a new ledger from durable source/sidecar/Stage 3 artifacts."""
+    """Create a new ledger from durable Scout, Stage 2, and Stage 3 artifacts."""
     output_db = output_db.expanduser().resolve()
     if output_db.exists():
         raise FileExistsError(
@@ -414,6 +680,10 @@ def rebuild_create(output_db: Path) -> dict[str, Any]:
         rebuild_id = int(cursor.lastrowid)
         con.commit()
 
+        scout_snapshot_counts, snapshot_mapping = _recover_scout_snapshots(con, rebuild_id)
+        scout_document_counts = _recover_scout_documents(con, rebuild_id, snapshot_mapping)
+        con.commit()
+
         recovered: dict[str, RecoveredFile] = {}
         source_failures: list[dict[str, str]] = []
         for source in _current_source_files():
@@ -428,14 +698,21 @@ def rebuild_create(output_db: Path) -> dict[str, Any]:
         analysis_counts = _recover_analyses(con, rebuild_id, recovered)
         con.commit()
         task_rows = con.execute(
-            "SELECT priority, COUNT(*) FROM recovery_tasks WHERE rebuild_id=? GROUP BY priority",
+            "SELECT priority, COUNT(*) FROM recovery_tasks WHERE rebuild_id=? AND status='PENDING' GROUP BY priority",
             (rebuild_id,),
         ).fetchall()
         tasks = {str(row[0]): int(row[1]) for row in task_rows}
+        total_documents = int(con.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
+        raw_snapshots = int(con.execute("SELECT COUNT(*) FROM raw_snapshots").fetchone()[0])
+        current_files = int(con.execute("SELECT COUNT(*) FROM files WHERE is_current=1").fetchone()[0])
         summary = {
-            "documents_recovered": len(recovered),
+            "documents_recovered_total": total_documents,
+            "scout_documents_recovered": scout_document_counts,
+            "scout_snapshots_recovered": scout_snapshot_counts,
+            "current_source_files_recovered": current_files,
             "source_failures": len(source_failures),
             "source_failure_examples": source_failures[:20],
+            "raw_snapshots_recovered": raw_snapshots,
             "analyses_recovered": analysis_counts,
             "scout_repair_queue": tasks,
             "normalizations_recovered": 0,
@@ -446,27 +723,21 @@ def rebuild_create(output_db: Path) -> dict[str, Any]:
         }
         schema = verify_schema(con)
         integrity = integrity_report(con)
-        status = "SUCCEEDED" if schema["ok"] and integrity["ok"] and not source_failures else "COMPLETED_WITH_GAPS"
+        serious_gaps = bool(source_failures) or scout_snapshot_counts["invalid"] > 0 or scout_document_counts["invalid"] > 0
+        status = "SUCCEEDED" if schema["ok"] and integrity["ok"] and not serious_gaps else "COMPLETED_WITH_GAPS"
         con.execute(
             "UPDATE rebuilds SET status=?, finished_at=?, summary_json=? WHERE id=?",
             (status, utcnow(), stable_json(summary), rebuild_id),
         )
         con.commit()
         return {
-            "status": status,
-            "output_db": str(output_db),
-            "rebuild_id": rebuild_id,
-            "summary": summary,
-            "schema": schema,
-            "integrity": integrity,
+            "status": status, "output_db": str(output_db), "rebuild_id": rebuild_id,
+            "summary": summary, "schema": schema, "integrity": integrity,
         }
     except Exception:
         if rebuild_id is not None and table_exists(con, "rebuilds"):
             try:
-                con.execute(
-                    "UPDATE rebuilds SET status='FAILED', finished_at=? WHERE id=?",
-                    (utcnow(), rebuild_id),
-                )
+                con.execute("UPDATE rebuilds SET status='FAILED', finished_at=? WHERE id=?", (utcnow(), rebuild_id))
                 con.commit()
             except Exception:
                 pass
