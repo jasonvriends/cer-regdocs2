@@ -7,7 +7,7 @@ Azure Content Understanding.
 The public command is a durable, single-threaded supervisor. Exactly one child
 process analyzes one document at a time.
 
-Script version documented: **3d.2.1**.
+Script version documented: **3d.3.0**.
 
 ## Run ownership
 
@@ -31,6 +31,30 @@ supervisor-owned run and does not allocate or finish another pipeline run during
 normal public execution.
 
 This matches the Azure Stage 3 rule: **one supervisor invocation = one run**.
+
+## Shared Stage 3 lock
+
+Azure and Docling are alternate Stage 3 providers over the same corpus and
+shared SQLite ledger, so their public supervisors are mutually exclusive at
+runtime.
+
+Both use:
+
+```text
+database/locks/3_analyze.lock
+```
+
+Whichever provider starts first owns that lock for its whole processing run. If
+Azure is active, starting Docling refuses to process; if Docling is active,
+starting Azure refuses to process. The lock records the owning PID and provider
+role, and a later invocation automatically removes it only when the recorded PID
+is no longer running.
+
+`python pipeline/regdocs_3_docling.py --status` remains read-only and does not
+acquire the Stage 3 processing lock.
+
+Do not use `--force-lock` unless you have independently confirmed that neither
+an Azure nor a Docling Stage 3 supervisor is alive.
 
 ## Install
 
@@ -86,7 +110,7 @@ Process the remaining current corpus:
 python pipeline/regdocs_3_docling.py
 ```
 
-Inspect progress without creating a run:
+Inspect progress without creating a run or taking the Stage 3 processing lock:
 
 ```bash
 python pipeline/regdocs_3_docling.py --status
@@ -103,9 +127,10 @@ position is zero-padded to the width of the selected document count, and the
 success line is built from the committed SQLite analysis row:
 
 ```text
-Run 43: Docling supervisor 3d.2.1; 4048 document(s) eligible
+Run 43: Docling supervisor 3d.3.0; 4048 document(s) eligible
 Concurrency:    1 child process
 Crash retries:  up to 3 attempt(s) per document
+Stage 3 lock:   /.../database/locks/3_analyze.lock
 
 [0001/4048] 4659445 ... SUCCEEDED pages=1 tables=1 sections=5 elapsed=3.9s
 [0002/4048] 4659447 ... SUCCEEDED pages=12 tables=0 sections=8 elapsed=6.2s
