@@ -1,4 +1,4 @@
-# Runtime dependencies for the REGDOCS Atlas POC.
+# Runtime dependencies for REGDOCS Atlas.
 # Python 3.10+; current development environment uses Python 3.12.
 # Install once for all pipeline stages:
 #   python -m pip install -r requirements.txt
