@@ -108,7 +108,12 @@ Focus:
 - make Stage 2 file promotion and ledger updates crash-recoverable;
 - require bounded Stage 3 selection or explicit full-run acknowledgement;
 - preflight Stage 3 page/byte volume and projected cost before billable work;
-- retain provider usage and per-document/per-run cost metadata;
+- capture Azure Content Understanding `usage` for every accepted analysis and
+  range, including `documentPagesMinimal`, `documentPagesBasic`, and
+  `documentPagesStandard`; persist those counters per document and per run,
+  aggregate them in Stage 3 summaries, and expose an explicitly labeled cost
+  estimate from configurable meter prices so operators do not need to rely on
+  delayed Azure Cost Management totals;
 - persist accepted Azure operation IDs and preserve attempts append-only;
 - make inspection and no-op modes genuinely read-only where promised;
 - write Stage 4 as atomic, manifested generations;
