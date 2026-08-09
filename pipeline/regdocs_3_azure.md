@@ -117,19 +117,26 @@ last exit code/signal, timestamps, crash count, and the last parent pipeline run
 ID. It is diagnostic state; SQLite analysis identity and canonical artifacts
 determine whether a document is complete.
 
-## Locking
+## Shared Stage 3 locking
 
-The supervisor owns the normal Stage 3 lock for the full run:
+Azure and Docling are alternate Stage 3 providers over the same corpus and
+shared SQLite ledger. Their public supervisors therefore use the same exclusive
+processing lock for the full run:
 
 ```text
 database/locks/3_analyze.lock
 ```
 
-A worker receives a derived short-lived worker lock. Stale PID detection lets a
-later worker clean up a lock left by a crashed child.
+Whichever provider starts first owns the lock. While Azure is running, Docling
+refuses to start processing; while Docling is running, Azure refuses to start.
+Both implementations use PID-aware stale-lock cleanup so a dead supervisor does
+not permanently block Stage 3.
+
+Azure workers also receive a derived short-lived worker lock for their isolated
+child process.
 
 Do not use `--force-lock` unless you have independently confirmed that no live
-Stage 3 Azure process owns the lock.
+Azure **or Docling** Stage 3 supervisor owns the lock.
 
 ## Azure configuration
 
@@ -212,8 +219,9 @@ regdocs_3_docling_worker.py
 ```
 
 Both Stage 3 supervisors use the same run-ownership rule: **one public supervisor
-invocation equals one pipeline run**. Their retry policies differ because Azure
-has per-submission billing risk while Docling is local.
+invocation equals one pipeline run**, and both use the same exclusive Stage 3
+processing lock. Their retry policies differ because Azure has per-submission
+billing risk while Docling is local.
 
 Previous: [Stage 2 downloader](regdocs_2_download.md).
 
