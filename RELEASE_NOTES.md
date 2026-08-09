@@ -1,68 +1,272 @@
-# REGDOCS Atlas 0.0.1
+# REGDOCS Atlas 0.1.0
 
-**Status: proof of concept.** This is the only project version until an explicit version change is requested. Internal implementation work does not advance the version.
+Version **0.1.0** is the first release described as a working REGDOCS data pipeline rather than an experiment.
 
-## Current POC baseline
+The goal of this release is simple: make the project easier to understand and safer to operate without changing the basic five-stage design.
 
-REGDOCS Atlas provides one root CLI (`python pipeline.py ...`) and one application package (`regdocs_atlas/`) for the complete acquisition-to-search workflow.
+---
 
-The public CLI is action-oriented for safety: naming a stage never performs work. Scout, Download, Azure analysis, Docling analysis, Normalize, and Index all require an explicit action before network or mutating work can begin. Examples include `scout run`, `download run`, `analyze azure run`, `analyze docling run`, `normalize run`, and `index publish`. Safe planning/status actions are separate. Azure Content Understanding work additionally requires an explicit candidate scope (`--all`, `--limit`, or `--document-id`).
+## What REGDOCS Atlas does
 
-`SYNTAX.md` is the authoritative public command/switch guide. It is written for operators who do not need Python knowledge, with stage-by-stage safety notes, copy/paste examples, and complete public switch tables. `README.md` remains the architectural and POC operating overview.
+REGDOCS Atlas provides one command-line program:
 
-The pipeline baseline includes:
+```bash
+python pipeline.py ...
+```
 
-- Scout preserving REGDOCS metadata, raw HTML evidence, recovery manifests, and a durable date-range coverage watermark.
-- Download preserving current source files, SHA-256 identities, and deterministic metadata sidecars.
-- Azure Content Understanding and local Docling analysis with single-document child-process isolation.
-- Azure analysis preserving provider-native JSON/Markdown artifacts and supporting large PDF Content-Range processing.
-- Normalize locally producing deterministic documents/pages/chunks/tables/provenance JSONL from Stage 3 artifacts.
-- Normalize supporting bounded isolated-worker concurrency with `--concurrency N` while retaining a safe default of `1`, deterministic final document order, and sequential `--stop-on-error` semantics.
-- Normalize streaming successful worker shards into canonical JSONL instead of loading whole shard files into memory, and recording selection, worker, merge, and total wall-clock timing in the run summary.
-- Index validating/publishing normalized chunks to Azure AI Search.
-- SQLite providing the operational ledger, named migrations, backups, integrity checks, run state, errors, analysis state, and normalization state.
-- A global pipeline lock coordinating normal state-changing root-CLI stage execution while stage locks remain defense-in-depth. Scout `probe` is also globally serialized because it preserves run/error/raw-snapshot state even though its stage core uses dry-run document semantics.
-- `workspace/pipeline.log` containing only the latest state-changing stage execution. When the next state-changing stage starts, the previous log is compressed into `workspace/logs/pipeline-<UTC>.log.gz`; archives are limited to the newest 20 and anything older than 30 days is removed. Rotation, stage execution, final cost/manifests, and the final `FINISH` log record all occur while the global pipeline lock is owned.
-- A root-console presentation layer that keeps stage output consistent while preserving raw child diagnostics for state-changing runs in `workspace/pipeline.log`: Scout uses a `BASE / CONTAINERS / FACETS / DETAILS` live dashboard; Download uses `RECONCILE / FILES / OK / FAILED / RETRIES`; Normalize uses `WORKERS / OK / FAILED / CONCURRENCY / MERGE`; Index publish uses `SCAN / BATCHES / CHUNKS / FAILED`; Azure and Docling retain durable per-document result lines; plan, status, audit, query, and other informational commands remain normal text/JSON output and do not rotate or append to the current pipeline run log. Scout progress-heartbeat records are dashboard state and are defensively prevented from appearing as permanent terminal lines even when logger/tqdm framing is irregular.
-- Optional Bash completion under `scripts/completions/` for the exact `python pipeline.py ...` command form, including top-level commands, stage actions/providers, public switches, and common enum values. The completion hook is opt-in because it registers on `python`/`python3` and falls back to normal Bash completion for unrelated Python commands.
-- Azure Content Understanding usage/cost inspection from saved result usage with configurable rates; Docling remains local compute.
+That command controls the complete workflow:
 
-## Durable recovery boundary
+```text
+1. Scout     find CER REGDOCS records and preserve source evidence
+2. Download  download source files and record their identities
+3. Analyze   process documents with Azure Content Understanding or Docling
+4. Normalize convert analyzer output into consistent JSONL
+5. Index     publish search-ready chunks to Azure AI Search
+```
 
-The POC treats Stages 1-3 as durable because they contain source evidence, source bytes, or expensive analysis outputs.
+The project stores operational state in SQLite and keeps important source and analysis artifacts on disk so work can be checked, resumed, and rebuilt.
 
-Durable recovery artifacts include:
+---
 
-- Scout document/snapshot manifests plus raw HTML;
-- Scout coverage metadata independent of historical SQLite run rows;
-- downloaded files plus Stage 2 sidecars;
-- successful Stage 3 analysis manifests plus Azure/Docling provider artifacts.
+## Documentation rewritten for new users
 
-The recovery workflow can build a new SQLite database beside the working database and compare source/Stage-3 identities before any destructive test.
+The main documentation has been reorganized around a beginner-first approach.
 
-The current corpus recovery proof reached exact equivalence through Stage 3 for:
+### `README.md`
 
-- 16,823 document identities;
-- 7,958 current source-file identities;
-- 22,086 Scout snapshot identities;
-- 15,114 container relationships; and
-- 7,958 successful Stage 3 analysis identities.
+The README now explains:
 
-A flat rebuild mode is available with `python pipeline.py rebuild create --flat`. It first performs the verified manifest-backed Stage 1-3 reconstruction, then removes historical runs, errors, rebuild/recovery bookkeeping, and recovery-only document state to produce a clean operational baseline. It does not contact external services and never overwrites the active database.
+- what the project is for;
+- what each stage does;
+- which stages use the network;
+- which operations can create Azure charges;
+- how to install the project;
+- the normal Scout → Download → Analyze → Normalize → Index workflow;
+- where important files are stored;
+- how recovery works;
+- how logs and locks protect the workspace; and
+- common technical terms in plain language.
 
-Stage 4 normalization is intentionally rerun locally from preserved Stage 3 artifacts rather than adding another recovery-manifest layer. Azure AI Search is republished from Stage 4.
+### `SYNTAX.md`
 
-## Repository policy
+The command guide remains the detailed operator reference, but commands are now grouped around tasks a new user is likely to perform. Safety notes appear beside commands that write data, contact external services, replace canonical output, or can create Azure charges.
 
-The repository intentionally has:
+---
 
-- no `pipeline/` compatibility implementation tree;
-- no duplicate `docs/` or `roadmap/` documentation trees;
-- no GitHub Actions CI workflow;
-- no dedicated automated test suite for the POC;
-- one root `requirements.txt`;
-- two intentionally distinct documentation files: `README.md` for architecture/operating rules and `SYNTAX.md` for the public operator guide;
-- one consolidated `RELEASE_NOTES.md` baseline rather than an internal change diary;
-- one version (`0.0.1`) until explicitly changed.
+## Safer public command line
 
-`workspace/` and `database/` are Git-ignored local state. They must not be deleted as part of repository cleanup, especially `workspace/3_analyze/`, because reproducing Azure analysis can be expensive.
+The public CLI is action-oriented.
+
+A stage name by itself does not start work:
+
+```bash
+python pipeline.py scout
+python pipeline.py download
+python pipeline.py analyze azure
+python pipeline.py analyze docling
+python pipeline.py normalize
+python pipeline.py index
+```
+
+Real work requires an explicit action such as:
+
+```bash
+python pipeline.py scout run ...
+python pipeline.py download run
+python pipeline.py analyze azure run ...
+python pipeline.py analyze docling run ...
+python pipeline.py normalize run ...
+python pipeline.py index publish
+```
+
+Planning and status commands are separate so an operator can inspect work before starting it.
+
+Azure Content Understanding additionally requires an explicit candidate scope such as `--all`, `--limit N`, or `--document-id ID`.
+
+---
+
+## Stage 1 — Scout
+
+Scout can:
+
+- search REGDOCS by an explicit filing-date range;
+- preserve raw HTML evidence;
+- save document and snapshot manifests;
+- track durable date-range coverage;
+- inspect status and schema state;
+- audit saved Scout evidence; and
+- repair known Folder and Compound Document relationships.
+
+Normal `scout run` and `scout probe` commands require both `--start-date` and `--end-date`.
+
+---
+
+## Stage 2 — Download
+
+Download can:
+
+- preview eligible downloads without contacting REGDOCS;
+- download source files;
+- validate and hash downloaded files;
+- reconcile the SQLite ledger with files already on disk;
+- archive replaced versions when configured to do so; and
+- write deterministic metadata sidecars.
+
+The default workflow is still:
+
+```bash
+python pipeline.py download plan
+python pipeline.py download run
+```
+
+---
+
+## Stage 3 — Azure Content Understanding
+
+Azure analysis uses a single-threaded supervisor that launches one isolated child process per document.
+
+Important protections include:
+
+- explicit `plan` and `run` actions;
+- explicit candidate scope;
+- source SHA-256 verification by default;
+- reuse of matching local analysis artifacts when possible;
+- durable per-document supervisor state; and
+- support for large PDFs through Content-Range page processing.
+
+Large PDFs are processed in page ranges that fit the Azure request limit. Valid completed range artifacts can be reused locally.
+
+Automatic application-level Azure resubmission retries remain disabled. A failed document is retried on a later normal pipeline run instead of being repeatedly resubmitted inside the same supervisor run.
+
+---
+
+## Stage 3 — Docling
+
+Docling provides a local document-analysis path.
+
+It uses isolated child processes and supports:
+
+- status inspection;
+- bounded runs with `--max-documents`;
+- per-document attempt limits;
+- quarantine state; and
+- retrying quarantined documents when explicitly requested.
+
+Docling does not create Azure Content Understanding charges.
+
+---
+
+## Stage 4 — Normalize
+
+Normalize converts Azure or Docling artifacts into a consistent local corpus containing document, page, chunk, table, and provenance records.
+
+The stage supports:
+
+- explicit provider selection with `--provider azure|docling`;
+- planning without replacing canonical output;
+- isolated worker processes;
+- configurable local concurrency;
+- deterministic final document order; and
+- recorded selection, worker, merge, and total wall-clock timing.
+
+The final JSONL merge is streamed so complete worker shard files do not need to be loaded into memory at once.
+
+A real Normalize run still replaces the canonical Stage 4 JSONL with the documents selected for that run. Operators should use `plan` or a separate `--output-dir` for small tests.
+
+---
+
+## Stage 5 — Azure AI Search
+
+Index can:
+
+- validate normalized chunks locally;
+- map chunks into Azure AI Search documents;
+- publish in bounded batches;
+- optionally recreate an index; and
+- query an existing index from the same root CLI.
+
+`index plan` does not contact Azure AI Search. `index publish` and `index query` do.
+
+---
+
+## Durable recovery design
+
+Stages 1-3 are the main durable recovery boundary because they contain source evidence, downloaded source bytes, or expensive analysis results.
+
+Important recovery material includes:
+
+```text
+workspace/1_scout/
+workspace/2_download/
+workspace/3_analyze/
+```
+
+The project can use those artifacts to build a new SQLite ledger beside the active database and compare Stage 1-3 identities before the operator decides whether to use the rebuilt copy.
+
+A flat rebuild is also available:
+
+```bash
+python pipeline.py rebuild create --flat
+```
+
+It first performs the manifest-backed Stage 1-3 reconstruction, then removes historical run/error/recovery bookkeeping from the new database. It does not overwrite `database/regdocs.db` and does not contact REGDOCS or Azure.
+
+Stage 4 is intentionally regenerated locally from Stage 3 artifacts. Stage 5 is republished from Stage 4.
+
+---
+
+## Logging and process protection
+
+State-changing root commands share a global pipeline lock. Stage-specific locks remain additional protection.
+
+The current state-changing run is written to:
+
+```text
+workspace/pipeline.log
+```
+
+Before the next state-changing run starts, the previous log is compressed under `workspace/logs/`. Archives are bounded by count and age so log history does not grow without limit.
+
+The root console keeps stage output consistent while preserving detailed child diagnostics in the pipeline log.
+
+---
+
+## Bash completion
+
+Optional Bash completion is included under:
+
+```text
+scripts/completions/
+```
+
+Enable it with:
+
+```bash
+source scripts/completions/install-bash.sh
+```
+
+It supports the public `python pipeline.py ...` command form, stage actions, providers, public switches, and common fixed values.
+
+---
+
+## Versioning
+
+The project version is stored in one place:
+
+```text
+VERSION
+```
+
+The public command reads that file:
+
+```bash
+python pipeline.py version
+```
+
+For this release it returns:
+
+```text
+0.1.0
+```
+
+Analyzer identities, parser identities, API versions, and other compatibility values stored in durable artifacts are separate from the project release number. They continue to identify whether saved artifacts are compatible with the code that produced or consumes them.
