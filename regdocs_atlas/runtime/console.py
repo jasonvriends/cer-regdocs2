@@ -35,12 +35,12 @@ _RETRY_DOWNLOAD_RE = re.compile(
 )
 
 
-def _clean(value: str) -> str:
-    return _ANSI_RE.sub("", value).strip()
+def _without_ansi(value: str) -> str:
+    return _ANSI_RE.sub("", value).rstrip()
 
 
 def _looks_like_progress_bar(value: str) -> bool:
-    text = _clean(value)
+    text = _without_ansi(value).strip()
     if not text:
         return True
     # tqdm's standard bar contains both a percentage separator and timing/rate
@@ -86,13 +86,16 @@ def _format_progress(message: str) -> str | None:
 
 def normalize_console_line(value: str) -> str | None:
     """Return the operator-facing representation of one logical child line."""
-    text = _clean(value)
+    raw = _without_ansi(value)
+    text = raw.strip()
     if not text or _looks_like_progress_bar(text):
         return None
 
     log_match = _LOG_RE.match(text)
     if not log_match:
-        return text
+        # Preserve indentation for JSON, worker diagnostics, and other structured
+        # non-logging output. Only terminal redraws and logger prefixes change.
+        return raw
 
     level = log_match.group("level")
     message = log_match.group("message").strip()
