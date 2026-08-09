@@ -38,7 +38,7 @@ shared package
 `pipeline.py` should remain tiny. It is a router, not a monolith.
 
 The existing `pipeline/regdocs_*.py` scripts remain compatibility entry points
-until the package stage modules have proven equivalent.
+until the package stage modules have proven equivalent through pilot use.
 
 ## Phase 1 — unified command surface and database foundation
 
@@ -47,7 +47,7 @@ until the package stage modules have proven equivalent.
 - add root `pipeline.py`;
 - add `regdocs_atlas` package;
 - add `python pipeline.py version`, `status`, and `diagnostics`;
-- route Scout, Download, Azure, Docling, Normalize, and Index to the existing tested stage entry points;
+- route Scout, Download, Azure, Docling, Normalize, and Index to the existing stage entry points;
 - add `python pipeline.py db migrate|status|verify`;
 - add an explicit `schema_migrations` registry rather than overloading `PRAGMA user_version`;
 - centralize the complete current Stage 1–4 schema in migrations;
@@ -64,8 +64,8 @@ until the package stage modules have proven equivalent.
 Schema changes have one target home: `regdocs_atlas/db/migrations.py`.
 
 A migration must have a stable ID, preserve existing provenance, be idempotent
-against current ledgers, fail closed on unknown old shapes, and be tested both
-against clean and existing databases.
+against current ledgers, fail closed on unknown old shapes, and be manually
+verified against the working ledger and a clean/rebuilt ledger before relying on it.
 
 Current migration chain:
 
@@ -123,10 +123,9 @@ model/GPU behavior provider-specific.
 
 Decompose Scout behind unchanged behavior into client/parser/container/identity/raw-store/service modules. Decompose Download into HTTP/filetype/reconcile/version/sidecar/service modules. Stage 2 sidecars are now durable by default; the refactor should move their schema/write logic into a reusable package module without changing bytes.
 
-The Scout refactor must also add an explicit selective repair API that consumes
+The Scout refactor must also retain the selective repair API that consumes
 `recovery_tasks` and marks tasks complete only after fresh authoritative REGDOCS
-evidence is stored. Release 0.0.3 creates and exposes this queue but deliberately
-does not issue selective repair requests yet.
+evidence is stored.
 
 ## Phase 6 — provider-neutral normalization
 
@@ -146,21 +145,26 @@ Implemented:
 - source-only records are explicitly `RECOVERED_MINIMAL` rather than populated with invented title/URL values;
 - matching Azure/Docling canonical Stage 3 artifacts can reconstruct successful `analyses` rows without provider calls;
 - every recovered document/file/analysis carries recovery provenance;
-- missing Scout facts become prioritized `recovery_tasks` visible through `pipeline.py recover scout`.
+- missing Scout facts become prioritized `recovery_tasks` visible through `pipeline.py recover scout`;
+- durable Scout manifests make Tier A acquisition evidence reconstructable;
+- `rebuild compare` provides a side-by-side identity/provenance check against a healthy ledger.
 
 Still required:
 
-- parse/preserve surviving Stage 1 raw evidence into `raw_snapshots` and authoritative Scout metadata where possible;
-- add selective Scout task execution and completion;
 - add Stage 3 artifact-side manifests where current native artifacts do not independently prove all identity fields;
 - add Stage 4 generation manifests and reconstruct `normalizations` only when normalizer/config/input identity can be proven;
-- compare rebuilt and original ledgers in fault-injection tests;
 - add recovery for historical source versions where artifact evidence is sufficient.
 
 See `roadmap/SQLITE_REBUILD.md` and `docs/DATABASE_RECOVERY.md`.
 
-## Testing and removal rule
+## Pilot verification and removal rule
 
-Every extraction must prove clean migration, adoption, idempotence, output
-identity, restart/failure behavior, and artifact reuse. Do not delete a legacy
-`*_core.py` until its package replacement is demonstrably equivalent.
+This is a pilot, so the repository does not maintain a dedicated automated test
+suite or GitHub Actions CI pipeline. Verification stays close to the actual data
+and commands: `db verify`, `rebuild verify`, `rebuild compare`, stage status/dry
+runs where available, artifact SHA/provenance checks, and side-by-side operation
+against the working corpus.
+
+Do not delete a legacy `*_core.py` until its package replacement has been used
+successfully on the pilot corpus and its important artifact/database identities
+match the existing behavior.
