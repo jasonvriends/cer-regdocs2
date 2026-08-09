@@ -8,7 +8,52 @@ The public command is a **single-threaded crash-resilient supervisor**. It
 launches exactly one short-lived child process per document through
 `regdocs_3_azure_worker.py`.
 
-Script version documented: **3.5.1**.
+Script version documented: **3.6.0**.
+
+## Cost-safe retry policy
+
+Azure retries are intentionally conservative because another submission may be
+billable.
+
+For the public `regdocs_3_azure.py` path:
+
+```text
+worker launches per document per run = 1
+application-level Azure submission attempts per request/range = 1
+automatic same-run retries = 0
+concurrency = 1
+```
+
+A handled Azure failure, segmentation fault, OOM kill, or other worker crash is
+recorded and the supervisor immediately advances to the next selected document.
+It does **not** relaunch that document during the same run.
+
+A later normal Azure Stage 3 invocation is the retry boundary. Failed/crashed
+analysis identities remain eligible because only intact `SUCCEEDED` identities
+are skipped.
+
+For example:
+
+```bash
+python pipeline/regdocs_3_azure.py --limit 1000
+```
+
+If documents 25 and 88 fail, the run continues through the rest of the batch.
+A later refresh/rerun:
+
+```bash
+python pipeline/regdocs_3_azure.py --limit 1000
+```
+
+skips intact successes and may select those failed documents again.
+
+There is no Azure quarantine/retry queue. The older 3.5.x quarantine state is
+ignored and cleared as it is encountered.
+
+The internal worker still contains generic retry-capable code, but the public
+supervisor always invokes it with `--max-attempts 1` and removes an inherited
+`CONTENTUNDERSTANDING_MAX_ATTEMPTS` override. Do not invoke the worker directly
+for normal operation.
 
 ## Architecture
 
@@ -33,12 +78,12 @@ regdocs_3_azure_worker.py --document-id <one document>
         +--> raw JSON + Markdown
         +--> analyses / runs / errors ledger writes
         |
-        +--> success / handled failure -> next document
-        |
-        `--> segfault / OOM / native crash
-                 |
-                 +--> retry fresh child
-                 `--> quarantine after crash limit
+        +--> success --------> next document
+        +--> handled failure -> next document
+        `--> process crash ---> record + next document
+                                 |
+                                 v
+                         retry only on later rerun
 ```
 
 Python exception handling cannot recover from a segmentation fault in the same
@@ -73,19 +118,8 @@ Analyze every remaining eligible current document:
 python pipeline/regdocs_3_azure.py --all
 ```
 
-Retry documents previously quarantined after repeated worker crashes:
-
-```bash
-python pipeline/regdocs_3_azure.py --limit 1000 --retry-quarantined
-```
-
-or:
-
-```bash
-python pipeline/regdocs_3_azure.py \
-  --document-id 4647200 \
-  --retry-quarantined
-```
+To retry failures, run the normal command again. No special retry flag is
+required.
 
 ## Durable supervisor state
 
@@ -95,23 +129,13 @@ Default state file:
 workspace/3_analyze/content-understanding/supervisor-state.json
 ```
 
-The supervisor records document processing identity, worker launches,
-crash-attempt count, last exit code/signal, timestamps, and quarantine state.
-The state file is written atomically through a `.partial` file.
+The supervisor records processing identity, cumulative worker launches, last
+exit code/signal, timestamps, last run status, and cumulative crash count. The
+state file is written atomically through a `.partial` file.
 
-Default process-level crash policy:
-
-```text
-worker-max-attempts = 3
-concurrency = 1
-```
-
-A normal Azure/document failure is not retried by the supervisor because the
-Azure retry policy already ran inside the worker. Process-level retries are for
-cases where the child dies outside normal Python error handling.
-
-A quarantine is tied to the processing identity. If source SHA-256, analyzer,
-or API version changes, the supervisor clears the old quarantine automatically.
+This state is diagnostic and durable, but it does not suppress a failed
+identity on future runs. SQLite success state and canonical artifacts determine
+whether work is skipped.
 
 ## Locking
 
@@ -122,7 +146,7 @@ database/locks/3_analyze.lock
 ```
 
 A worker receives a derived short-lived worker lock. Stale PID detection lets a
-replacement worker clean up a lock left by a crashed child.
+later worker clean up a lock left by a crashed child.
 
 Do not use `--force-lock` unless you have independently confirmed that no live
 Stage 3 Azure process owns the lock.
@@ -148,7 +172,7 @@ Do not place a key directly in the command line. The supervisor passes key
 credentials to the worker through the environment rather than the child command
 line.
 
-Supported environment variables include:
+Supported public supervisor environment settings:
 
 | Variable | Purpose |
 |---|---|
@@ -157,9 +181,10 @@ Supported environment variables include:
 | `CONTENTUNDERSTANDING_API_VERSION` | API version override |
 | `CONTENTUNDERSTANDING_ANALYZER_ID` | Analyzer override |
 | `CONTENTUNDERSTANDING_POLLING_INTERVAL` | LRO polling interval |
-| `CONTENTUNDERSTANDING_MAX_ATTEMPTS` | Azure submission attempts inside each worker |
-| `CONTENTUNDERSTANDING_RETRY_BASE_DELAY` | Initial Azure retry delay |
-| `CONTENTUNDERSTANDING_RETRY_MAX_DELAY` | Maximum Azure retry delay |
+
+`CONTENTUNDERSTANDING_MAX_ATTEMPTS` is intentionally ignored by the public
+supervisor. The cost-safety policy is one application-level submission attempt
+per request/range per run.
 
 ## Candidate identity
 
@@ -169,8 +194,9 @@ Stage 3 Azure works on current Stage 2 files. Successful analysis identity is:
 file_id + file_sha256 + analyzer_id + api_version
 ```
 
-Unless `--force` is supplied, intact canonical successes are skipped. A stale or
-legacy success can be sent through a worker so the worker can reconcile and
+Unless `--force` is supplied, intact canonical successes are skipped. A failed
+or crashed identity remains eligible on the next normal run. A stale or legacy
+success can be sent through a worker so the worker can reconcile and
 canonicalize it locally without another Azure call when possible.
 
 ## Artifacts
@@ -209,8 +235,9 @@ For example, a 986-page PDF is analyzed as:
 ```
 
 Every successful range is committed immediately under a `.parts/` directory.
-If a later range fails or the worker crashes, the next fresh worker can reuse
-valid completed range artifacts and continue without resubmitting those ranges.
+If a later range fails or the worker crashes, that document is not retried in
+the same run. On a later refresh, the fresh worker can reuse valid completed
+range artifacts and continue without resubmitting those successful ranges.
 
 The final canonical artifact is published only after the combined returned page
 count matches the local source PDF page count.
@@ -223,13 +250,13 @@ use `--force` merely to resume interrupted work.
 Stage 3 Azure can make billable external calls. Keep initial runs bounded and
 inspect `--dry-run` output before a large selection.
 
-Process isolation protects the queue, but one ambiguity remains: if Azure has
-accepted a billable operation and the worker crashes before the operation/result
-is durably recorded, the supervisor cannot yet resume that accepted operation by
-ID. A retry can therefore create a duplicate billable operation in that narrow
-failure window.
+Disabling same-run retries reduces accidental duplicate submissions, but one
+ambiguity remains: if Azure accepts a billable operation and the worker crashes
+before the operation/result is durably recorded, the next refresh cannot yet
+resume that accepted operation by ID. A later refresh may therefore create a
+second billable operation for that document/range.
 
-A future durability upgrade should persist accepted Azure operation IDs
+The planned durability upgrade is to persist accepted Azure operation IDs
 immediately and resume polling instead of resubmitting uncertain operations.
 
 ## Important options
@@ -240,12 +267,15 @@ immediately and resume polling instead of resubmitting uncertain operations.
 | `--limit N` | Select at most N eligible documents |
 | `--all` | Explicitly select all remaining eligible documents |
 | `--dry-run` | Avoid Azure calls while previewing worker selection/reconciliation |
-| `--worker-max-attempts N` | Crash-level attempts before quarantine |
-| `--retry-quarantined` | Clear quarantines and retry them |
 | `--force` | Bypass successful-artifact reconciliation/range reuse and resubmit |
 | `--no-reconcile-artifacts` | Disable artifact/range recovery |
 | `--no-verify-hash` | Disable source SHA-256 verification |
 | `--force-lock` | Remove an existing lock only after confirming it is stale |
+| `--worker-sleep-seconds N` | Optional pause between document workers |
+
+There is intentionally no public `--retry-quarantined` or
+`--worker-max-attempts` option for Azure 3.6+. A later normal run is the retry
+mechanism.
 
 ## Provider boundary
 
@@ -255,6 +285,10 @@ Azure is one Stage 3 analysis provider. The local alternative is:
 regdocs_3_docling.py
 regdocs_3_docling_worker.py
 ```
+
+Docling may use a different retry/quarantine policy because it does not create
+Azure per-submission billing risk. Provider durability policies therefore do not
+need to be identical.
 
 Both providers preserve their Stage 3 artifacts separately. Stage 4 is the
 normalization boundary that turns analysis output into the common REGDOCS
