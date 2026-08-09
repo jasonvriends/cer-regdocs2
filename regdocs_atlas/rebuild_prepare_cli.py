@@ -18,6 +18,7 @@ from .paths import (
     SCOUT_LOCK_PATH,
 )
 from .runtime.locks import ProcessLock
+from .scout_coverage import refresh_scout_coverage
 from .scout_manifests import export_scout_manifests
 
 STAGE_LOCKS = (SCOUT_LOCK_PATH, DOWNLOAD_LOCK_PATH, ANALYZE_LOCK_PATH, NORMALIZE_LOCK_PATH)
@@ -33,10 +34,12 @@ def main(args: Sequence[str] | None = None) -> int:
     with ProcessLock(PIPELINE_LOCK_PATH, role="pipeline:rebuild_prepare"):
         assert_no_active_stage_locks(STAGE_LOCKS)
         scout = export_scout_manifests(db_path, verify_raw=not options.no_verify_raw)
+        coverage = refresh_scout_coverage(db_path)
         stage3 = export_analysis_manifests(
             db_path, verify_artifacts=not options.no_verify_analysis
         )
     result = dict(scout)
+    result["scout_coverage"] = coverage
     result["stage3_analysis"] = stage3
     result["ok"] = bool(scout.get("ok")) and bool(stage3.get("ok"))
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True, default=str))
