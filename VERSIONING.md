@@ -1,6 +1,6 @@
 # REGDOCS Atlas versioning
 
-REGDOCS Atlas uses one repository-wide **release version** for each coherent pipeline checkpoint. The current release is read from the root [`VERSION`](VERSION) file; as of this document it is `0.0.3`.
+REGDOCS Atlas uses one repository-wide release version for coherent pilot checkpoints. The current release is read from the root [`VERSION`](VERSION) file; the current release is `0.0.5`.
 
 ## Release version
 
@@ -8,27 +8,28 @@ The release version answers:
 
 > Which integrated REGDOCS Atlas code release was this run executed under?
 
-During the prototype phase:
+During the pilot:
 
-- `0.0.x` — internal pipeline checkpoints and fixes;
-- `0.1.0` — first deliberately stabilized end-to-end prototype contract;
-- later minor versions — meaningful prototype capabilities or contract milestones;
-- `1.0.0` — only when a stable supported contract is intentionally declared.
+- `0.0.x` — internal pilot checkpoints and fixes;
+- `0.1.0` — first deliberately stabilized end-to-end pilot contract;
+- `1.0.0` — only if a supported stable contract is intentionally declared later.
 
-A release is a coherent checkpoint, not every commit. When a release is cut:
+A release is a coherent checkpoint, not every commit.
+
+When a release is cut:
 
 1. update `VERSION` once;
 2. add the release entry to `RELEASE_NOTES.md`;
-3. preview with `python pipeline.py db migrate --plan`;
-4. run `python pipeline.py db migrate` for the local ledger;
-5. run `python pipeline.py db verify` and the relevant smoke/integrity tests; and
-6. optionally create the matching Git tag, for example `v0.0.3`.
+3. preview database changes with `python pipeline.py db migrate --plan`;
+4. run `python pipeline.py db migrate` when needed;
+5. run `python pipeline.py db verify`; and
+6. perform the relevant real-corpus/status/rebuild checks for the feature being changed.
 
-All public pipeline stages belong to the same release. Do not independently call Stage 1, Stage 2, Stage 3, Stage 4, and Stage 5 versions different product releases.
+The pilot intentionally does not maintain a GitHub Actions CI workflow or dedicated repository test suite.
 
-## Preferred public command behavior
+## Preferred command surface
 
-The root command is the preferred orchestration surface:
+The root command is the public interface:
 
 ```text
 python pipeline.py version
@@ -41,49 +42,43 @@ python pipeline.py normalize --provider docling
 python pipeline.py index
 ```
 
-The existing `pipeline/regdocs_*.py` stage commands remain supported compatibility entry points and their `--version` behavior still reports the same repository release.
+The older `pipeline/regdocs_*.py` commands are transitional implementation entry points while their logic moves into `regdocs_atlas/stages/`. New user-facing behavior should be added through `pipeline.py` / `regdocs_atlas`, not by creating additional public stage launchers.
 
-Use stage `--diagnostics` when implementation detail is required. Those diagnostics expose component/parser/schema/provider/API identities separately from the repository release.
+## Component and data-contract identities stay separate
 
-## Component and data-contract versions stay separate
-
-Existing implementation/component values, parser versions, schema/migration versions, Azure API versions, Docling package versions, analyzer IDs, normalization contract identities, and sidecar schema versions are not the same kind of version.
-
-They should not be flattened into the release version when they participate in artifact compatibility or provenance.
+Release version is not the same thing as analyzer, parser, schema, provider, or artifact compatibility identity.
 
 Examples:
 
 - Azure `api_version=2025-11-01` identifies the external analyzer contract;
-- the installed Docling version identifies the native Docling analysis implementation;
+- the installed Docling version identifies the local analyzer implementation;
 - parser/projection versions identify interpretation rules;
 - database migration IDs identify ledger shape evolution;
 - sidecar/manifest schema versions identify persisted artifact contracts; and
-- normalizer contract/config identities determine whether normalized output may be reused.
+- normalizer/config identities determine whether normalized output may be reused.
 
-A repository release bump by itself must **not** force expensive Azure Content Understanding or Docling analysis to be recomputed.
+A repository release bump by itself must not force expensive Stage 3 analysis to be recomputed.
 
-The old internal constant name `SCRIPT_VERSION` remains a compatibility detail in legacy implementations. New/refactored modules should prefer purpose-specific names such as `COMPONENT_VERSION`, `NORMALIZER_CONTRACT_VERSION`, `PARSER_VERSION`, or `SCHEMA_VERSION` rather than creating new independent product-version sequences.
+Historical `SCRIPT_VERSION` values remain in some legacy implementations because those exact values are already stored in SQLite or artifacts. Treat them as component/provenance identities, not independent product releases.
 
 ## SQLite history and migrations
 
-The shared SQLite ledger preserves historical component/script/parser values already recorded by older runs. Do not rewrite them to a later release; they describe what actually executed at the time.
+Historical run provenance is preserved. Do not rewrite old component/parser/provider identities to the latest release.
 
-The release dimension is separate:
+The release dimension is tracked separately in:
 
 ```text
 runs.release_version
 pipeline_metadata['release_version']
 ```
 
-Historical runs may remain `NULL` for `release_version` when they predate unified release tracking. New runs are stamped with the current repository release by the SQLite trigger.
-
-Database shape is tracked separately in:
+Database schema evolution is tracked in:
 
 ```text
 schema_migrations
 ```
 
-The migration chain is applied with:
+Use:
 
 ```bash
 python pipeline.py db migrate --plan
@@ -91,19 +86,17 @@ python pipeline.py db migrate
 python pipeline.py db verify
 ```
 
-Starting in `0.0.3`, applied migration rows also carry a migration checksum/fingerprint. Existing pre-checksum rows are adopted once by backfilling the expected fingerprint; later mismatches fail closed instead of silently accepting migration drift.
+Applied migration rows carry a checksum/fingerprint so migration drift fails closed. Existing databases receive a consistent SQLite backup by default before migration, and migration performs schema, integrity, and foreign-key verification afterward.
 
-An existing ledger receives a consistent SQLite backup by default before migration. The migration command also refuses to run while a live stage lock exists and performs schema, SQLite integrity, and foreign-key verification afterward.
+Do not use `PRAGMA user_version` as the authoritative migration registry; the historical Scout implementation already used that pragma.
 
-Do not use `PRAGMA user_version` as the authoritative migration registry. The legacy Scout implementation historically owns that pragma, so centralized migrations deliberately use named migration IDs instead.
-
-This gives the ledger distinct dimensions:
+The important identity dimensions are therefore:
 
 ```text
-release_version   integrated repository release, e.g. 0.0.3
-script_version    legacy durable component implementation value
-parser_version    parser/projection contract where applicable
-migration_id      database schema evolution identity
+release_version    integrated REGDOCS Atlas release
+component_version  implementation provenance where needed
+parser_version     parser/projection contract
+migration_id       SQLite schema evolution
+artifact schema    durable sidecar/manifest compatibility
+provider/API       Azure or Docling analysis identity
 ```
-
-For new code and user-facing output, prefer `release_version`, `component_version`, `parser_version`, and explicit schema/migration identifiers. Existing SQLite columns remain backward compatible unless a future additive migration provides a clearer representation without rewriting history.
