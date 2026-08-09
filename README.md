@@ -1,10 +1,10 @@
 # REGDOCS Atlas
 
-REGDOCS Atlas is a pilot pipeline for collecting public regulatory records from the Canada Energy Regulator (CER) REGDOCS registry, preserving source evidence, downloading and hashing source files, extracting document structure, normalizing provenance, and publishing searchable chunks to Azure AI Search.
+REGDOCS Atlas is a pilot pipeline for collecting public regulatory records from the Canada Energy Regulator (CER) REGDOCS registry, preserving source evidence, downloading source files, extracting document structure, normalizing provenance, and publishing searchable chunks to Azure AI Search.
 
-## Preferred command
+## Use one command
 
-Use the root command for normal operation:
+Use the root CLI for normal operation:
 
 ```bash
 python pipeline.py scout
@@ -32,7 +32,9 @@ python pipeline.py rebuild plan
 python pipeline.py rebuild prepare
 python pipeline.py rebuild create --output database/regdocs.rebuilt.db
 python pipeline.py rebuild verify --db database/regdocs.rebuilt.db
-python pipeline.py rebuild compare --source database/regdocs.db --rebuilt database/regdocs.rebuilt.db
+python pipeline.py rebuild compare \
+  --source database/regdocs.db \
+  --rebuilt database/regdocs.rebuilt.db
 
 python pipeline.py cost rates
 python pipeline.py cost azure
@@ -45,7 +47,7 @@ CER REGDOCS
     |
     v
 1. Scout
-   metadata + raw HTML evidence + durable Scout manifests
+   metadata + raw HTML evidence + durable manifests
     |
     v
 2. Download
@@ -54,6 +56,7 @@ CER REGDOCS
     v
 3. Analyze
    Azure Content Understanding or local Docling
+   provider artifacts + durable analysis manifests
     |
     v
 4. Normalize
@@ -64,72 +67,83 @@ CER REGDOCS
    Azure AI Search
 ```
 
-Stages 1–4 share one SQLite operational ledger. Durable filesystem artifacts are intentionally kept independently of SQLite so the database can be reconstructed without re-downloading source files or rerunning expensive Stage 3 analysis when sufficient evidence survives.
+Stages 1–4 use one SQLite operational ledger. Durable filesystem artifacts are kept independently so losing SQLite does not require another REGDOCS crawl, source-file download, or billable Azure analysis when the corresponding evidence survives.
 
-Azure AI Search is a rebuildable publication layer, not an authoritative source of corpus evidence.
+Normalize is a local rebuildable transformation from Stage 3 artifacts. Azure AI Search is a rebuildable publication layer from Stage 4; neither is treated as authoritative source evidence.
 
 ## Repository layout
 
 ```text
 .
-├── pipeline.py              # one public command/router
-├── regdocs_atlas/           # current shared application package
+├── pipeline.py
+│   public command/router
+│
+├── regdocs_atlas/
 │   ├── cli.py
-│   ├── db/                  # SQLite connection, migrations, safety, run helpers
-│   ├── runtime/             # locks, presentation, hashing, atomic writes
-│   ├── artifacts/           # inventory and recovery planning
-│   ├── rebuild.py
-│   ├── rebuild_compare.py
+│   ├── db/                  SQLite connection, migrations, safety
+│   ├── runtime/             locks, logging helpers, hashing, atomic writes
+│   ├── artifacts/           artifact inventory and recovery planning
+│   ├── stages/
+│   │   ├── index.py         canonical Stage 5 implementation
+│   │   └── legacy/          proven Stage 1-4 cores/workers moved intact
 │   ├── scout_manifests.py
+│   ├── analysis_manifests.py
+│   ├── rebuild*.py
 │   └── ...
 │
-├── pipeline/                # temporary legacy stage implementations + runbooks
-│   ├── requirements.txt
+├── pipeline/
+│   thin compatibility launchers only
 │   ├── regdocs_1_scout.py
-│   ├── regdocs_1_scout_core.py
 │   ├── regdocs_2_download.py
-│   ├── regdocs_2_download_core.py
 │   ├── regdocs_3_azure.py
-│   ├── regdocs_3_azure_core.py
-│   ├── regdocs_3_azure_worker.py
 │   ├── regdocs_3_docling.py
-│   ├── regdocs_3_docling_core.py
-│   ├── regdocs_3_docling_worker.py
-│   ├── regdocs_3_docling_worker_core.py
 │   ├── regdocs_4_normalize.py
-│   ├── regdocs_4_normalize_core.py
-│   ├── regdocs_4_normalize_worker.py
 │   ├── regdocs_5_index.py
-│   └── regdocs_5_index_core.py
+│   ├── regdocs_entrypoint.py
+│   ├── requirements.txt
+│   └── requirements-docling.txt
 │
 ├── docs/
-├── roadmap/
-├── database/                # ignored operational SQLite state
-└── workspace/               # ignored durable corpus artifacts
+│   ├── DATABASE_RECOVERY.md
+│   └── stages/
+│       ├── scout.md
+│       ├── download.md
+│       ├── azure.md
+│       ├── docling.md
+│       ├── normalize.md
+│       └── index.md
+│
+├── database/                ignored operational SQLite state
+└── workspace/               ignored durable corpus artifacts
 ```
 
-### Why both `pipeline/` and `regdocs_atlas/` exist today
+### Why `pipeline/` still exists
 
-`regdocs_atlas/` is the target home for the application. The root `pipeline.py` already owns the public command surface, database migrations, recovery tooling, shared locking/logging, cost reporting, and other new infrastructure.
+`regdocs_atlas/` is now the application home. The large stage cores and workers no longer live in `pipeline/`.
 
-The older stage implementations are still physically in `pipeline/`. The unified CLI intentionally delegates Scout, Download, Azure, Docling, Normalize, and Index to those proven implementations while they are moved incrementally into package modules.
+The remaining `pipeline/*.py` files are small compatibility launchers because the current unified orchestration still executes stages as subprocesses through those entry points. This preserves the pilot's existing process isolation, canonical logging, stage banners, locks, and public `--version`/`--diagnostics` behavior while the internals are cleaned up.
 
-So the split is transitional:
+Do not add new application logic to `pipeline/`. New code belongs in `regdocs_atlas/`.
 
-```text
-TODAY
-pipeline.py -> regdocs_atlas.cli -> pipeline/regdocs_* implementation
+The final cleanup step will be to route `regdocs_atlas.cli` directly to packaged stage entry points and then delete the compatibility launchers and `pipeline/` directory entirely. That should be treated as an orchestration change, not mixed into a file-move cleanup.
 
-TARGET
-pipeline.py -> regdocs_atlas.cli -> regdocs_atlas/stages/*
-                                  -> no legacy pipeline/ implementation directory
+## Install
+
+Create and activate a virtual environment:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r pipeline/requirements.txt
 ```
 
-Do not add new application logic to `pipeline/` unless it is required to maintain a legacy implementation during the transition. New shared code belongs in `regdocs_atlas/`.
+Python 3.10 or newer is required.
+
+`pipeline/requirements.txt` is currently the single dependency set. `requirements-docling.txt` is only a compatibility redirect for older Docling messages and contains no independent versions.
 
 ## Persistent state
 
-The repository treats these as important durable state rather than disposable cache:
+Preserve these during normal operation and recovery work:
 
 ```text
 database/regdocs.db
@@ -139,9 +153,7 @@ workspace/3_analyze/
 workspace/4_normalize/
 ```
 
-Stage 1 preserves raw REGDOCS HTML. Stage 2 preserves source files and deterministic metadata sidecars. Stage 3 preserves provider-native analysis artifacts. Stage 4 preserves normalized JSONL projections.
-
-The canonical project log is:
+The canonical orchestration log is:
 
 ```text
 workspace/pipeline.log
@@ -153,30 +165,11 @@ The preferred orchestration lock is:
 database/locks/pipeline.lock
 ```
 
-Legacy stage-specific locks/logs remain temporarily while the old stage implementations are still supported.
+Stage-specific locks remain inside the unchanged legacy cores as defense-in-depth until those implementations are refactored into normal package modules.
 
-## Install
+## Database and recovery
 
-Create and activate a virtual environment:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-```
-
-Install the single shared dependency set:
-
-```bash
-python -m pip install -r pipeline/requirements.txt
-```
-
-Python 3.10 or newer is required.
-
-## Database migrations
-
-SQLite schema evolution is owned by `regdocs_atlas/db/migrations.py` and tracked in the `schema_migrations` table.
-
-Preview and apply migrations with:
+SQLite schema evolution is owned by `regdocs_atlas/db/migrations.py` and tracked in `schema_migrations`.
 
 ```bash
 python pipeline.py db migrate --plan
@@ -184,26 +177,19 @@ python pipeline.py db migrate
 python pipeline.py db verify
 ```
 
-For an existing database, migration creates a consistent SQLite backup by default before applying pending changes and then runs schema, integrity, and foreign-key verification.
+A migration of an existing database creates a consistent backup by default and verifies schema, SQLite integrity, and foreign keys afterward.
 
-## Disaster recovery
-
-Prepare self-describing Scout manifests while the healthy ledger exists:
+Prepare durable recovery manifests while the healthy ledger exists:
 
 ```bash
 python pipeline.py rebuild prepare
 ```
 
-Then inspect what survives:
+Then inspect the corpus and build a second database:
 
 ```bash
 python pipeline.py rebuild inventory
 python pipeline.py rebuild plan
-```
-
-Build a second database rather than overwriting the working one:
-
-```bash
 python pipeline.py rebuild create --output database/regdocs.rebuilt.db
 python pipeline.py rebuild verify --db database/regdocs.rebuilt.db
 python pipeline.py rebuild compare \
@@ -211,15 +197,24 @@ python pipeline.py rebuild compare \
   --rebuilt database/regdocs.rebuilt.db
 ```
 
-The rebuild path restores only facts supported by surviving evidence. Missing Scout facts are represented as recovery state/tasks rather than being invented.
+The pilot has proven exact source-through-Stage-3 recovery for the current corpus: document identities, current source-file SHA identities, Scout snapshot identities, container relationships, core document metadata, and successful Stage 3 identities can be reconstructed from the durable evidence without contacting REGDOCS or Azure again.
+
+Stage 4 normalization rows are intentionally not reconstructed from SQLite recovery metadata. Normalize is local and can be rerun from the recovered Stage 3 artifacts. Stage 5 can then be republished from Stage 4.
 
 See [docs/DATABASE_RECOVERY.md](docs/DATABASE_RECOVERY.md).
 
+## Stage runbooks
+
+- [Scout](docs/stages/scout.md)
+- [Download](docs/stages/download.md)
+- [Azure Content Understanding](docs/stages/azure.md)
+- [Docling](docs/stages/docling.md)
+- [Normalize](docs/stages/normalize.md)
+- [Index](docs/stages/index.md)
+
 ## Azure Content Understanding cost visibility
 
-REGDOCS reads metered usage from saved Azure Content Understanding results. It does not hard-code service prices because rates can vary by region, currency, and offer.
-
-Configure the rates applicable to the Azure subscription when dollar estimates are desired:
+REGDOCS reads usage meters from saved Azure results rather than estimating from guessed page counts. Dollar estimates require the rates applicable to the subscription:
 
 ```text
 REGDOCS_AZURE_CU_MINIMAL_PER_1000_USD
@@ -227,7 +222,7 @@ REGDOCS_AZURE_CU_BASIC_PER_1000_USD
 REGDOCS_AZURE_CU_STANDARD_PER_1000_USD
 ```
 
-Inspect configuration and historical usage with:
+Inspect them with:
 
 ```bash
 python pipeline.py cost rates
@@ -238,7 +233,7 @@ Docling is local compute and reports Azure service cost as `n/a`.
 
 ## Pilot verification
 
-This pilot intentionally has no GitHub Actions CI workflow or dedicated repository test suite. Verification is operational and corpus-oriented:
+This pilot intentionally has no GitHub Actions CI workflow or dedicated repository test suite. Use the real operational checks instead:
 
 ```bash
 python pipeline.py db verify
@@ -247,18 +242,17 @@ python pipeline.py rebuild compare --source database/regdocs.db --rebuilt databa
 python pipeline.py status
 ```
 
-Individual stage runbooks under `pipeline/*.md` document additional stage-specific checks while those legacy implementations remain in place.
+For a structural cleanup, also smoke-test the public stage entry points with their read-only modes (`--version`, `--diagnostics`, `--status`, or `--dry-run` as appropriate) before starting a long or billable run.
 
 ## Principles
 
 - preserve public REGDOCS evidence and source-document identity;
 - use SHA-256 as the definitive downloaded-file version identity;
-- keep acquisition, analysis, normalization, and indexing independently rebuildable;
-- avoid rerunning expensive Azure analysis when matching durable artifacts already exist;
+- preserve expensive Stage 3 artifacts and avoid accidental Azure rebilling;
+- keep Normalize and Azure AI Search rebuildable rather than over-engineering recovery for cheap derivatives;
 - never fabricate missing recovery facts;
 - keep credentials out of command lines, logs, and version control;
-- treat Azure AI Search as a derivative retrieval layer;
-- keep the pilot simple and move complexity into the product only when it proves useful.
+- keep the pilot simple and only add complexity when it proves useful.
 
 Future work is tracked in [ROADMAP.md](ROADMAP.md) and the focused plans under `roadmap/`.
 
