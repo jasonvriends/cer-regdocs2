@@ -1,61 +1,230 @@
 # `regdocs_3_analyze.py`
 
-Stage 3 of the REGDOCS processing pipeline: **submit verified current source
-files to Azure AI Content Understanding and preserve the returned layout JSON
-and Markdown with ledger provenance**.
+Stage 3 of the REGDOCS pipeline: **analyze verified current source files with
+Azure AI Content Understanding and preserve layout JSON + Markdown with ledger
+provenance**.
 
-PDFs larger than Azure's 300-page per-analysis limit are handled automatically
-with `Content-Range` requests. The source PDF is not physically split.
+The public command is now a **single-threaded crash-resilient supervisor**. It
+does not import the Azure SDK or parse PDFs itself. Instead it launches exactly
+one short-lived child process per document using
+`regdocs_3_analyze_worker.py`. A segfault, OOM kill, or other native-process
+crash therefore kills only the current document worker instead of the full
+Stage 3 queue.
+
+Script version documented: **3.5.0**.
+
+## Architecture
 
 ```text
-database/regdocs.db + workspace/2_download/files/
-                         |
-                         v
-                 validate source hash
-                         |
-                         v
-              inspect PDF page count
-                         |
-             +-----------+-----------+
-             |                       |
-        <= 300 pages             > 300 pages
-             |                       |
-             |                1-300, 301-600, ...
-             |                       |
-             +-----------+-----------+
-                         v
-              Azure Content Understanding
-                         |
-                         +--> raw JSON
-                         +--> Markdown
-                         v
-                  analyses + runs
+python pipeline/regdocs_3_analyze.py --limit 1000
+                    |
+                    v
+        durable single-thread supervisor
+        - owns database/locks/3_analyze.lock
+        - owns supervisor-state.json
+        - selects eligible documents
+        - concurrency = 1
+                    |
+                    v
+       regdocs_3_analyze_worker.py
+       --document-id <one document>
+                    |
+          +---------+---------+
+          |                   |
+       success             process crash
+          |                   |
+          v                   v
+      next document      retry fresh child
+                              |
+                      max crash attempts?
+                         |           |
+                        no          yes
+                         |           |
+                         v           v
+                       retry      quarantine
+                                      |
+                                      v
+                                 next document
 ```
 
-Script version documented: **3.4.1**.
+The worker is the Stage 3 Azure implementation that existed before 3.5.0. It
+still owns:
 
-## Purpose and boundary
+- source-path resolution and SHA-256 verification;
+- Azure authentication and Content Understanding calls;
+- retryable HTTP/service retry policy;
+- local PDF page counting;
+- `Content-Range` handling for PDFs over 300 pages;
+- immediate persistence of completed range artifacts;
+- final JSON + Markdown artifact publication;
+- `analyses`, `runs`, and `errors` ledger writes;
+- artifact reconciliation and no-cost local recovery.
 
-The analyzer consumes current files recorded by Stage 2. It uses Azure's
-`prebuilt-layout` analyzer by default, records the operation result in the
-shared SQLite ledger, and writes reusable Stage 3 artifacts.
+The supervisor owns process durability, crash retries, quarantine state, and the
+long-lived Stage 3 lock.
 
-This stage:
+## Why the worker boundary exists
 
-- makes billable external API calls unless every selected item is reconciled
-  from existing artifacts or `--dry-run` is used;
-- sends selected source-file bytes to the configured Azure endpoint;
-- automatically analyzes PDFs over 300 pages in inclusive 1-based page ranges;
-- does not discover REGDOCS records or download source files;
-- does not produce the final normalized search corpus.
+Python `try/except` cannot recover from a native segmentation fault in the same
+process. Before 3.5.0, a segfault anywhere inside the Azure SDK, HTTP/native
+dependency stack, PDF parsing dependency, or other native code could terminate
+the entire Stage 3 loop.
 
-Stage 4 performs local normalization of the Stage 3 result.
+Now each document gets a fresh Python child. If that child dies before recording
+a terminal database result, the parent process remains alive and can retry the
+same document or quarantine it and continue.
+
+This remains intentionally **single-threaded**: there is never more than one
+Azure document worker running at a time.
+
+## Durable supervisor state
+
+Default state file:
+
+```text
+workspace/3_analyze/content-understanding/supervisor-state.json
+```
+
+The state is written through a `.partial` file, `fsync`ed, and atomically
+renamed. Per-document state includes the current source/analyzer/API identity,
+worker launch count, crash-attempt count, last exit code, last signal, and
+quarantine state.
+
+A quarantine applies only to the same processing identity. If the current file
+SHA-256, analyzer ID, or API version changes, the old quarantine is cleared
+automatically for that document.
+
+Default crash policy:
+
+```text
+worker-max-attempts = 3
+concurrency = 1
+```
+
+A normal handled Azure/document failure is **not** retried by the supervisor.
+Azure retry policy already ran inside the worker. Crash-level retries are only
+used when the child exits before recording a normal terminal result.
+
+After the crash limit is reached, the document is quarantined and Stage 3
+continues with the next selected document.
+
+Retry quarantined documents explicitly:
+
+```bash
+python pipeline/regdocs_3_analyze.py --limit 1000 --retry-quarantined
+```
+
+or for one known document:
+
+```bash
+python pipeline/regdocs_3_analyze.py --document-id 4647200 --retry-quarantined
+```
+
+## Locking
+
+The supervisor holds the normal Stage 3 lock for its entire lifetime:
+
+```text
+database/locks/3_analyze.lock
+```
+
+The lock records the supervisor PID. On startup:
+
+```text
+lock exists
+   |
+   v
+read PID
+   |
+   v
+is PID alive?
+   |-- yes --> refuse to start
+   `-- no  --> remove stale lock and continue
+```
+
+Malformed/unreadable lock state and ambiguous OS process checks are handled
+conservatively: Stage 3 keeps the lock and refuses to start. `--force-lock`
+remains the manual escape hatch only after independently confirming the lock is
+stale.
+
+Each short-lived child uses a separate internal worker lock derived from the
+supervisor lock path. If a child crashes and leaves that lock behind, the copied
+worker's stale-PID logic removes it on the next child launch.
+
+## Normal commands are unchanged
+
+Preview a bounded selection without Azure calls:
+
+```bash
+python pipeline/regdocs_3_analyze.py --dry-run --limit 10
+```
+
+Analyze one document:
+
+```bash
+python pipeline/regdocs_3_analyze.py --document-id 4647200
+```
+
+Analyze a batch:
+
+```bash
+python pipeline/regdocs_3_analyze.py --limit 1000
+```
+
+Analyze all remaining eligible documents:
+
+```bash
+python pipeline/regdocs_3_analyze.py --all
+```
+
+No separate supervisor command is required. `regdocs_3_analyze.py` is the
+supervisor; `regdocs_3_analyze_worker.py` is an internal implementation detail.
+
+## Cost warning
+
+Stage 3 makes billable Azure calls unless selected work can be recovered from
+existing artifacts or `--dry-run` is used. `--all` can therefore submit a large
+amount of work.
+
+The supervisor adds process-level retries, but it does **not** intentionally
+resubmit normal handled failures. A hard crash after Azure has accepted a
+billable operation but before the worker commits the result can still be
+ambiguous: the supervisor cannot prove whether Azure completed the operation.
+That risk already existed on hard crashes and remains a future hardening area.
+
+For large PDFs, completed `Content-Range` parts are committed independently, so
+a fresh worker can normally reuse already-finished ranges and avoid rebilling
+those pages after a later crash.
+
+Do not use `--force` merely to resume work. `--force` disables normal artifact
+reconciliation and range-part reuse and can cause unnecessary resubmission.
+
+## Candidate selection
+
+A source candidate is a current Stage 2 file (`files.is_current = 1`). Unless
+`--force` is supplied, a matching canonical success is skipped when the
+processing identity matches:
+
+```text
+file_id + file_sha256 + analyzer_id + api_version
+```
+
+The supervisor performs a fast local canonical-artifact check while building
+its queue. The worker remains authoritative for full artifact reconciliation.
+If a success row has missing/stale/legacy output, the supervisor sends that
+document through one worker so the worker can repair/canonicalize it locally
+without an Azure call when possible.
+
+Selection order remains by REGDOCS document ID. `--document-id` selects one ID,
+`--limit` bounds the queue, and `--all` selects the full remaining queue.
 
 ## Large PDFs and `Content-Range`
 
-Stage 3 counts PDF pages locally with `pypdf`. A PDF with more than 300 pages is
-submitted as a sequence of Azure analyses with at most 300 source pages each.
-For example, a 986-page PDF is analyzed as:
+PDFs over Azure's 300-page per-analysis limit are still handled automatically.
+The worker counts pages locally with `pypdf` and submits inclusive 1-based
+ranges of at most 300 pages.
+
+Example for 986 pages:
 
 ```text
 1-300
@@ -64,43 +233,10 @@ For example, a 986-page PDF is analyzed as:
 901-986
 ```
 
-The same original PDF bytes are sent for each ranged request with the Azure
-`content_range` parameter. REGDOCS does **not** create derivative split PDFs,
-so the Stage 2 source SHA-256 and document identity remain unchanged.
+The original PDF is not physically split. The same source bytes are used with
+the Azure `content_range` parameter, preserving the Stage 2 source identity.
 
-Each successful range is validated before it is accepted. Azure must return
-exactly the number of pages requested for that range. After all ranges are
-available, Stage 3 also requires the total returned page count to equal the
-local PDF page count before publishing the canonical combined artifact.
-
-The combined JSON preserves each ranged Azure response as a separate
-`contents[]` contribution instead of rewriting cross-range spans or offsets.
-Stage 4 processes each `contents[]` object independently. Beginning with Stage
-4.1.0, normalized provenance also qualifies Azure-local paragraph/table/figure
-pointers with that `contents[]` index, so the separate ranged responses remain
-exactly dereferenceable after normalization.
-
-The canonical JSON receives additional metadata:
-
-```json
-{
-  "regdocsChunking": {
-    "strategy": "content_range",
-    "sourcePageCount": 986,
-    "validatedPageCount": 986,
-    "maxPagesPerRequest": 300,
-    "rangeCount": 4,
-    "parts": [
-      {"range": "1-300", "rawJsonPath": "...", "metaJsonPath": "..."}
-    ]
-  }
-}
-```
-
-### Range artifacts and restart behavior
-
-Every completed range is committed immediately under the canonical raw JSON
-identity:
+Each successful range is validated and saved immediately under:
 
 ```text
 workspace/3_analyze/content-understanding/raw/
@@ -114,326 +250,115 @@ workspace/3_analyze/content-understanding/raw/
       ...
 ```
 
-The `.meta.json` file records the document ID, source SHA-256, analyzer, API
-version, range, returned page count, operation ID, and completion time.
+A normal retry or fresh crash-recovery worker can reuse valid completed range
+parts. After all ranges are available, the worker requires the combined returned
+page count to equal the local source page count before publishing the canonical
+combined JSON and Markdown.
 
-If a later range fails or the process is interrupted, a normal rerun can reuse
-valid completed range artifacts and avoid resubmitting those pages. A cached
-range is reused only when its processing identity matches and its returned page
-count matches the requested range.
-
-`--force` and `--no-reconcile-artifacts` disable range-part reuse as well as
-their existing reconciliation behavior. Use a normal rerun when the goal is to
-resume an interrupted large PDF without rebilling completed ranges.
-
-### What ranging does not solve
-
-`Content-Range` solves the **page-count** limit, not the source-file byte limit.
-The implementation still reads the full file into memory and sends the same
-binary for every ranged request. A PDF that exceeds Azure's allowed input size
-still requires a different strategy even when each request selects at most 300
-pages.
-
-Check current Azure service limits before large runs because provider limits can
-change independently of this repository.
-
-## Cost warning
-
-Stage 3 requires exactly one selection scope: `--document-id`, `--limit`, or
-`--all`. The explicit `--all` acknowledgement selects every eligible current
-file that lacks a matching successful analysis. In a large ledger, that can
-cause thousands of billable submissions.
-
-A large PDF can require multiple Azure submissions. `attempt_count` and the run
-summary count actual Azure submission attempts, so a successful 986-page PDF
-normally contributes four attempts when no retries or recovered range parts are
-involved.
-
-Always inspect a bounded selection first:
-
-```bash
-python pipeline/regdocs_3_analyze.py --dry-run --limit 10
-```
-
-Then begin with one document or a small limit. The script still has no built-in
-price estimate, byte budget, or cost budget. `--all` confirms selection scope,
-not cost.
-
-## Inputs and candidate selection
-
-The default database is:
-
-```text
-database/regdocs.db
-```
-
-The default source-file root is:
-
-```text
-workspace/2_download/files/
-```
-
-A candidate must be a row in `files` where `is_current = 1`. Unless `--force`
-is supplied, Stage 3 skips a file when `analyses` already contains a
-`SUCCEEDED` row with the same:
-
-```text
-file_id + file_sha256 + analyzer_id + api_version
-```
-
-Selection is ordered by REGDOCS document ID. `--document-id` selects one ID,
-`--limit` truncates the selected list, and `--all` explicitly selects the full
-remaining eligible set.
-
-The selected file path is resolved from the stored ledger path, configured
-download directory, and normal `<document-id>.<extension>` fallback.
-
-## Supported source types
-
-The script currently admits these filename extensions:
-
-```text
-pdf
-png jpg jpeg tif tiff bmp heif
-docx xlsx pptx
-txt html htm md rtf xml json csv tsv
-eml msg
-```
-
-PDFs receive the local page-count/ranging behavior described above. Other
-content types retain the single-request Stage 3 path.
-
-An unrecognized extension is recorded as `SKIPPED_UNSUPPORTED` without an
-Azure submission.
-
-## Analysis identity and ledger state
-
-Stage 3 owns the additive `analyses` table. Its unique processing identity is:
-
-```text
-file_id + file_sha256 + analyzer_id + api_version
-```
-
-Important fields include:
-
-| Field | Meaning |
-|---|---|
-| `document_id` / `file_id` | Source identities from Stages 1 and 2 |
-| `file_sha256` | Exact source-byte version |
-| `analyzer_id` / `api_version` | Azure processing contract |
-| `operation_id` | Azure operation ID; ranged analyses store comma-separated completed operation IDs |
-| `status` | Current state for this analysis identity |
-| `raw_json_path` / `markdown_path` | Canonical artifact paths |
-| count fields | Pages, tables, sections, and warnings observed |
-| `attempt_count` / `elapsed_seconds` | Azure submissions and elapsed time |
-| `artifact_source` / `reconciled_at` | Whether output came from Azure/ranged Azure or local recovery |
-| error fields | Final error code and message |
-
-Every invocation also records a `runs` row with parameters, progress,
-heartbeat, counters, and summary. The key value itself is not stored, but the
-endpoint and authentication mode are recorded.
+`Content-Range` solves the page-count limit only. The worker still reads the
+full source file into memory and Azure input-byte limits still apply.
 
 ## Artifact layout
 
-The default artifact root is:
+Default root:
 
 ```text
 workspace/3_analyze/content-understanding/
 ```
 
-Canonical paths are keyed by analyzer, API version, document ID, and source
-SHA-256:
+Canonical artifacts:
 
 ```text
 workspace/3_analyze/content-understanding/
 ├── raw/<analyzer>/<api-version>/<document-id>/<source-sha256>.json
-└── markdown/<analyzer>/<api-version>/<document-id>/<source-sha256>.md
+├── markdown/<analyzer>/<api-version>/<document-id>/<source-sha256>.md
+└── supervisor-state.json
 ```
 
-Large PDFs additionally keep the `.parts/` directory described above.
+Artifacts and supervisor state use `.partial` + atomic rename where applicable.
+The canonical raw JSON remains the authoritative Stage 3 output consumed by
+Stage 4.
 
-Each artifact is written through a `.partial` path and then renamed over the
-final path. The canonical JSON is authoritative. Markdown is also extracted to
-a separate file for convenient inspection.
-
-The processing identity path is stable, but the implementation is not
-append-only: `--force` can replace artifacts at the same canonical path.
-
-## Installation
-
-From the repository root, install the shared pipeline dependencies:
-
-```bash
-python -m pip install -r pipeline/requirements.txt
-```
-
-Stage 3 dependencies include:
-
-- `azure-ai-contentunderstanding`;
-- `azure-core`;
-- `azure-identity`; and
-- `pypdf` for local PDF page counting.
-
-## Authentication and endpoint configuration
+## Authentication
 
 Preferred authentication uses `DefaultAzureCredential`:
 
 ```bash
 export CONTENTUNDERSTANDING_ENDPOINT="https://<resource>.services.ai.azure.com"
 az login
-python pipeline/regdocs_3_analyze.py --dry-run --limit 10
+python pipeline/regdocs_3_analyze.py --limit 10
 ```
 
-An API key can instead be supplied through the environment:
+API-key mode:
 
 ```bash
 export CONTENTUNDERSTANDING_ENDPOINT="https://<resource>.services.ai.azure.com"
 export CONTENTUNDERSTANDING_KEY="<key>"
+python pipeline/regdocs_3_analyze.py --limit 10
 ```
 
-Do not put a key directly in the command line. Although `--key` is accepted,
-command-line secrets can appear in shell history, process listings, terminal
-captures, and automation logs.
+`--key` remains accepted for compatibility but environment-based secret input is
+preferred. When the supervisor launches a worker, the API key is passed through
+the child environment rather than copied onto the child command line.
 
-Supported environment settings:
+The Azure endpoint is not required merely to perform a no-cost reconciliation.
+If a selected worker actually needs Azure and no endpoint is configured, that
+worker exits with a configuration error and the supervisor stops.
+
+Supported environment variables:
 
 | Variable | Purpose |
 |---|---|
 | `CONTENTUNDERSTANDING_ENDPOINT` | Azure resource endpoint |
-| `CONTENTUNDERSTANDING_KEY` | Optional API key; omit for `DefaultAzureCredential` |
+| `CONTENTUNDERSTANDING_KEY` | Optional API key |
 | `CONTENTUNDERSTANDING_API_VERSION` | API version override |
 | `CONTENTUNDERSTANDING_ANALYZER_ID` | Analyzer override |
-| `CONTENTUNDERSTANDING_POLLING_INTERVAL` | LRO polling interval in seconds |
-| `CONTENTUNDERSTANDING_MAX_ATTEMPTS` | Maximum pre-acceptance submissions per request/range |
-| `CONTENTUNDERSTANDING_RETRY_BASE_DELAY` | Initial retry delay |
-| `CONTENTUNDERSTANDING_RETRY_MAX_DELAY` | Maximum retry delay |
+| `CONTENTUNDERSTANDING_POLLING_INTERVAL` | Worker LRO polling interval |
+| `CONTENTUNDERSTANDING_MAX_ATTEMPTS` | Worker Azure submission attempts |
+| `CONTENTUNDERSTANDING_RETRY_BASE_DELAY` | Worker retry base delay |
+| `CONTENTUNDERSTANDING_RETRY_MAX_DELAY` | Worker retry maximum delay |
 
-Treat the endpoint as trusted configuration. The script does not currently
-enforce an HTTPS or Azure-host allowlist before attaching an API-key credential.
+## Worker retries vs supervisor retries
 
-## Safe pilot workflow
+There are now two intentionally separate retry layers:
 
-Preview up to ten candidates without calling Azure:
+| Layer | Default | Handles |
+|---|---:|---|
+| Azure request retry (`--max-attempts`) | 4 | Retryable submission failures before Azure accepts the operation |
+| Worker crash retry (`--worker-max-attempts`) | 3 | Child process death before a terminal DB result |
 
-```bash
-python pipeline/regdocs_3_analyze.py --dry-run --limit 10
-```
+A normal `FAILED` analysis row means the child survived and recorded the
+failure; the supervisor advances to the next document. A crash leaves no normal
+terminal result, so the supervisor launches a fresh child.
 
-Analyze one known document:
-
-```bash
-python pipeline/regdocs_3_analyze.py --document-id 4647200
-```
-
-For a PDF over 300 pages, no different command is required. Stage 3 prints the
-local page count and each range before submission.
-
-Analyze a small batch:
-
-```bash
-python pipeline/regdocs_3_analyze.py --limit 10
-```
-
-Preview all remaining selection without calling Azure:
-
-```bash
-python pipeline/regdocs_3_analyze.py --all --dry-run
-```
-
-After reviewing selection and provider cost exposure:
-
-```bash
-python pipeline/regdocs_3_analyze.py --all
-```
-
-Do not add `--force` to a normal full run. Successful matching analyses are
-already skipped and completed large-PDF range parts can be reused after an
-interrupted attempt.
-
-## Locking and concurrent runs
-
-Stage 3 holds an exclusive lock at:
+Useful options:
 
 ```text
-database/locks/3_analyze.lock
+--worker-max-attempts N
+--worker-sleep-seconds SECONDS
+--retry-quarantined
+--state-file PATH
 ```
-
-This prevents two local analyzers from selecting and submitting the same
-billable work concurrently. The lock is removed on normal exit, handled
-failure, or Ctrl-C.
-
-On startup, if the lock already exists, Stage 3 reads the recorded PID and asks
-the operating system whether that process still exists. If the PID is definitely
-not running, the lock is treated as stale, removed automatically, and the run
-continues. If the PID is still running, Stage 3 refuses to start so two local
-analyzers cannot submit the same billable work concurrently.
-
-Malformed or unreadable lock files, invalid PIDs, permission errors, and other
-ambiguous process-state checks are handled conservatively: Stage 3 keeps the
-lock and refuses to start. `--force-lock` remains the manual escape hatch for a
-lock that you have independently confirmed is stale. Do not force a live or
-uncertain lock; doing so can duplicate Azure submissions.
-
-## `--dry-run` side effects
-
-`--dry-run` guarantees that the candidate loop does not call Azure. It is not
-currently a fully read-only command and it does not count PDF pages because
-page inspection occurs inside actual analysis.
-
-Before and during selection it can:
-
-- create the output directory;
-- create or migrate the `analyses` table;
-- insert and update a Stage 3 `runs` row;
-- audit successful artifact rows;
-- canonicalize existing artifacts;
-- mark missing or invalid successful artifacts `STALE_ARTIFACTS`.
-
-Use it as a **no-Azure-call preview**, not as a zero-write database audit or
-page-volume estimate.
-
-## Source verification
-
-Before submission, Stage 3 computes the source file's SHA-256 and compares it
-with `files.sha256`. A mismatch is recorded as `FAILED/HASH_MISMATCH` and is not
-submitted.
-
-`--no-verify-hash` disables this protection. It should be reserved for
-diagnosis because it weakens the provenance link between the Stage 2 file and
-the Stage 3 output.
-
-For PDFs, page counting happens after hash validation. The script currently
-reads the entire file into memory before Azure submission.
 
 ## Artifact reconciliation and recovery
 
-Before candidate selection, successful rows are audited unless `--force` or
-`--no-reconcile-artifacts` is supplied.
+The worker still audits/reconciles matching artifacts before making Azure calls.
+It can:
 
-For a matching processing identity, Stage 3 can:
+- verify canonical raw JSON;
+- recover legacy/raw paths;
+- regenerate missing Markdown from JSON;
+- backfill ledger metadata;
+- mark invalid successes stale;
+- reuse completed large-PDF range parts.
 
-- verify an artifact recorded in SQLite;
-- discover the canonical artifact path;
-- discover the legacy pre-versioned artifact layout;
-- validate analyzer ID, API version, JSON structure, and `contents`;
-- copy valid legacy output to the canonical path;
-- regenerate a missing Markdown file from Markdown embedded in raw JSON;
-- backfill the success row without another Azure call.
-
-A successful row with no valid JSON becomes `STALE_ARTIFACTS` and is eligible
-for repair.
-
-Large-PDF range artifacts add a second recovery layer: when there is no valid
-canonical success yet, matching completed range parts can be reused during a
-normal rerun.
-
-Disable reconciliation only when diagnosing it:
+Disable only for diagnosis:
 
 ```bash
 python pipeline/regdocs_3_analyze.py --no-reconcile-artifacts --limit 10
 ```
 
-That option also disables reuse of saved range parts.
+That option also disables range-part reuse.
 
 ## Force semantics
 
@@ -441,127 +366,96 @@ That option also disables reuse of saved range parts.
 python pipeline/regdocs_3_analyze.py --document-id 4647200 --force
 ```
 
-`--force` bypasses successful-row reconciliation, canonical artifact recovery,
-and large-PDF range-part reuse. It can incur another charge for every required
-request, resets the existing unique ledger row to `RUNNING`, and uses the same
-canonical artifact path.
+`--force` intentionally bypasses successful-artifact recovery and range-part
+reuse inside the worker. It can therefore resubmit every required Azure request
+and overwrite the canonical artifact for that processing identity.
 
-For a large PDF, a forced run therefore resubmits every range. Do **not** use
-`--force` merely to resume a failed final range; use the normal command so
-completed range artifacts can be recovered locally.
+Use a normal command for crash recovery; use `--force` only when a true fresh
+Azure analysis is desired.
 
-Back up the database and relevant Stage 3 artifact directory before using
-`--force` on important records.
+## `--dry-run`
 
-## Retries and long-running operations
+`--dry-run` still means **no Azure calls**, not read-only operation. The
+supervisor can create its output/state directory and state file, and child
+workers can create/update ledger run metadata and perform artifact audit or
+canonicalization work.
 
-The script retries retryable submission failures only when Azure has not yet
-returned a poller. It honors numeric `Retry-After` values when available and
-otherwise uses bounded exponential backoff.
+Use it as a cost-safe selection preview, not as a zero-write audit.
 
-Defaults:
+## Ledger behavior
 
-| Setting | Default |
-|---|---:|
-| polling interval | 3 seconds |
-| maximum submission attempts | 4 per request/range |
-| initial retry delay | 2 seconds |
-| maximum retry delay | 30 seconds |
+The copied worker continues writing `analyses`, `runs`, and `errors` using the
+existing Stage 3 schema and processing identity. In the simple 3.5.0 durability
+model, each child invocation creates its own Stage 3 `runs` row rather than one
+single monolithic run row for the whole supervisor batch.
 
-For ranged PDFs, each page range has its own retry loop. Completed ranges are
-saved before the next range begins.
+This is deliberate for the simple crash-isolation implementation: committed
+per-document ledger/artifact state is the durable checkpoint, while the
+supervisor JSON records process-level crash/quarantine state.
 
-After Azure accepts a long-running operation, the process waits for the result.
-For the normal single-request path, the operation ID is held in memory and is
-written to SQLite when the attempt returns an outcome. For ranged PDFs, a
-successful range operation ID is also committed to its `.meta.json` file.
-
-A hard crash or ambiguous network failure after Azure accepts an operation but
-before the result is committed can still leave a billable operation that a
-restart cannot resume. Check Azure activity before resubmitting uncertain
-failures.
+A future richer orchestration layer could add one aggregate parent run without
+changing the per-document isolation model.
 
 ## CLI reference
 
-`--help` is authoritative for the installed script. The primary options are:
+Primary public options:
 
 | Option | Effect |
 |---|---|
-| `--db PATH` | Override the SQLite ledger |
-| `--download-dir PATH` | Override the Stage 2 file root |
-| `--output-dir PATH` | Override the Stage 3 artifact root |
-| `--lock-file PATH` | Override the exclusive Stage 3 lock path |
-| `--force-lock` | Manually remove a lock after independently confirming it is stale when automatic PID checking cannot safely do so |
-| `--endpoint URL` | Override the Azure endpoint environment setting |
-| `--key VALUE` | API key override; accepted but discouraged |
-| `--api-version VALUE` | Select the Azure API version |
-| `--analyzer-id VALUE` | Select the analyzer |
+| `--db PATH` | Override SQLite ledger |
+| `--download-dir PATH` | Override Stage 2 file root |
+| `--output-dir PATH` | Override Stage 3 artifact root |
+| `--lock-file PATH` | Override long-lived supervisor lock |
+| `--force-lock` | Remove an existing lock after independently confirming it is stale |
+| `--state-file PATH` | Override durable supervisor state file |
+| `--worker-max-attempts N` | Crash-level child retries before quarantine |
+| `--worker-sleep-seconds S` | Delay between/retrying child processes |
+| `--retry-quarantined` | Clear current quarantines and retry them |
+| `--endpoint URL` | Azure endpoint override |
+| `--key VALUE` | API key override; environment preferred |
+| `--api-version VALUE` | Azure API version |
+| `--analyzer-id VALUE` | Analyzer ID |
 | `--document-id ID` | Select one document |
-| `--limit N` | Select at most N candidates |
-| `--all` | Explicitly select every remaining eligible candidate |
-| `--force` | Resubmit despite prior success/artifacts; also bypass ranged-part reuse |
-| `--no-reconcile-artifacts` | Disable artifact discovery/repair and ranged-part reuse |
-| `--no-verify-hash` | Disable Stage 2 source-hash verification |
-| `--polling-interval SECONDS` | Set LRO polling interval |
-| `--max-attempts N` | Bound retryable pre-acceptance submissions per request/range |
-| `--retry-base-delay SECONDS` | Set initial exponential delay |
-| `--retry-max-delay SECONDS` | Cap retry delay |
-| `--dry-run` | Avoid Azure calls but retain the side effects listed above |
-
-Stage 3 currently has no `--status`, `--status-json`, `--version`, or
-`--self-test` command.
-
-## Statuses and failure handling
-
-Analysis rows can include:
-
-| Status | Meaning |
-|---|---|
-| `RUNNING` | Processing started for the identity |
-| `SUCCEEDED` | Valid canonical JSON and Markdown paths were recorded |
-| `FAILED` | Submission, source validation, page validation, or artifact creation failed |
-| `SKIPPED_UNSUPPORTED` | The file extension is unsupported |
-| `STALE_ARTIFACTS` | A prior success no longer has valid matching output |
-
-Large-PDF-specific failures include `PDF_PAGE_COUNT_FAILED`,
-`RANGE_PAGE_COUNT_MISMATCH`, and `RANGE_ANALYSIS_INCOMPLETE`.
-
-Errors are also appended to the shared `errors` table with document ID, code,
-message, retryability, and JSON context.
-
-A successful analysis or artifact recovery marks prior unresolved Stage 3
-errors for that document resolved. Error rows remain in the ledger as run
-history.
-
-Completed document outcomes are committed as the run progresses. Ctrl-C marks
-the run `INTERRUPTED`; a later normal run skips intact canonical successes and
-can reuse valid range parts for an unfinished large PDF.
+| `--limit N` | Select at most N eligible documents |
+| `--all` | Select all remaining eligible documents |
+| `--force` | Force fresh Azure analysis behavior inside worker |
+| `--no-reconcile-artifacts` | Disable artifact/range-part recovery |
+| `--no-verify-hash` | Disable Stage 2 source SHA-256 verification |
+| `--polling-interval S` | Worker Azure LRO polling interval |
+| `--max-attempts N` | Worker Azure request retry limit |
+| `--retry-base-delay S` | Worker retry base delay |
+| `--retry-max-delay S` | Worker retry maximum delay |
+| `--dry-run` | No Azure calls |
 
 ## Exit codes
 
+Supervisor exit codes:
+
 | Code | Meaning |
 |---:|---|
-| `0` | No selected item failed, including a dry preview |
-| `1` | One or more items failed, or a fatal runtime error occurred |
-| `2` | Invalid arguments, required configuration missing, or database missing |
+| `0` | Selected queue completed with no normal failures or new quarantines |
+| `1` | One or more documents failed normally or were newly quarantined |
+| `2` | Invalid/configuration/database/worker error |
 | `130` | Interrupted by the user |
 
-## Current hardening priorities
+A worker killed directly by a Unix signal reports a negative return code to the
+supervisor (for example `-11` for `SIGSEGV`). The supervisor stores both the
+numeric exit code and decoded signal name in its state file.
 
-Before treating Stage 3 as an unattended production worker, prioritize:
+## Remaining hardening priorities
 
-1. add byte-volume and cost estimates before submission and expose PDF page
-   volume during dry-run planning;
-2. persist accepted operation IDs immediately and resume polling after restart;
-3. make analysis attempts and canonical raw results append-only instead of
-   overwriting a prior success under `--force`;
-4. make inspection modes read-only and lazy-load Azure dependencies;
-5. remove command-line key input and validate the configured endpoint;
-6. add provider byte-limit preflight, streaming or a memory limit, artifact
-   hashes, unique temporary files, and a standalone audit/status command;
-7. add regression tests for range boundaries, cached-part recovery, forced
-   resubmission, page-count mismatch, and Stage 4 normalization of multiple
-   `contents[]` entries with qualified provenance pointers.
+The durable worker boundary solves queue death from native crashes, but it does
+not solve every Stage 3 durability problem. Important future work remains:
+
+1. persist accepted Azure operation IDs immediately and resume polling after a
+   parent/worker restart;
+2. add an aggregate parent `runs` record while retaining isolated child work;
+3. add byte-volume/cost estimates and provider byte-limit preflight;
+4. stream or otherwise cap source-memory usage for very large files;
+5. make force/attempt history append-only instead of overwriting one unique
+   analysis row;
+6. add dedicated supervisor/status inspection and regression tests for signal
+   crashes, quarantine reset, range recovery, and stale-lock recovery.
 
 Previous: [Stage 2 downloader](regdocs_2_download.md).
 
