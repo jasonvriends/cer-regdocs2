@@ -47,6 +47,35 @@ _FAILED_DOWNLOAD_RE = re.compile(r"^Failed\s+(?P<document>\S+):\s*(?P<message>.*
 _RETRY_DOWNLOAD_RE = re.compile(
     r"^Retrying\s+(?P<document>\S+)\s+after\s+(?P<seconds>[\d.]+)s:\s*(?P<message>.*)$"
 )
+_NORMALIZE_CONCURRENCY_RE = re.compile(r"^Concurrency:\s+(?P<count>\d+)\s+isolated child")
+_NORMALIZE_LAUNCH_RE = re.compile(
+    r"^\[(?P<index>\d+)/(?P<total>\d+)\]\s+(?P<document>\S+)(?:\s+.*)?$"
+)
+_NORMALIZE_OK_RE = re.compile(
+    r"^\s*OK\s+(?P<document>\S+)\s+pages=(?P<pages>\d+)\s+"
+    r"chunks=(?P<chunks>\d+)\s+tables=(?P<tables>\d+)\s+elapsed=(?P<elapsed>[\d.]+)s$"
+)
+_NORMALIZE_FAILED_RE = re.compile(
+    r"^\s*FAILED\s+(?P<document>\S+)\s+(?P<message>.*)$"
+)
+_NORMALIZE_FINAL_RE = re.compile(
+    r"^Run\s+\d+\s+(?P<status>SUCCEEDED|COMPLETED_WITH_ERRORS|FAILED|INTERRUPTED):"
+)
+_INDEX_VALIDATED_RE = re.compile(
+    r"^Validated\s+(?P<selected>[\d,]+)\s+selected chunk\(s\) from\s+"
+    r"(?P<documents>[\d,]+)\s+REGDOCS document\(s\);\s+"
+    r"(?P<scanned>[\d,]+)\s+total normalized chunk/provenance pairs checked\.$"
+)
+_INDEX_READY_RE = re.compile(r"^(?:created\s+\S+|using existing\s+\S+)$")
+_INDEX_UPLOAD_RE = re.compile(
+    r"^Uploaded batch\s+(?P<batch>\d+):\s+(?P<count>[\d,]+)\s+chunks\s+"
+    r"\((?P<uploaded>[\d,]+)/(?P<total>[\d,]+)\)$"
+)
+_INDEX_FINAL_RE = re.compile(
+    r"^Indexed\s+(?P<uploaded>[\d,]+)\s+chunk\(s\) into\s+.+\s+in\s+"
+    r"(?P<batches>[\d,]+)\s+batch\(es\)\.$"
+)
+_INDEX_REJECTED_RE = re.compile(r"Azure rejected\s+(?P<count>[\d,]+)\s+document\(s\)")
 
 _SCOUT_PHASE_ORDER = ("BASE", "CONTAINERS", "FACETS", "DETAILS")
 
@@ -85,6 +114,11 @@ def _format_counter(done: int, total: int | None, *, minimum_width: int = 2) -> 
         return f"[{done:0{width}d}/{'?' * width}]"
     width = max(minimum_width, len(str(max(done, 0))), len(str(max(total, 0))))
     return f"[{done:0{width}d}/{total:0{width}d}]"
+
+
+def _format_scalar(value: int, *, minimum_width: int = 2) -> str:
+    width = max(minimum_width, len(str(max(value, 0))))
+    return f"[{value:0{width}d}]"
 
 
 def _format_progress(message: str) -> str | None:
@@ -193,6 +227,219 @@ class ScoutDashboard:
         return "  ".join(parts)
 
 
+class DownloadDashboard:
+    """Compact Stage 2 reconciliation/download counters."""
+
+    def __init__(self) -> None:
+        self.active = False
+        self.reconcile: tuple[int, int | None] | None = None
+        self.files: tuple[int, int | None] | None = None
+        self.ok = 0
+        self.failed = 0
+        self.retries = 0
+        self.terminal_status: str | None = None
+
+    def consume_tqdm(self, value: str) -> bool:
+        text = _without_ansi(value).strip()
+        match = _TQDM_RE.match(text)
+        if not match:
+            return False
+        label = match.group("label").strip().casefold()
+        done = _integer(match.group("done"))
+        total = _integer(match.group("total"))
+        if label == "reconciling":
+            self.active = True
+            self.reconcile = (done, total)
+            return True
+        if label == "downloading":
+            self.active = True
+            self.files = (done, total)
+            downloaded = re.search(r"downloaded=(\d+)", text)
+            failed = re.search(r"failed=(\d+)", text)
+            if downloaded:
+                self.ok = max(self.ok, int(downloaded.group(1)))
+            if failed:
+                self.failed = max(self.failed, int(failed.group(1)))
+            return True
+        return False
+
+    def consume_log(self, level: str, message: str) -> tuple[bool, bool]:
+        if _DOWNLOADED_RE.match(message):
+            self.active = True
+            self.ok += 1
+            return True, False
+        if _FAILED_DOWNLOAD_RE.match(message):
+            self.active = True
+            self.failed += 1
+            return True, True
+        if _RETRY_DOWNLOAD_RE.match(message):
+            self.active = True
+            self.retries += 1
+            return True, True
+        if self.active and level in {"DEBUG", "INFO"}:
+            return True, False
+        return False, False
+
+    def render(self) -> str:
+        reconcile = "[--/--]" if self.reconcile is None else _format_counter(*self.reconcile)
+        files = "[--/--]" if self.files is None else _format_counter(*self.files)
+        parts = [
+            "DOWNLOAD",
+            f"RECONCILE {reconcile}",
+            f"FILES {files}",
+            f"OK {_format_scalar(self.ok)}",
+            f"FAILED {_format_scalar(self.failed)}",
+            f"RETRIES {_format_scalar(self.retries)}",
+        ]
+        if self.terminal_status:
+            parts.append(self.terminal_status)
+        return "  ".join(parts)
+
+
+class NormalizeDashboard:
+    """Compact Stage 4 worker and merge counters."""
+
+    def __init__(self) -> None:
+        self.active = False
+        self.total: int | None = None
+        self.completed = 0
+        self.ok = 0
+        self.failed = 0
+        self.concurrency: int | None = None
+        self.merge: tuple[int, int | None] | None = None
+        self.terminal_status: str | None = None
+
+    def observe_header(self, text: str) -> None:
+        match = _NORMALIZE_CONCURRENCY_RE.match(text)
+        if match:
+            self.concurrency = int(match.group("count"))
+
+    def consume_line(self, text: str) -> tuple[bool, bool]:
+        launch = _NORMALIZE_LAUNCH_RE.match(text)
+        if launch:
+            self.active = True
+            self.total = int(launch.group("total"))
+            return True, False
+
+        succeeded = _NORMALIZE_OK_RE.match(text)
+        if succeeded:
+            self.active = True
+            self.completed += 1
+            self.ok += 1
+            self._maybe_start_merge()
+            return True, False
+
+        failed = _NORMALIZE_FAILED_RE.match(text)
+        if failed:
+            self.active = True
+            self.completed += 1
+            self.failed += 1
+            self._maybe_start_merge()
+            return True, True
+
+        final = _NORMALIZE_FINAL_RE.match(text)
+        if final and self.active:
+            self.terminal_status = final.group("status")
+            if self.total is not None:
+                self.completed = max(self.completed, self.total)
+            self.merge = (5, 5)
+            return True, True
+
+        return False, False
+
+    def _maybe_start_merge(self) -> None:
+        if self.total is not None and self.completed >= self.total:
+            self.merge = (0, 5)
+
+    def render(self) -> str:
+        workers = _format_counter(self.completed, self.total)
+        merge = "[--/--]" if self.merge is None else _format_counter(*self.merge)
+        concurrency = "[--]" if self.concurrency is None else _format_scalar(self.concurrency, minimum_width=1)
+        parts = [
+            "NORMALIZE",
+            f"WORKERS {workers}",
+            f"OK {_format_scalar(self.ok)}",
+            f"FAILED {_format_scalar(self.failed)}",
+            f"CONCURRENCY {concurrency}",
+            f"MERGE {merge}",
+        ]
+        if self.terminal_status:
+            parts.append(self.terminal_status)
+        return "  ".join(parts)
+
+
+class IndexDashboard:
+    """Compact Stage 5 publish counters while leaving plan/query output normal."""
+
+    def __init__(self) -> None:
+        self.active = False
+        self.scanned: tuple[int, int | None] | None = None
+        self.chunks: tuple[int, int | None] | None = None
+        self.batch: tuple[int, int | None] | None = None
+        self.failed = 0
+        self.terminal_status: str | None = None
+        self._validated = False
+
+    def observe_line(self, text: str) -> tuple[bool, bool]:
+        validated = _INDEX_VALIDATED_RE.match(text)
+        if validated:
+            scanned = _integer(validated.group("scanned"))
+            selected = _integer(validated.group("selected"))
+            self.scanned = (scanned, scanned)
+            self.chunks = (0, selected)
+            self.batch = (0, None)
+            self._validated = True
+            # Do not activate yet: this same validation happens during `index plan`.
+            return False, False
+
+        if self._validated and _INDEX_READY_RE.match(text):
+            self.active = True
+            return True, False
+
+        uploaded = _INDEX_UPLOAD_RE.match(text)
+        if uploaded:
+            self.active = True
+            self.batch = (int(uploaded.group("batch")), None)
+            self.chunks = (
+                _integer(uploaded.group("uploaded")),
+                _integer(uploaded.group("total")),
+            )
+            return True, False
+
+        final = _INDEX_FINAL_RE.match(text)
+        if final:
+            self.active = True
+            uploaded_count = _integer(final.group("uploaded"))
+            batches = _integer(final.group("batches"))
+            self.chunks = (uploaded_count, uploaded_count)
+            self.batch = (batches, batches)
+            self.terminal_status = "SUCCEEDED"
+            return True, True
+
+        rejected = _INDEX_REJECTED_RE.search(text)
+        if rejected and self.active:
+            self.failed += _integer(rejected.group("count"))
+            self.terminal_status = "FAILED"
+            return False, True
+
+        return False, False
+
+    def render(self) -> str:
+        scan = "[--/--]" if self.scanned is None else _format_counter(*self.scanned)
+        batches = "[--/--]" if self.batch is None else _format_counter(*self.batch)
+        chunks = "[--/--]" if self.chunks is None else _format_counter(*self.chunks)
+        parts = [
+            "INDEX",
+            f"SCAN {scan}",
+            f"BATCHES {batches}",
+            f"CHUNKS {chunks}",
+            f"FAILED {_format_scalar(self.failed)}",
+        ]
+        if self.terminal_status:
+            parts.append(self.terminal_status)
+        return "  ".join(parts)
+
+
 def normalize_console_line(value: str) -> str | None:
     """Return the normal operator-facing representation of one logical child line."""
     raw = _without_ansi(value)
@@ -241,13 +488,17 @@ def normalize_console_line(value: str) -> str | None:
 
 
 class StageConsoleStream:
-    """Text stream with durable lines plus an in-place Scout phase dashboard."""
+    """Text stream with permanent lines plus in-place high-volume dashboards."""
 
     def __init__(self, stream: TextIO):
         self.stream = stream
         self._buffers: dict[int, str] = {}
         self._lock = threading.Lock()
+        self._mode: str | None = None
         self._scout = ScoutDashboard()
+        self._download = DownloadDashboard()
+        self._normalize = NormalizeDashboard()
+        self._index = IndexDashboard()
         self._dashboard_visible = False
         self._dashboard_width = 0
 
@@ -279,7 +530,10 @@ class StageConsoleStream:
         self._buffers[thread_id] = buffer
 
     def _handle_carriage(self, value: str) -> None:
-        if self._scout.consume_tqdm(value):
+        if self._mode == "SCOUT" and self._scout.consume_tqdm(value):
+            self._draw_dashboard()
+            return
+        if self._mode == "DOWNLOAD" and self._download.consume_tqdm(value):
             self._draw_dashboard()
             return
         if _looks_like_progress_bar(value):
@@ -292,34 +546,96 @@ class StageConsoleStream:
         if not text:
             return
 
-        if self._scout.consume_tqdm(raw):
-            self._draw_dashboard()
+        if text.startswith("MODE  "):
+            self._mode = text[6:].strip().upper()
+            self._write_permanent(raw)
             return
 
-        log_match = _LOG_RE.match(text)
-        if log_match:
-            level = log_match.group("level")
-            message = log_match.group("message").strip()
-
-            if level == "INFO" and message.startswith("Scout ") and "script=" in message:
-                self._scout.active = True
-                self._draw_dashboard()
-                return
-
-            if self._scout.consume_progress(message):
-                self._draw_dashboard()
-                return
-
-            # Once Scout has declared its progress stream, routine INFO records
-            # are implementation detail. Warnings/errors remain permanent lines,
-            # and the full raw log remains in workspace/pipeline.log.
-            if self._scout.active and level in {"DEBUG", "INFO"}:
-                return
+        if self._mode == "SCOUT" and self._handle_scout(raw, text):
+            return
+        if self._mode == "DOWNLOAD" and self._handle_download(raw, text):
+            return
+        if self._mode == "NORMALIZE" and self._handle_normalize(raw, text):
+            return
+        if self._mode == "INDEX" and self._handle_index(raw, text):
+            return
 
         normalized = normalize_console_line(raw)
         if normalized is None:
             return
         self._write_permanent(normalized)
+
+    def _handle_scout(self, raw: str, text: str) -> bool:
+        if self._scout.consume_tqdm(raw):
+            self._draw_dashboard()
+            return True
+
+        log_match = _LOG_RE.match(text)
+        if not log_match:
+            return False
+        level = log_match.group("level")
+        message = log_match.group("message").strip()
+
+        if level == "INFO" and message.startswith("Scout ") and "script=" in message:
+            self._scout.active = True
+            self._draw_dashboard()
+            return True
+        if self._scout.consume_progress(message):
+            self._draw_dashboard()
+            return True
+        if self._scout.active and level in {"DEBUG", "INFO"}:
+            return True
+        return False
+
+    def _handle_download(self, raw: str, text: str) -> bool:
+        if self._download.consume_tqdm(raw):
+            self._draw_dashboard()
+            return True
+
+        log_match = _LOG_RE.match(text)
+        if not log_match:
+            return False
+        level = log_match.group("level")
+        message = log_match.group("message").strip()
+        consumed, permanent = self._download.consume_log(level, message)
+        if not consumed:
+            return False
+        self._draw_dashboard()
+        if permanent:
+            normalized = normalize_console_line(raw)
+            if normalized is not None:
+                self._write_permanent(normalized)
+        return True
+
+    def _handle_normalize(self, raw: str, text: str) -> bool:
+        self._normalize.observe_header(text)
+        consumed, permanent = self._normalize.consume_line(text)
+        if not consumed:
+            return False
+        self._draw_dashboard()
+        if permanent:
+            self._write_permanent(raw)
+        return True
+
+    def _handle_index(self, raw: str, text: str) -> bool:
+        consumed, permanent = self._index.observe_line(text)
+        if self._index.active:
+            self._draw_dashboard()
+        if permanent:
+            self._write_permanent(raw)
+            return True
+        return consumed
+
+    def _active_dashboard(self) -> ScoutDashboard | DownloadDashboard | NormalizeDashboard | IndexDashboard | None:
+        if self._mode == "SCOUT" and self._scout.active:
+            return self._scout
+        if self._mode == "DOWNLOAD" and self._download.active:
+            return self._download
+        if self._mode == "NORMALIZE" and self._normalize.active:
+            return self._normalize
+        if self._mode == "INDEX" and self._index.active:
+            return self._index
+        return None
 
     def _clear_dashboard(self) -> None:
         if not self._dashboard_visible:
@@ -329,9 +645,10 @@ class StageConsoleStream:
         self._dashboard_visible = False
 
     def _draw_dashboard(self) -> None:
-        if not self._scout.active:
+        dashboard = self._active_dashboard()
+        if dashboard is None:
             return
-        line = self._scout.render()
+        line = dashboard.render()
         width = max(self._dashboard_width, len(line))
         self.stream.write("\r" + line.ljust(width))
         self.stream.flush()
@@ -359,8 +676,9 @@ class StageConsoleStream:
                 if buffer:
                     self._emit(buffer)
                 self._buffers[thread_id] = ""
-            if self._scout.active:
-                line = self._scout.render()
+            dashboard = self._active_dashboard()
+            if dashboard is not None:
+                line = dashboard.render()
                 width = max(self._dashboard_width, len(line))
                 self.stream.write("\r" + line.ljust(width) + "\n")
                 self._dashboard_visible = False
