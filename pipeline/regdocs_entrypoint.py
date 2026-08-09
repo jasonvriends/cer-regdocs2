@@ -11,7 +11,11 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from regdocs_paths import PIPELINE_LOG_PATH, PROJECT_ROOT, stored_path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from regdocs_atlas.paths import PIPELINE_LOG_PATH, stored_path  # noqa: E402
 
 VERSION_PATH = PROJECT_ROOT / "VERSION"
 LEGACY_IMPLEMENTATION_DIR = PROJECT_ROOT / "regdocs_atlas" / "stages" / "legacy"
@@ -39,9 +43,7 @@ def implementation_path(public_script: str | Path, implementation_name: str) -> 
     migrated = LEGACY_IMPLEMENTATION_DIR / implementation_name
     if migrated.is_file():
         return migrated.resolve()
-    raise RuntimeError(
-        f"Pipeline implementation is missing: checked {sibling} and {migrated}"
-    )
+    raise RuntimeError(f"Pipeline implementation is missing: {migrated}")
 
 
 def diagnostics(
