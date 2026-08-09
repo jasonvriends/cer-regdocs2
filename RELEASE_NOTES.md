@@ -1,5 +1,64 @@
 # REGDOCS Atlas release notes
 
+## 0.0.4 — Unified operations, progress, logging, locking, and Azure cost visibility — 2026-08-09
+
+`0.0.4` makes the preferred `pipeline.py` path look and behave like one application rather than a collection of unrelated stage scripts.
+
+### One operational surface
+
+Commands launched through `pipeline.py` now print a shared header showing the REGDOCS Atlas release, current mode/stage, and canonical log. Human status output uses a common zero-padded progress representation whose width is derived from the run total, for example `007/100`, `0007/4071`, or `00001/12000`. Structured status remains available with `python pipeline.py status --json`.
+
+The canonical project log is now:
+
+```text
+workspace/pipeline.log
+```
+
+The preferred mutation lock is now:
+
+```text
+database/locks/pipeline.lock
+```
+
+Scout, Download, Analyze, Normalize, Index, database migration, and rebuild-create commands launched through `pipeline.py` serialize through that orchestration lock. Read-only status/diagnostic/inventory commands do not take it. Existing stage-specific locks remain temporarily as defense-in-depth and to keep direct legacy-script execution safe during the package refactor.
+
+### Azure Content Understanding cost visibility
+
+Content Understanding costing is now based on usage meters returned in Azure result artifacts instead of guessed page counts. Single-request analyses read the canonical result `usage` object; ranged PDFs sum the usage objects from the preserved range-part artifacts so the estimate does not undercount a multi-request document.
+
+Because Microsoft pricing is region/currency/offer dependent and can change, REGDOCS does not embed a dollar rate. Configure the current USD rates used by your Azure subscription/offer with:
+
+```text
+REGDOCS_AZURE_CU_MINIMAL_PER_1000_USD
+REGDOCS_AZURE_CU_BASIC_PER_1000_USD
+REGDOCS_AZURE_CU_STANDARD_PER_1000_USD
+```
+
+Inspect configuration with:
+
+```bash
+python pipeline.py cost rates
+```
+
+Inspect a run with:
+
+```bash
+python pipeline.py cost azure
+python pipeline.py cost azure --run-id 61
+```
+
+While an Azure run launched through `pipeline.py analyze azure` is active, a lightweight monitor periodically reports newly observed metered usage and the projected full-run service cost when the required rates are configured. At completion the cost snapshot is merged into that run's `summary_json`. If rates are not configured, usage pages remain visible and cost is explicitly `n/a`, never a fabricated dollar amount. Docling runs persist `n/a (local compute)` rather than pretending GPU/electricity expense is an Azure service charge.
+
+Microsoft documents that `prebuilt-layout` itself does not incur LLM charges; Content Understanding document extraction is billed according to the actual minimal/basic/standard processing meter returned for the content. Azure billing remains authoritative over REGDOCS estimates.
+
+### Unified dependency set
+
+`pipeline/requirements.txt` is now the single authoritative dependency version set for the complete pipeline, including Docling. `pipeline/requirements-docling.txt` remains only as a temporary compatibility redirect to the main file because older Docling diagnostics may still mention that path; it contains no independent dependency versions.
+
+### Recovery baseline retained
+
+All `0.0.3` migration/rebuild safety remains in place: automatic consistent SQLite migration backups, migration fingerprints, integrity/foreign-key verification, explicit recovery states, default Stage 2 sidecars, artifact-driven rebuild-create/verify, and the selective Scout recovery queue.
+
 ## 0.0.3 — Safe migrations and artifact-driven recovery — 2026-08-09
 
 `0.0.3` turns the database-recovery design into an executable recovery path while keeping normal stage behavior and expensive analyzer artifacts intact.
@@ -217,10 +276,10 @@ python pipeline/regdocs_4_normalize.py --diagnostics
 For the prototype, bump the whole repository release once for each coherent checkpoint:
 
 ```text
-0.0.1  current integrated baseline
-0.0.2  next coherent pipeline release
-0.0.3  following coherent pipeline release
-...
+0.0.1  initial integrated baseline
+0.0.2  unified CLI and migration foundation
+0.0.3  safe migration and artifact-driven recovery
+0.0.4  unified operations and cost visibility
 ```
 
 A release bump alone must not invalidate expensive Stage 3 artifacts. Artifact reuse continues to depend on source hashes, analyzer/provider identities, API/package versions, parser/projection contracts, and other relevant compatibility metadata.
