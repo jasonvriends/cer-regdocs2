@@ -32,7 +32,7 @@ database/regdocs.db + workspace/2_download/files/
                   analyses + runs
 ```
 
-Script version documented: **3.4.0**.
+Script version documented: **3.4.1**.
 
 ## Purpose and boundary
 
@@ -360,9 +360,19 @@ database/locks/3_analyze.lock
 
 This prevents two local analyzers from selecting and submitting the same
 billable work concurrently. The lock is removed on normal exit, handled
-failure, or Ctrl-C. If a process is killed abruptly, first confirm its recorded
-PID is no longer running before using `--force-lock`; forcing a live lock can
-duplicate Azure submissions.
+failure, or Ctrl-C.
+
+On startup, if the lock already exists, Stage 3 reads the recorded PID and asks
+the operating system whether that process still exists. If the PID is definitely
+not running, the lock is treated as stale, removed automatically, and the run
+continues. If the PID is still running, Stage 3 refuses to start so two local
+analyzers cannot submit the same billable work concurrently.
+
+Malformed or unreadable lock files, invalid PIDs, permission errors, and other
+ambiguous process-state checks are handled conservatively: Stage 3 keeps the
+lock and refuses to start. `--force-lock` remains the manual escape hatch for a
+lock that you have independently confirmed is stale. Do not force a live or
+uncertain lock; doing so can duplicate Azure submissions.
 
 ## `--dry-run` side effects
 
@@ -481,7 +491,7 @@ failures.
 | `--download-dir PATH` | Override the Stage 2 file root |
 | `--output-dir PATH` | Override the Stage 3 artifact root |
 | `--lock-file PATH` | Override the exclusive Stage 3 lock path |
-| `--force-lock` | Remove a confirmed-stale Stage 3 lock |
+| `--force-lock` | Manually remove a lock after independently confirming it is stale when automatic PID checking cannot safely do so |
 | `--endpoint URL` | Override the Azure endpoint environment setting |
 | `--key VALUE` | API key override; accepted but discouraged |
 | `--api-version VALUE` | Select the Azure API version |
