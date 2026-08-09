@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Single-threaded crash-resilient REGDOCS Azure analyzer.
 
-The public Stage 3 Azure command is a supervisor. It never imports the Azure
-SDK and never parses source PDFs. Instead it launches exactly one child process
-at a time via ``regdocs_3_azure_worker.py --document-id ...``. If a child
-segfaults, is OOM-killed, or otherwise dies before recording a terminal result,
-the supervisor survives, records the crash in durable state, retries the same
-document, and eventually quarantines it so the remaining queue can continue.
+The public Stage 3 Azure command is a durable supervisor. It never imports the
+Azure SDK or parses source PDFs itself. Instead it launches exactly one child
+process per selected document through ``regdocs_3_azure_worker.py``.
 
-The worker is the previous Stage 3 Azure implementation, including artifact
-reconciliation, hash verification, Azure retries, and Content-Range recovery.
+Azure is intentionally conservative about retries because a repeated submission
+can be billable. Each document gets one worker launch per supervisor run and
+each Azure request/range gets one application-level submission attempt. A
+handled failure, segfault, OOM kill, or other child crash is recorded and the
+supervisor advances to the next document. A later normal Stage 3 Azure run is
+the retry boundary.
+
+The worker preserves the existing Azure implementation, including artifact
+reconciliation, hash verification, Content-Range recovery, and ledger writes.
 """
 
 from __future__ import annotations
@@ -36,14 +40,10 @@ from regdocs_paths import (
     stored_path,
 )
 
-SCRIPT_VERSION = "3.5.1"
+SCRIPT_VERSION = "3.6.0"
 DEFAULT_API_VERSION = "2025-11-01"
 DEFAULT_ANALYZER_ID = "prebuilt-layout"
 DEFAULT_POLLING_INTERVAL = 3
-DEFAULT_MAX_ATTEMPTS = 4
-DEFAULT_RETRY_BASE_DELAY = 2.0
-DEFAULT_RETRY_MAX_DELAY = 30.0
-DEFAULT_WORKER_MAX_ATTEMPTS = 3
 DEFAULT_WORKER_SLEEP_SECONDS = 0.25
 DEFAULT_STATE_FILE = CONTENT_UNDERSTANDING_DIR / "supervisor-state.json"
 
@@ -151,7 +151,7 @@ def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
 def load_state(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "created_at": utcnow(),
             "updated_at": utcnow(),
             "documents": {},
@@ -160,13 +160,14 @@ def load_state(path: Path) -> dict[str, Any]:
         state = json.load(stream)
     if not isinstance(state, dict) or not isinstance(state.get("documents", {}), dict):
         raise ValueError(f"Invalid Azure supervisor state: {path}")
-    state.setdefault("schema_version", 1)
+    state.setdefault("schema_version", 2)
     state.setdefault("created_at", utcnow())
     state.setdefault("documents", {})
     return state
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
+    state["schema_version"] = 2
     state["updated_at"] = utcnow()
     atomic_write_json(path, state)
 
@@ -307,22 +308,17 @@ def select_documents(
             info = {}
             state["documents"][doc_id] = info
 
-        identity_changed = (
-            (info.get("file_sha256") and info.get("file_sha256") != sha256)
-            or (info.get("analyzer_id") and info.get("analyzer_id") != analyzer_id)
-            or (info.get("api_version") and info.get("api_version") != api_version)
-        )
-        if identity_changed:
-            info["quarantined"] = False
-            info["crash_attempts"] = 0
-            info["identity_changed_at"] = utcnow()
+        # 3.5.x used persistent quarantine state. Azure 3.6+ deliberately does
+        # not suppress failed documents across runs: a later refresh is the
+        # explicit retry boundary.
+        if info.pop("quarantined", False):
+            info["legacy_quarantine_cleared_at"] = utcnow()
+        info.pop("quarantined_at", None)
+        info.pop("crash_attempts", None)
 
         info["file_sha256"] = sha256
         info["analyzer_id"] = analyzer_id
         info["api_version"] = api_version
-
-        if info.get("quarantined"):
-            continue
 
         if not force:
             analysis = matching_analysis_status(
@@ -360,9 +356,9 @@ def child_command(args: argparse.Namespace, document_id: str) -> list[str]:
         "--db", str(args.db),
         "--api-version", args.api_version,
         "--polling-interval", str(args.polling_interval),
-        "--max-attempts", str(args.max_attempts),
-        "--retry-base-delay", str(args.retry_base_delay),
-        "--retry-max-delay", str(args.retry_max_delay),
+        # Cost-safety invariant: the public Azure supervisor never asks its
+        # worker to resubmit a failed request/range during the same run.
+        "--max-attempts", "1",
         "--download-dir", str(args.download_dir),
         "--output-dir", str(args.output_dir),
         "--lock-file", str(worker_lock_path(args.lock_file)),
@@ -389,6 +385,9 @@ def child_environment(args: argparse.Namespace) -> dict[str, str]:
         env["CONTENTUNDERSTANDING_KEY"] = args.key
     env["CONTENTUNDERSTANDING_API_VERSION"] = args.api_version
     env["CONTENTUNDERSTANDING_ANALYZER_ID"] = args.analyzer_id
+    # The worker receives --max-attempts 1 explicitly; remove an inherited
+    # override as defense in depth for the public supervisor path.
+    env.pop("CONTENTUNDERSTANDING_MAX_ATTEMPTS", None)
     return env
 
 
@@ -460,7 +459,10 @@ def returncode_signal(returncode: int) -> Optional[str]:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="REGDOCS Stage 3: durable single-threaded Azure Content Understanding analysis",
+        description=(
+            "REGDOCS Stage 3 Azure: durable single-threaded analysis with no "
+            "automatic resubmission retries"
+        ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--db", type=Path, default=stored_path(DATABASE_PATH))
@@ -475,22 +477,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=float(os.environ.get("CONTENTUNDERSTANDING_POLLING_INTERVAL", DEFAULT_POLLING_INTERVAL)),
     )
-    p.add_argument(
-        "--max-attempts",
-        type=int,
-        default=int(os.environ.get("CONTENTUNDERSTANDING_MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS)),
-        help="Azure submission attempts inside each worker",
-    )
-    p.add_argument(
-        "--retry-base-delay",
-        type=float,
-        default=float(os.environ.get("CONTENTUNDERSTANDING_RETRY_BASE_DELAY", DEFAULT_RETRY_BASE_DELAY)),
-    )
-    p.add_argument(
-        "--retry-max-delay",
-        type=float,
-        default=float(os.environ.get("CONTENTUNDERSTANDING_RETRY_MAX_DELAY", DEFAULT_RETRY_MAX_DELAY)),
-    )
     p.add_argument("--download-dir", type=Path, default=stored_path(DOWNLOAD_FILES_DIR))
     p.add_argument("--output-dir", type=Path, default=stored_path(CONTENT_UNDERSTANDING_DIR))
     p.add_argument("--lock-file", type=Path, default=stored_path(ANALYZE_LOCK_PATH))
@@ -499,21 +485,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--state-file",
         type=Path,
         default=stored_path(DEFAULT_STATE_FILE),
-        help="Durable supervisor crash/quarantine state",
-    )
-    p.add_argument(
-        "--worker-max-attempts",
-        type=int,
-        default=DEFAULT_WORKER_MAX_ATTEMPTS,
-        help="Maximum crash-level child attempts before quarantining one document",
+        help="Durable supervisor process-history state",
     )
     p.add_argument(
         "--worker-sleep-seconds",
         type=float,
         default=DEFAULT_WORKER_SLEEP_SECONDS,
-        help="Pause between child processes",
+        help="Pause between document worker processes",
     )
-    p.add_argument("--retry-quarantined", action="store_true")
     p.add_argument(
         "--analyzer-id",
         default=os.environ.get("CONTENTUNDERSTANDING_ANALYZER_ID", DEFAULT_ANALYZER_ID),
@@ -546,20 +525,8 @@ def main() -> int:
     if args.polling_interval <= 0:
         print("ERROR: --polling-interval must be greater than 0", file=sys.stderr)
         return 2
-    if args.max_attempts < 1:
-        print("ERROR: --max-attempts must be at least 1", file=sys.stderr)
-        return 2
-    if args.worker_max_attempts < 1:
-        print("ERROR: --worker-max-attempts must be at least 1", file=sys.stderr)
-        return 2
     if args.worker_sleep_seconds < 0:
         print("ERROR: --worker-sleep-seconds cannot be negative", file=sys.stderr)
-        return 2
-    if args.retry_base_delay < 0 or args.retry_max_delay < 0:
-        print("ERROR: retry delays cannot be negative", file=sys.stderr)
-        return 2
-    if args.retry_max_delay < args.retry_base_delay:
-        print("ERROR: --retry-max-delay must be >= --retry-base-delay", file=sys.stderr)
         return 2
 
     worker = Path(__file__).with_name("regdocs_3_azure_worker.py")
@@ -569,13 +536,6 @@ def main() -> int:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     state = load_state(args.state_file)
-    if args.retry_quarantined:
-        for info in state["documents"].values():
-            if isinstance(info, dict) and info.get("quarantined"):
-                info["quarantined"] = False
-                info["crash_attempts"] = 0
-                info["retry_started_at"] = utcnow()
-        save_state(args.state_file, state)
 
     try:
         lock = StageLock(args.lock_file, force=args.force_lock)
@@ -598,124 +558,118 @@ def main() -> int:
             args.force,
         )
         save_state(args.state_file, state)
-        quarantined_existing = sorted(
-            doc_id for doc_id, info in state["documents"].items()
-            if isinstance(info, dict) and info.get("quarantined")
-        )
 
         print(f"Azure supervisor {SCRIPT_VERSION}: {len(selected)} document(s) selected")
-        print("Concurrency: 1 child process")
-        print(f"Worker:      {worker}")
-        print(f"State:       {args.state_file}")
-        print(f"Analyzer:    {args.analyzer_id}")
-        print(f"API:         {args.api_version}")
-        print(f"Crash retry: {args.worker_max_attempts} worker attempt(s) per document")
-        if quarantined_existing:
-            print(
-                f"Quarantined: {len(quarantined_existing)} document(s) skipped; "
-                "use --retry-quarantined to retry them"
-            )
+        print("Concurrency:         1 child process")
+        print("Worker launches:     1 per document per run")
+        print("Azure app retries:   disabled (1 submission attempt per request/range)")
+        print("Retry boundary:      next normal Stage 3 Azure refresh/rerun")
+        print(f"Worker:              {worker}")
+        print(f"State:               {args.state_file}")
+        print(f"Analyzer:            {args.analyzer_id}")
+        print(f"API:                 {args.api_version}")
 
         succeeded = 0
         handled_failed = 0
+        crashed = 0
         skipped = 0
-        quarantined_now = 0
         launched = 0
 
         for index, document_id in enumerate(selected, start=1):
             info = state["documents"].setdefault(document_id, {})
-            while True:
-                info["worker_launches"] = int(info.get("worker_launches") or 0) + 1
-                info["last_started_at"] = utcnow()
-                info["last_exit_code"] = None
-                info["last_signal"] = None
-                save_state(args.state_file, state)
+            if not isinstance(info, dict):
+                info = {}
+                state["documents"][document_id] = info
 
-                launched += 1
-                crash_attempt = int(info.get("crash_attempts") or 0) + 1
+            info["worker_launches"] = int(info.get("worker_launches") or 0) + 1
+            info["last_started_at"] = utcnow()
+            info["last_exit_code"] = None
+            info["last_signal"] = None
+            info["last_run_status"] = "RUNNING"
+            save_state(args.state_file, state)
+
+            launched += 1
+            print(
+                f"[{index}/{len(selected)}] {document_id}: starting one Azure child; "
+                "no same-run retry",
+                flush=True,
+            )
+
+            try:
+                result = subprocess.run(
+                    child_command(args, document_id),
+                    env=child_environment(args),
+                    check=False,
+                )
+                returncode = int(result.returncode)
+            except KeyboardInterrupt:
+                info["last_run_status"] = "INTERRUPTED"
+                save_state(args.state_file, state)
                 print(
-                    f"[{index}/{len(selected)}] {document_id}: starting Azure child "
-                    f"(crash attempt {crash_attempt}/{args.worker_max_attempts})",
-                    flush=True,
+                    "\nAzure supervisor interrupted; committed worker results and state are preserved.",
+                    file=sys.stderr,
                 )
+                return 130
 
-                try:
-                    result = subprocess.run(
-                        child_command(args, document_id),
-                        env=child_environment(args),
-                        check=False,
-                    )
-                    returncode = int(result.returncode)
-                except KeyboardInterrupt:
-                    save_state(args.state_file, state)
-                    print(
-                        "\nAzure supervisor interrupted; committed worker results and state are preserved.",
-                        file=sys.stderr,
-                    )
-                    return 130
+            info["last_finished_at"] = utcnow()
+            info["last_exit_code"] = returncode
+            info["last_signal"] = returncode_signal(returncode)
+            save_state(args.state_file, state)
 
-                info["last_finished_at"] = utcnow()
-                info["last_exit_code"] = returncode
-                info["last_signal"] = returncode_signal(returncode)
+            # Re-open after every child so the supervisor sees committed WAL changes.
+            con.close()
+            con = open_db(args.db)
+            analysis = current_document_analysis(
+                con, document_id, args.analyzer_id, args.api_version
+            )
+            status = str(analysis["status"]) if analysis is not None else None
+            error_code = str(analysis["error_code"] or "") if analysis is not None else ""
+
+            if returncode == 130:
+                info["last_run_status"] = "INTERRUPTED"
                 save_state(args.state_file, state)
-
-                # Re-open after every child so the supervisor sees committed WAL changes.
-                con.close()
-                con = open_db(args.db)
-                analysis = current_document_analysis(
-                    con, document_id, args.analyzer_id, args.api_version
+                return 130
+            if returncode == 2:
+                info["last_run_status"] = "CONFIG_ERROR"
+                save_state(args.state_file, state)
+                print(
+                    f"    {document_id}: worker configuration/input error; aborting supervisor",
+                    file=sys.stderr,
                 )
-                status = str(analysis["status"]) if analysis is not None else None
-                error_code = str(analysis["error_code"] or "") if analysis is not None else ""
+                return 2
 
-                if returncode == 130:
-                    return 130
-                if returncode == 2:
+            if returncode == 0:
+                info["last_run_status"] = status or "NO_ANALYSIS_ROW"
+                info["completed_at"] = utcnow()
+                save_state(args.state_file, state)
+                if status == "SUCCEEDED":
+                    succeeded += 1
+                    pages = analysis["page_count"] if analysis is not None else None
+                    print(f"    {document_id}: SUCCEEDED pages={pages}", flush=True)
+                else:
+                    skipped += 1
                     print(
-                        f"    {document_id}: worker configuration/input error; aborting supervisor",
-                        file=sys.stderr,
-                    )
-                    return 2
-
-                if returncode == 0:
-                    info["crash_attempts"] = 0
-                    info["quarantined"] = False
-                    info["completed_at"] = utcnow()
-                    save_state(args.state_file, state)
-                    if status == "SUCCEEDED":
-                        succeeded += 1
-                        pages = analysis["page_count"] if analysis is not None else None
-                        print(f"    {document_id}: SUCCEEDED pages={pages}", flush=True)
-                    else:
-                        skipped += 1
-                        print(
-                            f"    {document_id}: worker completed exit=0 status={status or 'NO_ANALYSIS_ROW'}",
-                            flush=True,
-                        )
-                    break
-
-                if status == "FAILED" and error_code != "WORKER_CRASH":
-                    # The worker survived long enough to record a normal per-document failure.
-                    # Azure-level retry policy already ran inside that worker, so advance.
-                    info["crash_attempts"] = 0
-                    info["quarantined"] = False
-                    info["completed_at"] = utcnow()
-                    save_state(args.state_file, state)
-                    handled_failed += 1
-                    print(
-                        f"    {document_id}: FAILED normally ({error_code or 'ANALYZE_FAILED'}); advancing",
-                        file=sys.stderr,
+                        f"    {document_id}: worker completed exit=0 "
+                        f"status={status or 'NO_ANALYSIS_ROW'}",
                         flush=True,
                     )
-                    break
-
-                # No terminal DB result means the child died outside normal Python error handling.
-                info["crash_attempts"] = int(info.get("crash_attempts") or 0) + 1
+            elif status == "FAILED" and error_code != "WORKER_CRASH":
+                info["last_run_status"] = "FAILED"
+                info["completed_at"] = utcnow()
+                save_state(args.state_file, state)
+                handled_failed += 1
+                print(
+                    f"    {document_id}: FAILED ({error_code or 'ANALYZE_FAILED'}); "
+                    "not retrying this run; next refresh may retry",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            else:
                 signal_name = info.get("last_signal")
                 detail = f" signal={signal_name}" if signal_name else ""
                 crash_message = (
-                    f"Azure worker exited {returncode}{detail} before recording a terminal result; "
-                    f"crash attempt {info['crash_attempts']}/{args.worker_max_attempts}"
+                    f"Azure worker exited {returncode}{detail} before recording a normal "
+                    "terminal result"
                 )
                 mark_worker_crash(
                     con,
@@ -724,44 +678,29 @@ def main() -> int:
                     args.api_version,
                     crash_message,
                 )
-
-                if int(info["crash_attempts"]) >= args.worker_max_attempts:
-                    info["quarantined"] = True
-                    info["quarantined_at"] = utcnow()
-                    save_state(args.state_file, state)
-                    quarantined_now += 1
-                    print(
-                        f"    {document_id}: {crash_message}; QUARANTINED, continuing queue",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    break
-
+                info["last_run_status"] = "WORKER_CRASH"
+                info["crash_count"] = int(info.get("crash_count") or 0) + 1
+                info["last_crashed_at"] = utcnow()
                 save_state(args.state_file, state)
+                crashed += 1
                 print(
-                    f"    {document_id}: {crash_message}; retrying in a fresh process",
+                    f"    {document_id}: {crash_message}; not retrying this run; "
+                    "next refresh may retry",
                     file=sys.stderr,
                     flush=True,
                 )
-                if args.worker_sleep_seconds:
-                    time.sleep(args.worker_sleep_seconds)
 
             if args.worker_sleep_seconds:
                 time.sleep(args.worker_sleep_seconds)
 
         elapsed = time.monotonic() - started
-        total_quarantined = sum(
-            1 for info in state["documents"].values()
-            if isinstance(info, dict) and info.get("quarantined")
-        )
         print()
         print(
             f"Azure supervisor complete: selected={len(selected)} launched={launched} "
-            f"succeeded={succeeded} normal_failed={handled_failed} skipped={skipped} "
-            f"newly_quarantined={quarantined_now} total_quarantined={total_quarantined} "
-            f"elapsed={elapsed:.1f}s concurrency=1"
+            f"succeeded={succeeded} failed={handled_failed} crashed={crashed} "
+            f"skipped={skipped} elapsed={elapsed:.1f}s concurrency=1 retries=0"
         )
-        return 1 if handled_failed or quarantined_now else 0
+        return 1 if handled_failed or crashed else 0
     finally:
         con.close()
         lock.__exit__()
