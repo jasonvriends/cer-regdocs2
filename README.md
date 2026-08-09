@@ -4,12 +4,14 @@ REGDOCS Atlas is a proof-of-concept pipeline for collecting public Canada Energy
 
 Everything in this repository is POC work until explicitly declared otherwise. The project version stays at **0.0.1** until it is intentionally changed.
 
-## The important thing: preserve `workspace/`
+For the complete CLI syntax, every public switch, safety labels, and examples, see **[SYNTAX.md](SYNTAX.md)**.
+
+## Preserve the durable workspace
 
 The expensive and authoritative artifacts are deliberately outside Git:
 
 ```text
-workspace/1_scout/       raw REGDOCS evidence + recovery manifests
+workspace/1_scout/       raw REGDOCS evidence + recovery manifests + coverage
 workspace/2_download/    source files + metadata sidecars
 workspace/3_analyze/     Azure/Docling analysis artifacts + Stage 3 manifests
 workspace/4_normalize/   local normalized JSONL
@@ -20,9 +22,9 @@ database/regdocs.db      operational SQLite ledger
 
 `/workspace/` and `/database/` are ignored by Git. Normal commits, pulls, and repository refactors do not version or replace those files.
 
-**Do not use `git clean -fdx` in this checkout.** That command deletes ignored files and can destroy the expensive workspace artifacts. Do not `rm -rf workspace` as part of code cleanup.
+**Do not use `git clean -fdx` in this checkout.** It deletes ignored files and can destroy the expensive Azure analysis artifacts. Do not remove `workspace/` as part of repository cleanup.
 
-The recovery boundary for the POC is intentionally:
+The POC recovery boundary is intentionally:
 
 ```text
 Stage 1 Scout evidence       durable
@@ -39,25 +41,18 @@ The current corpus has been side-by-side rebuilt and compared successfully throu
 
 ```text
 .
-├── pipeline.py              one public CLI
+├── pipeline.py              one public action-oriented CLI
 ├── regdocs_atlas/           all application code
-│   ├── cli.py
-│   ├── db/
-│   ├── runtime/
-│   ├── artifacts/
-│   ├── stages/
-│   ├── rebuild*.py
-│   ├── scout_manifests.py
-│   ├── analysis_manifests.py
-│   └── ...
-├── requirements.txt
-├── VERSION
-├── RELEASE_NOTES.md
-├── database/                ignored local state
-└── workspace/               ignored durable local artifacts
+├── requirements.txt         one Python dependency set
+├── README.md                architecture / POC operating rules
+├── SYNTAX.md                complete command and switch reference
+├── RELEASE_NOTES.md         consolidated 0.0.1 POC baseline
+├── VERSION                  stays 0.0.1 until explicitly changed
+├── database/                ignored local ledger/backups
+└── workspace/               ignored durable artifacts
 ```
 
-There is no second `pipeline/` implementation tree and no compatibility-launcher layer. `pipeline.py` launches the packaged stage implementations directly while retaining subprocess isolation for the long-running/crash-prone stages.
+There is no second `pipeline/` implementation tree and no compatibility-launcher layer. `pipeline.py` launches the packaged stage implementations while retaining subprocess isolation for long-running/crash-prone work.
 
 ## Install
 
@@ -67,144 +62,146 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-## Main commands
+## CLI safety model
+
+A bare stage name never performs work. It prints help and exits:
 
 ```bash
-python pipeline.py scout --start-date YYYY-MM-DD --end-date YYYY-MM-DD
+python pipeline.py scout
 python pipeline.py download
 python pipeline.py analyze azure
 python pipeline.py analyze docling
-python pipeline.py normalize --provider azure
-python pipeline.py normalize --provider docling
+python pipeline.py normalize
 python pipeline.py index
 ```
 
-Useful read-only checks:
+Actual work requires an explicit action:
 
 ```bash
-python pipeline.py version
-python pipeline.py status
-python pipeline.py diagnostics
-python pipeline.py db verify
-
-python pipeline.py scout --coverage
-python pipeline.py download --dry-run --limit 1
-python pipeline.py analyze azure --dry-run --limit 1
-python pipeline.py normalize --provider azure --dry-run --limit 1
-python pipeline.py index --dry-run --limit 1
+python pipeline.py scout run --start-date YYYY-MM-DD --end-date YYYY-MM-DD
+python pipeline.py download run
+python pipeline.py analyze azure run --all
+python pipeline.py analyze docling run --max-documents 1
+python pipeline.py normalize run --provider azure
+python pipeline.py index publish
 ```
 
-Public `--version` output is always the repository POC version (`0.0.1`). Internal parser/analyzer identifiers remain embedded in artifacts where they are required for reproducibility; they are not independent product releases.
+Safe planning/status actions are explicit too:
+
+```bash
+python pipeline.py scout coverage
+python pipeline.py download plan
+python pipeline.py analyze azure plan --all
+python pipeline.py analyze docling status
+python pipeline.py normalize plan --provider azure --limit 100
+python pipeline.py index plan
+```
+
+Scout uses `probe` rather than `plan` because its preview mode still contacts REGDOCS and preserves request evidence:
+
+```bash
+python pipeline.py scout probe \
+  --start-date YYYY-MM-DD \
+  --end-date YYYY-MM-DD \
+  --limit 5
+```
+
+See [SYNTAX.md](SYNTAX.md) before running unfamiliar actions.
 
 ## Scout date coverage
 
-Scout keeps a durable acquisition watermark at:
+Completed Scout date ranges are durable independently of SQLite run history:
 
 ```text
 workspace/1_scout/manifests/coverage.json
 ```
 
-Show or refresh it with:
+Show or refresh the watermark with:
 
 ```bash
-python pipeline.py scout --coverage
+python pipeline.py scout coverage
 ```
 
-A normal Scout acquisition never chooses a date range automatically. Both `--start-date` and `--end-date` are required, including for `--dry-run`. Running `python pipeline.py scout` by itself fails before any network request. Read-only/status commands and `--repair-containers` do not require a date range.
+Normal Scout acquisition never chooses a date range automatically. Both `--start-date` and `--end-date` are required for `scout run` and `scout probe`.
 
-Coverage advances only from non-dry-run Scout runs that finished `SUCCEEDED`, completed the base search, had zero failed base-search pages, and passed the post-run audit. Adjacent successful ranges are merged. The report shows any gaps plus `recommended_next_start_date`, so a flattened database does not need historical `runs` rows to remember which filing-date ranges were already acquired.
+Coverage advances only from real successful Scout acquisition runs that completed the base search, had zero failed base-search pages, and passed the post-run audit. `rebuild prepare` also refreshes the coverage manifest.
 
-`rebuild prepare` also refreshes this coverage manifest, and successful future Scout runs update it automatically.
+## Database recovery and flattening
 
-## Database and recovery
+The durable artifacts can reconstruct a new SQLite ledger without re-crawling REGDOCS, re-downloading source files, or resubmitting successful Azure Content Understanding analyses.
 
-Schema migration:
-
-```bash
-python pipeline.py db migrate --plan
-python pipeline.py db migrate
-python pipeline.py db verify
-```
-
-Prepare/verify durable recovery manifests:
-
-```bash
-python pipeline.py rebuild prepare
-```
-
-After a previous full Scout verification, a faster refresh is:
-
-```bash
-python pipeline.py rebuild prepare --no-verify-raw
-```
-
-Inspect and rebuild beside the working database:
+Useful recovery checks:
 
 ```bash
 python pipeline.py rebuild inventory
 python pipeline.py rebuild plan
+python pipeline.py rebuild prepare
+```
 
-python pipeline.py rebuild create \
-  --output database/regdocs.rebuilt.db
+A normal side-by-side rebuild:
 
-python pipeline.py rebuild verify \
-  --db database/regdocs.rebuilt.db
-
+```bash
+python pipeline.py rebuild create --output database/regdocs.rebuilt.db
+python pipeline.py rebuild verify --db database/regdocs.rebuilt.db
 python pipeline.py rebuild compare \
   --source database/regdocs.db \
   --rebuilt database/regdocs.rebuilt.db
 ```
 
-A successful Stage 1-3 comparison is the disaster-recovery target. Stage 4 normalization rows are intentionally not reconstructed from SQLite recovery; Normalize is local and can be rerun from the preserved Stage 3 artifacts. Azure AI Search is likewise a derivative publication layer.
+The Stage 1-3 disaster-recovery target is:
 
-### Flat operational rebuild
+```text
+source_and_stage3_equivalent: true
+```
 
-For a clean POC baseline with no historical `runs`, `errors`, rebuild provenance, or recovery queue, use the same verified artifact rebuild with `--flat`:
+For a clean POC operational baseline with historical runs/errors/recovery bookkeeping removed:
 
 ```bash
 python pipeline.py rebuild create --flat
 ```
 
-The default output is `database/regdocs.flat.db`. An explicit target can be supplied with `--output`.
-
-Flat mode first performs the normal manifest-backed Stage 1-3 reconstruction. Only when that reconstruction finishes with exact `SUCCEEDED` status does it remove execution/recovery history, strip recovery-only document metadata/state, stamp the current POC version, and `VACUUM` the new output database. If reconstruction has gaps, flattening is not applied and the recovery evidence is kept for diagnosis.
-
-Flat mode never contacts REGDOCS, Azure Content Understanding, Docling, or Azure AI Search, and it never overwrites the active database. Stage 4 normalization rows remain intentionally absent; rerun Normalize locally if a fresh Stage 4 ledger is desired.
+Flat mode first performs the same manifest-backed Stage 1-3 reconstruction. It only strips history after an exact successful rebuild, never overwrites the active database, and never contacts REGDOCS or Azure. Stage 4 normalization rows are intentionally absent because Normalize is locally rebuildable.
 
 ## Azure cost protection
 
-Before any Azure rerun, use the dry run and inspect the ledger/artifact state:
+`workspace/3_analyze/` is the expensive boundary. Preserve it.
+
+Before any Azure Content Understanding run:
 
 ```bash
-python pipeline.py analyze azure --dry-run --limit 10
-python pipeline.py cost azure
+python pipeline.py analyze azure plan --all
 ```
 
-The analyzer uses current source SHA identity plus successful analysis state/artifacts to avoid unnecessarily resubmitting work. Preserve `workspace/3_analyze/` because it contains the expensive provider outputs.
+Only this explicit action permits billable Stage 3 work:
 
-Azure Content Understanding rates are configured rather than hard-coded:
-
-```text
-REGDOCS_AZURE_CU_MINIMAL_PER_1000_USD
-REGDOCS_AZURE_CU_BASIC_PER_1000_USD
-REGDOCS_AZURE_CU_STANDARD_PER_1000_USD
+```bash
+python pipeline.py analyze azure run --all
 ```
+
+The analyzer uses current source SHA identity plus successful analysis state/artifacts to avoid unnecessarily resubmitting work. Azure rates remain configurable via environment variables and can be inspected with:
 
 ```bash
 python pipeline.py cost rates
 python pipeline.py cost azure
 ```
 
+## Documentation roles
+
+- `README.md` — architecture, recovery boundary, POC operating rules.
+- `SYNTAX.md` — authoritative public CLI syntax, switches, safety labels, and examples.
+- `RELEASE_NOTES.md` — one consolidated description of the current `0.0.1` POC, not a history of internal iteration.
+
+No additional docs/roadmap tree is needed unless the project stops being a POC.
+
 ## POC operating rules
 
 - one public command: `python pipeline.py ...`;
-- one package: `regdocs_atlas/`;
+- bare stage names never run work;
+- explicit actions are required for network/mutating stage operations;
+- one application package: `regdocs_atlas/`;
 - one dependency file: `requirements.txt`;
-- one documentation source: this README;
-- no GitHub Actions CI and no dedicated test suite for the POC;
+- no GitHub Actions CI and no dedicated automated test suite for the POC;
 - no version bump unless explicitly requested;
-- preserve acquisition evidence, downloaded source files, and Stage 3 analyzer artifacts;
+- preserve Scout evidence, downloaded source files, and Stage 3 analyzer artifacts;
 - never fabricate missing recovery facts;
 - treat Normalize and Azure AI Search as rebuildable derivatives.
-
-`RELEASE_NOTES.md` is a single consolidated description of the current 0.0.1 POC, not a history of internal iteration.
