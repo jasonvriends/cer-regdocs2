@@ -7,14 +7,14 @@ Azure Content Understanding.
 The public command is a durable, single-threaded supervisor. Exactly one child
 process analyzes one document at a time.
 
-Script version documented: **3d.3.0**.
+Script version documented: **3d.3.1**.
 
 ## Run ownership
 
 One public Docling invocation equals one SQLite `runs` row.
 
 ```text
-python regdocs_3_docling.py
+python pipeline/regdocs_3_docling.py
         |
         v
 Run 43  provider=docling
@@ -26,17 +26,15 @@ Run 43  provider=docling
 ```
 
 The supervisor creates and finishes the run, maintains its heartbeat/progress,
-and records its final status. The isolated child worker is attached to the
-supervisor-owned run and does not allocate or finish another pipeline run during
-normal public execution.
+and records final status. Isolated workers attach their `analyses` rows to the
+supervisor-owned run instead of allocating one run per document.
 
 This matches the Azure Stage 3 rule: **one supervisor invocation = one run**.
 
 ## Shared Stage 3 lock
 
 Azure and Docling are alternate Stage 3 providers over the same corpus and
-shared SQLite ledger, so their public supervisors are mutually exclusive at
-runtime.
+shared SQLite ledger, so their public supervisors are mutually exclusive.
 
 Both use:
 
@@ -44,17 +42,15 @@ Both use:
 database/locks/3_analyze.lock
 ```
 
-Whichever provider starts first owns that lock for its whole processing run. If
-Azure is active, starting Docling refuses to process; if Docling is active,
-starting Azure refuses to process. The lock records the owning PID and provider
-role, and a later invocation automatically removes it only when the recorded PID
-is no longer running.
+Whichever provider starts first owns that lock for its whole processing run. A
+later invocation removes a stale lock automatically only when the recorded PID
+is no longer alive.
 
-`python pipeline/regdocs_3_docling.py --status` remains read-only and does not
-acquire the Stage 3 processing lock.
+`python pipeline/regdocs_3_docling.py --status` remains read-only with respect to
+the Stage 3 processing lock.
 
 Do not use `--force-lock` unless you have independently confirmed that neither
-an Azure nor a Docling Stage 3 supervisor is alive.
+an Azure nor a Docling supervisor is active.
 
 ## Install
 
@@ -65,7 +61,7 @@ and model dependencies are heavier:
 python -m pip install -r pipeline/requirements-docling.txt
 ```
 
-## Durable single-threaded execution
+## Durable single-active-child execution
 
 ```text
 regdocs_3_docling.py
@@ -79,11 +75,18 @@ regdocs_3_docling.py
         +--> ...
 ```
 
+There is never more than one Docling document worker active at a time. This
+keeps document-level SQLite writes serialized, limits GPU/resource contention,
+and preserves a simple crash boundary.
+
 A Docling/native-library crash, segfault, or OOM kill can terminate the current
 child without terminating the supervisor. Completed analysis artifacts and
 ledger rows remain committed.
 
-There is never more than one Docling worker process at a time.
+The roadmap contains a separate future optimization to let one active child
+reuse loaded Docling/PyTorch models for a bounded group of roughly 25–100
+documents before recycling. That proposal still keeps exactly one active child
+and one current document-level writer; it is not concurrent document analysis.
 
 ## Retry policy
 
@@ -119,33 +122,38 @@ python pipeline/regdocs_3_docling.py --status
 Bound a pilot by child launches:
 
 ```bash
-python pipeline/regdocs_3_docling.py --max-documents 10
+python pipeline/regdocs_3_docling.py --max-documents 25
 ```
 
-Normal progress intentionally mirrors the Azure console shape. The progress
-position is zero-padded to the width of the selected document count, and the
-success line is built from the committed SQLite analysis row:
+Normal progress mirrors the Azure console shape. The success line is built from
+the committed SQLite analysis row.
+
+## Docling conversion status and errors
+
+The worker does not infer success merely because `converter.convert()` returned
+a document object.
+
+For every conversion it now reads Docling's conversion result status and error
+list before publishing the artifact:
+
+- `success` is accepted as a successful analysis;
+- `partial_success` is accepted but preserved with warnings;
+- any other status is recorded as a failed analysis;
+- Docling conversion errors are serialized into the raw artifact;
+- the `analyses.warning_count` reflects the preserved conversion warnings; and
+- failed conversions retain their error code/message in the `analyses` row.
+
+The raw artifact records this provider-native outcome under:
 
 ```text
-Run 43: Docling supervisor 3d.3.0; 4048 document(s) eligible
-Concurrency:    1 child process
-Crash retries:  up to 3 attempt(s) per document
-Stage 3 lock:   /.../database/locks/3_analyze.lock
-
-[0001/4048] 4659445 ... SUCCEEDED pages=1 tables=1 sections=5 elapsed=3.9s
-[0002/4048] 4659447 ... SUCCEEDED pages=12 tables=0 sections=8 elapsed=6.2s
+regdocsDocling.conversionStatus
+regdocsDocling.conversionErrors
+warnings
 ```
 
-If a document needs another fresh child, its document position stays stable and
-the retry is made explicit:
-
-```text
-[0027/4048] 4660123 ... FAILED exit=-11 signal=SIGSEGV; retrying in fresh child
-[0027/4048] 4660123 attempt 2/3 ... SUCCEEDED pages=34 tables=3 sections=14 elapsed=11.4s
-```
-
-Worker stdout/stderr remains hidden on normal success and is surfaced for
-failure/crash diagnostics.
+This makes Azure-versus-Docling comparison able to distinguish clean success
+from partial extraction instead of reporting every returned Docling document as
+warning-free success.
 
 ## Durable state
 
@@ -178,8 +186,7 @@ artifact_source = docling
 run_id = supervisor-owned Docling run
 ```
 
-Both Azure and Docling persist the common extraction/result metrics used by the
-supervisor console and later comparison work, including:
+Common durable result fields include:
 
 ```text
 page_count
@@ -195,31 +202,30 @@ raw_json_path
 markdown_path
 ```
 
-So the console is only a view of durable ledger data; the SQLite row and native
-provider artifacts remain the source of truth.
-
-The raw JSON preserves the native `DoclingDocument.export_to_dict()` result
-under `regdocsDocling.native` and also contains a conservative REGDOCS
-compatibility projection under `contents[]` for the current Stage 4 normalizer.
+The raw JSON preserves `DoclingDocument.export_to_dict()` under
+`regdocsDocling.native` and contains a conservative REGDOCS compatibility
+projection under `contents[]` for the current Stage 4 normalizer.
 
 The compatibility projection is intentionally experimental. It maps text, page
 provenance, basic headings, and table structure into the subset of the current
-normalization contract needed for comparison work; it does not claim that Azure
-and Docling have equivalent native schemas.
+normalization contract needed for comparison work; it does not claim Azure and
+Docling have equivalent native schemas.
 
 ## Stage 4 provider choice
 
-For the initial multi-provider implementation:
+`regdocs_4_normalize.py` is the primary Stage 4 command. Choose the Docling
+analysis explicitly:
 
 ```bash
-python pipeline/regdocs_4_normalize_provider.py --analysis-provider azure
-python pipeline/regdocs_4_normalize_provider.py --analysis-provider docling
+python pipeline/regdocs_4_normalize.py --analysis-provider docling
 ```
 
-Use a separate output directory for pilots when appropriate. The Docling
-provider selector resolves the newest successful `docling-standard` version
-recorded in the ledger. Azure retains the existing
-`prebuilt-layout / 2025-11-01` default.
+When run interactively with no `--analysis-provider`, Stage 4 asks whether to
+use Azure or Docling. The Docling selection resolves the newest successful
+current `docling-standard` version in the ledger.
+
+The older `regdocs_4_normalize_provider.py` command remains only as a
+compatibility launcher and delegates to `regdocs_4_normalize.py`.
 
 Alternative Stage 3 provider: [Azure](regdocs_3_azure.md).
 
