@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Single-threaded crash-resilient REGDOCS Azure analyzer.
 
-The public Stage 3 Azure command is a durable supervisor. It launches exactly
-one child process per selected document through ``regdocs_3_azure_worker.py``.
-Azure retries are intentionally disabled because another submission may be
-billable. A later normal Stage 3 Azure run is the retry boundary.
+The public Stage 3 Azure command is the run owner. One invocation creates one
+``runs`` row, then launches exactly one isolated child process per selected
+document. Children attach their ``analyses`` and ``errors`` rows to the parent
+run and are not allowed to create or finish pipeline runs themselves.
+
+Azure retries are intentionally conservative because a repeated submission can
+be billable. Each document gets one worker launch per supervisor run and each
+Azure request/range gets one application-level submission attempt. A handled
+failure, segfault, OOM kill, or other child crash is recorded and the supervisor
+advances. A later normal Stage 3 Azure run is the retry boundary.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -31,7 +38,7 @@ from regdocs_paths import (
     stored_path,
 )
 
-SCRIPT_VERSION = "3.6.2"
+SCRIPT_VERSION = "3.7.0"
 DEFAULT_API_VERSION = "2025-11-01"
 DEFAULT_ANALYZER_ID = "prebuilt-layout"
 DEFAULT_POLLING_INTERVAL = 3
@@ -200,7 +207,6 @@ def canonical_success_is_usable(
     document_id: str,
     sha256: str,
 ) -> bool:
-    """Fast local check used only for supervisor queue selection."""
     raw_path, md_path = canonical_artifact_paths(
         output_dir, analyzer_id, api_version, document_id, sha256
     )
@@ -326,15 +332,157 @@ def select_documents(
     return selected
 
 
+def create_supervisor_run(con: sqlite3.Connection, args: argparse.Namespace, total: int) -> int:
+    now = utcnow()
+    params = {
+        "provider": "azure",
+        "db": stored_path(args.db),
+        "download_dir": stored_path(args.download_dir),
+        "output_dir": stored_path(args.output_dir),
+        "analyzer_id": args.analyzer_id,
+        "api_version": args.api_version,
+        "document_id": args.document_id,
+        "limit": args.limit,
+        "all": args.all_candidates,
+        "force": args.force,
+        "reconcile_artifacts": not args.no_reconcile_artifacts,
+        "verify_hash": not args.no_verify_hash,
+        "concurrency": 1,
+        "worker_launches_per_document": 1,
+        "azure_submission_attempts_per_request": 1,
+        "retry_boundary": "next_supervisor_run",
+    }
+    cur = con.execute(
+        """
+        INSERT INTO runs (
+            stage, status, started_at, parameters_json, summary_json,
+            script_version, parser_version, current_phase, heartbeat_at,
+            completed_units, total_units, progress_message
+        ) VALUES (?, 'RUNNING', ?, ?, '{}', ?, ?, 'analyzing', ?, 0, ?, ?)
+        """,
+        (
+            "analyze",
+            now,
+            json.dumps(params, sort_keys=True),
+            SCRIPT_VERSION,
+            f"azure-content-understanding-{args.api_version}",
+            now,
+            total,
+            f"Azure supervisor selected {total} document(s)",
+        ),
+    )
+    con.commit()
+    return int(cur.lastrowid)
+
+
+def update_supervisor_run(
+    con: sqlite3.Connection,
+    run_id: int,
+    total: int,
+    launched: int,
+    succeeded: int,
+    failed: int,
+    crashed: int,
+    skipped: int,
+    pages: int,
+    *,
+    status: Optional[str] = None,
+    message: Optional[str] = None,
+) -> None:
+    now = utcnow()
+    summary = {
+        "provider": "azure",
+        "documents_total": total,
+        "documents_completed": launched,
+        "succeeded": succeeded,
+        "failed": failed,
+        "crashed": crashed,
+        "skipped": skipped,
+        "pages_succeeded": pages,
+        "worker_launches": launched,
+        "concurrency": 1,
+        "same_run_retries": 0,
+    }
+    progress = message or (
+        f"Azure {launched}/{total}: {succeeded} succeeded, {failed} failed, "
+        f"{crashed} crashed, {skipped} skipped"
+    )
+    if status is None:
+        con.execute(
+            """
+            UPDATE runs
+            SET heartbeat_at=?, completed_units=?, total_units=?, summary_json=?,
+                progress_message=?, successful_requests=?, failed_requests=?
+            WHERE id=?
+            """,
+            (
+                now,
+                launched,
+                total,
+                json.dumps(summary, sort_keys=True),
+                progress,
+                succeeded,
+                failed + crashed,
+                run_id,
+            ),
+        )
+    else:
+        con.execute(
+            """
+            UPDATE runs
+            SET status=?, finished_at=?, heartbeat_at=?, current_phase='finished',
+                completed_units=?, total_units=?, summary_json=?, progress_message=?,
+                successful_requests=?, failed_requests=?
+            WHERE id=?
+            """,
+            (
+                status,
+                now,
+                now,
+                launched,
+                total,
+                json.dumps(summary, sort_keys=True),
+                progress,
+                succeeded,
+                failed + crashed,
+                run_id,
+            ),
+        )
+    con.commit()
+
+
 def worker_lock_path(supervisor_lock: Path) -> Path:
     return supervisor_lock.with_name(supervisor_lock.name + ".worker")
 
 
-def child_command(args: argparse.Namespace, document_id: str) -> list[str]:
+def child_bootstrap(worker: Path) -> str:
+    """Return code that binds the legacy worker to the supervisor-owned run.
+
+    The worker remains directly executable for development, but public supervisor
+    execution replaces its run-lifecycle helpers so it cannot allocate or finish
+    a second ``runs`` row. Analyses and errors still receive the returned parent
+    run ID normally.
+    """
+    return f"""
+import sys
+sys.path.insert(0, {str(worker.parent)!r})
+import regdocs_3_azure_worker as worker
+parent_run_id = int(sys.argv[1])
+worker.create_run = lambda con, args: parent_run_id
+worker.update_run_progress = lambda *args, **kwargs: None
+worker.finish_run = lambda *args, **kwargs: None
+sys.argv = [worker.__file__] + sys.argv[2:]
+raise SystemExit(worker.main())
+""".strip()
+
+
+def child_command(args: argparse.Namespace, document_id: str, run_id: int) -> list[str]:
     worker = Path(__file__).with_name("regdocs_3_azure_worker.py")
     cmd = [
         sys.executable,
-        str(worker),
+        "-c",
+        child_bootstrap(worker),
+        str(run_id),
         "--db", str(args.db),
         "--api-version", args.api_version,
         "--polling-interval", str(args.polling_interval),
@@ -435,7 +583,6 @@ def returncode_signal(returncode: int) -> Optional[str]:
 
 
 def print_worker_diagnostics(stdout: str, stderr: str) -> None:
-    """Surface captured child output only when a worker needs investigation."""
     blocks = []
     if stdout.strip():
         blocks.append(stdout.rstrip())
@@ -538,6 +685,9 @@ def main() -> int:
 
     con = open_db(args.db)
     started = time.monotonic()
+    run_id: Optional[int] = None
+    total = launched = succeeded = handled_failed = crashed = skipped = pages_succeeded = 0
+
     try:
         selected = select_documents(
             con,
@@ -549,19 +699,23 @@ def main() -> int:
             args.limit,
             args.force,
         )
+        total = len(selected)
         save_state(args.state_file, state)
+        run_id = create_supervisor_run(con, args, total)
 
-        print(f"Azure supervisor {SCRIPT_VERSION}: {len(selected)} document(s) selected")
+        print(f"Run {run_id}: Azure supervisor {SCRIPT_VERSION}; {total} document(s) selected")
         print("Concurrency:       1 child process")
         print("Azure retries:     disabled")
         print("Retry boundary:    next normal Stage 3 Azure rerun")
         print()
 
-        succeeded = 0
-        handled_failed = 0
-        crashed = 0
-        skipped = 0
-        launched = 0
+        if total == 0:
+            update_supervisor_run(
+                con, run_id, total, 0, 0, 0, 0, 0, 0,
+                status="SUCCEEDED",
+                message="Azure supervisor: no eligible documents",
+            )
+            return 0
 
         for index, document_id in enumerate(selected, start=1):
             info = state["documents"].setdefault(document_id, {})
@@ -574,14 +728,15 @@ def main() -> int:
             info["last_exit_code"] = None
             info["last_signal"] = None
             info["last_run_status"] = "RUNNING"
+            info["last_pipeline_run_id"] = run_id
             save_state(args.state_file, state)
 
             launched += 1
-            print(f"[{index}/{len(selected)}] {document_id} ... ", end="", flush=True)
+            print(f"[{index}/{total}] {document_id} ... ", end="", flush=True)
 
             try:
                 result = subprocess.run(
-                    child_command(args, document_id),
+                    child_command(args, document_id, run_id),
                     env=child_environment(args),
                     check=False,
                     stdout=subprocess.PIPE,
@@ -595,8 +750,14 @@ def main() -> int:
                 info["last_run_status"] = "INTERRUPTED"
                 save_state(args.state_file, state)
                 print("INTERRUPTED")
+                update_supervisor_run(
+                    con, run_id, total, launched - 1, succeeded, handled_failed,
+                    crashed, skipped, pages_succeeded, status="INTERRUPTED",
+                    message="Azure supervisor interrupted by user",
+                )
                 print(
-                    "Azure supervisor interrupted; committed worker results and state are preserved.",
+                    "Azure supervisor interrupted; committed analyses remain attached "
+                    f"to Run {run_id} and will be skipped on restart.",
                     file=sys.stderr,
                 )
                 return 130
@@ -619,12 +780,23 @@ def main() -> int:
                 save_state(args.state_file, state)
                 print("INTERRUPTED")
                 print_worker_diagnostics(worker_stdout, worker_stderr)
+                update_supervisor_run(
+                    con, run_id, total, launched, succeeded, handled_failed,
+                    crashed, skipped, pages_succeeded, status="INTERRUPTED",
+                    message=f"Azure worker interrupted on {document_id}",
+                )
                 return 130
+
             if returncode == 2:
                 info["last_run_status"] = "CONFIG_ERROR"
                 save_state(args.state_file, state)
                 print("CONFIG_ERROR")
                 print_worker_diagnostics(worker_stdout, worker_stderr)
+                update_supervisor_run(
+                    con, run_id, total, launched, succeeded, handled_failed,
+                    crashed, skipped, pages_succeeded, status="FAILED",
+                    message=f"Azure worker configuration/input error on {document_id}",
+                )
                 return 2
 
             if returncode == 0:
@@ -633,8 +805,9 @@ def main() -> int:
                 save_state(args.state_file, state)
                 if status == "SUCCEEDED":
                     succeeded += 1
-                    pages = analysis["page_count"] if analysis is not None else None
-                    print(f"SUCCEEDED pages={pages}", flush=True)
+                    doc_pages = int(analysis["page_count"] or 0) if analysis is not None else 0
+                    pages_succeeded += doc_pages
+                    print(f"SUCCEEDED pages={doc_pages}", flush=True)
                 else:
                     skipped += 1
                     print(f"{status or 'NO_ANALYSIS_ROW'}", flush=True)
@@ -668,17 +841,69 @@ def main() -> int:
                 print(f"WORKER_CRASH exit={returncode}{detail}")
                 print_worker_diagnostics(worker_stdout, worker_stderr)
 
+            update_supervisor_run(
+                con,
+                run_id,
+                total,
+                launched,
+                succeeded,
+                handled_failed,
+                crashed,
+                skipped,
+                pages_succeeded,
+            )
+
             if args.worker_sleep_seconds:
                 time.sleep(args.worker_sleep_seconds)
 
         elapsed = time.monotonic() - started
+        final_status = "SUCCEEDED" if handled_failed == 0 and crashed == 0 else "COMPLETED_WITH_ERRORS"
+        update_supervisor_run(
+            con,
+            run_id,
+            total,
+            launched,
+            succeeded,
+            handled_failed,
+            crashed,
+            skipped,
+            pages_succeeded,
+            status=final_status,
+            message=(
+                f"Azure {final_status}: {succeeded} succeeded, {handled_failed} failed, "
+                f"{crashed} crashed, {skipped} skipped, {pages_succeeded} pages, "
+                f"elapsed={elapsed:.1f}s"
+            ),
+        )
         print()
         print(
-            f"Azure supervisor complete: selected={len(selected)} launched={launched} "
-            f"succeeded={succeeded} failed={handled_failed} crashed={crashed} "
-            f"skipped={skipped} elapsed={elapsed:.1f}s concurrency=1 retries=0"
+            f"Run {run_id} {final_status}: selected={total} succeeded={succeeded} "
+            f"failed={handled_failed} crashed={crashed} skipped={skipped} "
+            f"pages={pages_succeeded} elapsed={elapsed:.1f}s concurrency=1 retries=0"
         )
-        return 1 if handled_failed or crashed else 0
+        return 0 if final_status == "SUCCEEDED" else 1
+
+    except KeyboardInterrupt:
+        if run_id is not None:
+            with contextlib.suppress(Exception):
+                update_supervisor_run(
+                    con, run_id, total, launched, succeeded, handled_failed,
+                    crashed, skipped, pages_succeeded, status="INTERRUPTED",
+                    message="Azure supervisor interrupted by user",
+                )
+        print("\nAzure supervisor interrupted; committed analyses are preserved.", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        if run_id is not None:
+            with contextlib.suppress(Exception):
+                update_supervisor_run(
+                    con, run_id, total, launched, succeeded, handled_failed,
+                    crashed, skipped, pages_succeeded, status="FAILED",
+                    message=f"Azure supervisor failed: {str(exc)[:800]}",
+                )
+        print(f"FATAL: {exc}", file=sys.stderr)
+        traceback.print_exc()
+        return 1
     finally:
         con.close()
         lock.__exit__()
