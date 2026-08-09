@@ -8,7 +8,7 @@ The public command is a **single-threaded crash-resilient supervisor**. It
 launches exactly one short-lived child process per document through
 `regdocs_3_azure_worker.py`.
 
-Script version documented: **3.6.0**.
+Script version documented: **3.6.1**.
 
 ## Cost-safe retry policy
 
@@ -67,6 +67,7 @@ single-threaded durable supervisor
         +--> owns database/locks/3_analyze.lock
         +--> owns supervisor-state.json
         +--> selects eligible documents
+        +--> prints the complete selected queue before any child starts
         +--> concurrency = 1
         |
         v
@@ -117,6 +118,11 @@ Analyze every remaining eligible current document:
 ```bash
 python pipeline/regdocs_3_azure.py --all
 ```
+
+Before the first Azure worker starts, the supervisor prints the entire selected
+queue in processing order. A 4,071-document run therefore prints all 4,071
+selected document IDs first, then begins `[1/4071] ...` processing. This makes
+the exact billable candidate set visible before submission begins.
 
 To retry failures, run the normal command again. No special retry flag is
 required.
