@@ -87,6 +87,7 @@ python pipeline.py status
 python pipeline.py diagnostics
 python pipeline.py db verify
 
+python pipeline.py scout --coverage
 python pipeline.py download --dry-run --limit 1
 python pipeline.py analyze azure --dry-run --limit 1
 python pipeline.py normalize --provider azure --dry-run --limit 1
@@ -94,6 +95,24 @@ python pipeline.py index --dry-run --limit 1
 ```
 
 Public `--version` output is always the repository POC version (`0.0.1`). Internal parser/analyzer identifiers remain embedded in artifacts where they are required for reproducibility; they are not independent product releases.
+
+## Scout date coverage
+
+Scout keeps a durable acquisition watermark at:
+
+```text
+workspace/1_scout/manifests/coverage.json
+```
+
+Show or refresh it with:
+
+```bash
+python pipeline.py scout --coverage
+```
+
+Coverage advances only from non-dry-run Scout runs that finished `SUCCEEDED`, completed the base search, had zero failed base-search pages, and passed the post-run audit. Adjacent successful ranges are merged. The report shows any gaps plus `recommended_next_start_date`, so a flattened database does not need historical `runs` rows to remember which filing-date ranges were already acquired.
+
+`rebuild prepare` also refreshes this coverage manifest, and successful future Scout runs update it automatically.
 
 ## Database and recovery
 
