@@ -43,6 +43,7 @@ DOWNLOAD_LOG_PATH = DOWNLOAD_RUN_DIR / "download.log"
 ANALYZE_DIR = WORKSPACE_DIR / "3_analyze"
 CONTENT_UNDERSTANDING_DIR = ANALYZE_DIR / "content-understanding"
 DOCLING_DIR = ANALYZE_DIR / "docling"
+ANALYSIS_MANIFEST_DIR = ANALYZE_DIR / "manifests" / "analyses"
 
 NORMALIZE_DIR = WORKSPACE_DIR / "4_normalize"
 INDEX_DIR = WORKSPACE_DIR / "5_index"
