@@ -12,6 +12,10 @@ DATABASE_PATH = DATABASE_DIR / "regdocs.db"
 DATABASE_BACKUP_DIR = DATABASE_DIR / "backups"
 LOCKS_DIR = DATABASE_DIR / "locks"
 
+# Preferred orchestration lock. Commands launched through pipeline.py use this
+# single mutation lock. Stage-specific locks remain temporarily for direct legacy
+# entry points and defense-in-depth during the package refactor.
+PIPELINE_LOCK_PATH = LOCKS_DIR / "pipeline.lock"
 SCOUT_LOCK_PATH = LOCKS_DIR / "1_scout.lock"
 DOWNLOAD_LOCK_PATH = LOCKS_DIR / "2_download.lock"
 ANALYZE_LOCK_PATH = LOCKS_DIR / "3_analyze.lock"
@@ -19,6 +23,7 @@ NORMALIZE_LOCK_PATH = LOCKS_DIR / "4_normalize.lock"
 MIGRATION_LOCK_PATH = LOCKS_DIR / "schema_migrate.lock"
 
 WORKSPACE_DIR = PROJECT_ROOT / "workspace"
+PIPELINE_LOG_PATH = WORKSPACE_DIR / "pipeline.log"
 
 SCOUT_DIR = WORKSPACE_DIR / "1_scout"
 SCOUT_RAW_DIR = SCOUT_DIR / "raw" / "regdocs"
