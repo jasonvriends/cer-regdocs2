@@ -16,6 +16,7 @@ from typing import Sequence
 
 from regdocs_atlas.cli import main as cli_main
 from regdocs_atlas.paths import DATABASE_PATH
+from regdocs_atlas.runtime.console import standardized_stage_console
 from regdocs_atlas.scout_coverage import refresh_scout_coverage
 
 
@@ -525,7 +526,8 @@ def main() -> int:
     if translated is None:
         return 0
 
-    code = int(cli_main(translated))
+    with standardized_stage_console():
+        code = int(cli_main(translated))
     if refresh_scout and code in {0, 2}:
         _refresh_coverage_after_scout()
     return code

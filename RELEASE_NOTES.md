@@ -22,6 +22,7 @@ The pipeline baseline includes:
 - Index validating/publishing normalized chunks to Azure AI Search.
 - SQLite providing the operational ledger, named migrations, backups, integrity checks, run state, errors, analysis state, and normalization state.
 - A global pipeline lock and canonical `workspace/pipeline.log` coordinating normal root-CLI operation while stage locks remain defense-in-depth.
+- A root-console presentation layer that gives Scout, Download, Azure, Docling, Normalize, and Index the same line-oriented operator style; transient `tqdm` redraws and timestamped logger prefixes are removed from the terminal while the raw child output remains preserved in `workspace/pipeline.log`.
 - Azure Content Understanding usage/cost inspection from saved result usage with configurable rates; Docling remains local compute.
 
 ## Durable recovery boundary
