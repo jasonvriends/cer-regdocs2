@@ -25,6 +25,7 @@ _EMBEDDED_LOG_START_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+"
     r"\[(?:DEBUG|INFO|WARNING|ERROR|CRITICAL)\]\s+"
 )
+_PROGRESS_MARKER = "Progress ["
 
 
 class FacetAwareScoutDashboard(_console.ScoutDashboard):
@@ -94,11 +95,24 @@ class FacetAwareScoutDashboard(_console.ScoutDashboard):
 
 
 class EmbeddedLogStageConsoleStream(_console.StageConsoleStream):
-    """Separate a logger record appended directly after a tqdm redraw."""
+    """Separate logger records from tqdm and keep Scout heartbeats in-place."""
 
     def _emit(self, value: str) -> None:
         raw = _console._without_ansi(value)
         text = raw.strip()
+
+        # Scout's ProgressMonitor output is dashboard state, never a permanent
+        # operator line.  Be deliberately tolerant of odd framing here: if a
+        # valid heartbeat has acquired an unexpected prefix, consume the
+        # Progress payload directly instead of letting it fall through as text.
+        if self._mode == "SCOUT":
+            marker = text.find(_PROGRESS_MARKER)
+            if marker >= 0:
+                message = text[marker:]
+                if self._scout.consume_progress(message):
+                    self._draw_dashboard()
+                    return
+
         embedded = _EMBEDDED_LOG_START_RE.search(text)
         if embedded is not None and embedded.start() > 0:
             prefix = text[: embedded.start()].rstrip()
