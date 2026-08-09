@@ -15,16 +15,82 @@ and model dependencies are much heavier:
 python -m pip install -r pipeline/requirements-docling.txt
 ```
 
-## Run
+## Recommended durable run
 
-Start with one document or a small sample:
+For corpus work, use the supervisor rather than a long-lived multi-document
+Docling worker:
+
+```bash
+python pipeline/regdocs_3_docling_supervisor.py
+```
+
+The supervisor is intentionally **single-threaded**. It launches exactly one
+child process for exactly one document, blocks until that child exits, then
+launches the next child. There is never more than one Docling conversion in
+flight.
+
+```text
+supervisor
+    |
+    +--> child: document A ---- exits ----+
+    |                                     |
+    +--> child: document B ---- exits ----+
+    |                                     |
+    +--> child: document C ---- exits ----+
+                                          v
+                                   continue until done
+```
+
+This isolates native-library crashes, segmentation faults, process aborts, and
+OOM kills to one document. A child crash does not destroy the supervisor or
+completed work. Successful analyses are committed to the shared `analyses`
+ledger and are skipped on restart.
+
+Supervisor progress is also stored atomically in:
+
+```text
+workspace/3_analyze/docling/supervisor-state.json
+```
+
+The state records per-document attempts, exit codes/signals, timestamps, and
+quarantine state. A document is retried up to `--max-attempts` (default 3).
+After repeated failure it is quarantined so one pathological file cannot block
+the rest of the corpus.
+
+Inspect progress with:
+
+```bash
+python pipeline/regdocs_3_docling_supervisor.py --status
+```
+
+Retry quarantined documents in a later pass with:
+
+```bash
+python pipeline/regdocs_3_docling_supervisor.py --retry-quarantined
+```
+
+For a bounded pilot:
+
+```bash
+python pipeline/regdocs_3_docling_supervisor.py --max-documents 10
+```
+
+Restarting the same supervisor command is safe: successful current
+`file_sha256 + analyzer_id + Docling version` identities are read from the
+ledger and are not resubmitted.
+
+## Direct worker
+
+The underlying worker can still be run directly for debugging or one-off tests:
 
 ```bash
 python pipeline/regdocs_3_docling.py --document-id 4647200
 python pipeline/regdocs_3_docling.py --limit 10
 ```
 
-Use `--dry-run` to inspect selection without conversion.
+Use `--dry-run` to inspect selection without conversion. For larger runs,
+prefer the supervisor because a native crash in a direct multi-document worker
+would terminate that process.
 
 ## Artifacts and ledger identity
 
