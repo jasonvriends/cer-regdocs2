@@ -71,6 +71,10 @@ _INDEX_UPLOAD_RE = re.compile(
     r"^Uploaded batch\s+(?P<batch>\d+):\s+(?P<count>[\d,]+)\s+chunks\s+"
     r"\((?P<uploaded>[\d,]+)/(?P<total>[\d,]+)\)$"
 )
+_INDEX_BATCH_PLAN_RE = re.compile(
+    r"^Upload plan:\s+(?P<batches>[\d,]+)\s+batch\(es\)\s+at up to\s+"
+    r"(?P<batch_size>[\d,]+)\s+chunks\s+/\s+(?P<batch_mib>[\d.]+)\s+MiB\.$"
+)
 _INDEX_FINAL_RE = re.compile(
     r"^Indexed\s+(?P<uploaded>[\d,]+)\s+chunk\(s\) into\s+.+\s+in\s+"
     r"(?P<batches>[\d,]+)\s+batch\(es\)\.$"
@@ -392,6 +396,11 @@ class IndexDashboard:
             # Do not activate yet: this same validation happens during `index plan`.
             return False, False
 
+        batch_plan = _INDEX_BATCH_PLAN_RE.match(text)
+        if batch_plan:
+            self.batch = (0, _integer(batch_plan.group("batches")))
+            return False, False
+
         if self._validated and _INDEX_READY_RE.match(text):
             self.active = True
             return True, False
@@ -399,7 +408,8 @@ class IndexDashboard:
         uploaded = _INDEX_UPLOAD_RE.match(text)
         if uploaded:
             self.active = True
-            self.batch = (int(uploaded.group("batch")), None)
+            batch_total = self.batch[1] if self.batch is not None else None
+            self.batch = (int(uploaded.group("batch")), batch_total)
             self.chunks = (
                 _integer(uploaded.group("uploaded")),
                 _integer(uploaded.group("total")),
