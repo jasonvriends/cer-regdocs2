@@ -1,3 +1,4 @@
+import { DefaultAzureCredential } from "@azure/identity";
 import { AzureKeyCredential, SearchClient } from "@azure/search-documents";
 
 export type RegdocsSearchDocument = {
@@ -85,14 +86,14 @@ let cachedSignature = "";
 
 function searchConfig() {
   const endpoint = process.env.AZURE_SEARCH_ENDPOINT?.trim();
-  const indexName = process.env.AZURE_SEARCH_INDEX?.trim() || "regdocs-chunks";
+  const indexName =
+    process.env.AZURE_SEARCH_INDEX?.trim() ||
+    process.env.AZURE_SEARCH_INDEX_NAME?.trim() ||
+    "regdocs-chunks";
   const apiKey = process.env.AZURE_SEARCH_API_KEY?.trim();
 
   if (!endpoint) {
     throw new Error("AZURE_SEARCH_ENDPOINT is not configured");
-  }
-  if (!apiKey) {
-    throw new Error("AZURE_SEARCH_API_KEY is not configured");
   }
 
   return { endpoint, indexName, apiKey };
@@ -100,13 +101,17 @@ function searchConfig() {
 
 function getSearchClient() {
   const config = searchConfig();
-  const signature = `${config.endpoint}|${config.indexName}|${config.apiKey}`;
+  const authentication = config.apiKey ? "api-key" : "managed-identity";
+  const signature = `${config.endpoint}|${config.indexName}|${authentication}|${config.apiKey ?? ""}`;
 
   if (!cachedClient || signature !== cachedSignature) {
+    const credential = config.apiKey
+      ? new AzureKeyCredential(config.apiKey)
+      : new DefaultAzureCredential();
     cachedClient = new SearchClient<RegdocsSearchDocument>(
       config.endpoint,
       config.indexName,
-      new AzureKeyCredential(config.apiKey),
+      credential,
     );
     cachedSignature = signature;
   }

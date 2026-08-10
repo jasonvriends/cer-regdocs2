@@ -16,6 +16,7 @@ __pycache__/
 /ui/node_modules/
 /ui/.next/
 /ui/out/
+/ui/*.tsbuildinfo
 /ui/.env*
 !/ui/.env.local.example
 /ui/npm-debug.log*

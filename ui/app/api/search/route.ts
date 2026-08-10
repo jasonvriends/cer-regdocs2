@@ -46,8 +46,7 @@ export async function GET(request: Request) {
   } catch (error) {
     console.error("REGDOCS search failed", error);
     const message = error instanceof Error ? error.message : "Search failed";
-    const configurationError =
-      message.includes("AZURE_SEARCH_ENDPOINT") || message.includes("AZURE_SEARCH_API_KEY");
+    const configurationError = message.includes("AZURE_SEARCH_ENDPOINT");
 
     return Response.json(
       {

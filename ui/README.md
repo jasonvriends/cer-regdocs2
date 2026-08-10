@@ -10,7 +10,7 @@ The current workbench includes:
 
 - full-stack Next.js/TypeScript application under `ui/`;
 - three-pane Search / Evidence / Ask-Analyze layout;
-- server-side Azure AI Search access using an API key;
+- server-side Azure AI Search access using App Service managed identity or a local query key;
 - no Azure Search credentials shipped to the browser;
 - global corpus search;
 - Filing Dossier, Company, Project, and Document X-Ray search lenses;
@@ -27,17 +27,19 @@ The Ask surface remains intentionally disabled until the grounded Microsoft Foun
 
 ## Required configuration
 
-Only three server-side application settings are required:
+The endpoint and index name select the Azure AI Search index:
 
 ```text
 AZURE_SEARCH_ENDPOINT=https://<service-name>.search.windows.net
 AZURE_SEARCH_INDEX=regdocs-chunks
-AZURE_SEARCH_API_KEY=<query-key-or-admin-key>
 ```
 
-A Search query key is preferred because this application only reads the index. An admin key also works but grants permissions the UI does not need.
+Authentication is chosen automatically:
 
-Do not put the key in a variable beginning with `NEXT_PUBLIC_`. Next.js exposes `NEXT_PUBLIC_*` values to browser code.
+- In Azure App Service, leave `AZURE_SEARCH_API_KEY` unset. The included infrastructure grants the web app's managed identity the read-only `Search Index Data Reader` role.
+- For local development, either sign in with Azure CLI and use an identity that has `Search Index Data Reader`, or set `AZURE_SEARCH_API_KEY` to a read-only query key.
+
+An admin key works locally but grants permissions the UI does not need. Never put a key in a variable beginning with `NEXT_PUBLIC_`; Next.js exposes `NEXT_PUBLIC_*` values to browser code.
 
 ## Local development
 
@@ -54,7 +56,7 @@ npm install
 cp .env.local.example .env.local
 ```
 
-Edit `.env.local` with the real Search endpoint, index name, and key, then run:
+Edit `.env.local` with the real Search endpoint, index name, and (if needed) query key, then run:
 
 ```bash
 npm run dev
@@ -87,35 +89,86 @@ A configured health response looks like:
   "status": "ok",
   "azureSearch": {
     "endpointConfigured": true,
-    "apiKeyConfigured": true,
-    "indexName": "regdocs-chunks"
+        "authentication": "managed_identity",
+        "indexName": "regdocs-chunks"
   }
 }
 ```
 
-The API key is never included in the health response.
+The health response never includes an API key.
 
 ## Deploy to Azure App Service
 
-Deploy the **contents of the `ui/` directory** as the Node.js application. The runtime must support Node.js 22 or newer.
+The repository includes a repeatable deployment under `ui/azure/`. It creates:
 
-Configure these App Service application settings:
+- a Linux App Service plan (B1 by default);
+- a Node.js 24 App Service with HTTPS-only traffic and a health check;
+- a system-assigned managed identity;
+- a read-only Azure AI Search role assignment;
+- support for managed-identity requests on a key-only Search service while preserving its existing key access;
+- the required endpoint and index application settings.
+
+It then builds, type-checks, packages, and ZIP-deploys the standalone Next.js server. No Search key is stored in App Service.
+
+Prerequisites:
+
+- an Azure subscription and an existing Azure AI Search service/index populated by Stage 5;
+- permission to create a resource group, App Service resources, and role assignments on the Search service;
+- Azure CLI, Node.js 22 or newer, npm, and `zip` (Azure Cloud Shell is also suitable if these are available there).
+
+Sign in and run this from the repository root:
+
+```bash
+az login
+./ui/azure/deploy.sh \
+  <app-resource-group> \
+  <globally-unique-app-name> \
+  <search-resource-group> \
+  <search-service-name> \
+  regdocs-chunks \
+  canadacentral
+```
+
+For example:
+
+```bash
+./ui/azure/deploy.sh \
+  regdocs-atlas-web \
+  my-regdocs-atlas \
+  regdocs-data \
+  my-search-service \
+  regdocs-chunks \
+  canadacentral
+```
+
+The script prints the website URL and two verification URLs. Azure role assignments can take several minutes to propagate; an initial search `403` can be transient.
+
+The App Service plan is a billable Azure resource. When the site is no longer needed, remove its resource group from the Azure portal after confirming that the group contains no data resources you want to retain.
+
+### What to look up in the Azure portal
+
+Open the existing **Azure AI Search** resource and note:
+
+- its resource group;
+- its service name (not the full endpoint URL);
+- the index name under **Search management > Indexes**.
+
+The app resource group may be new. The app name must be globally unique because it becomes `<app-name>.azurewebsites.net`.
+
+The template creates a publicly reachable website. If the indexed material should not be public, enable App Service Authentication with Microsoft Entra ID before sharing the URL.
+
+### Manual App Service configuration
+
+If the resources are created manually instead of with the template, use Node.js 24 LTS, set the startup command to `node server.js`, and deploy the prepared contents of `.next/standalone` together with `.next/static`. Configure:
 
 ```text
 AZURE_SEARCH_ENDPOINT
 AZURE_SEARCH_INDEX
-AZURE_SEARCH_API_KEY
 ```
 
-Use the normal production commands:
+Enable the web app's managed identity and assign it `Search Index Data Reader` on the Search service. No Python pipeline process is required in the web application.
 
-```bash
-npm install
-npm run build
-npm start
-```
-
-No Python pipeline process is required in the web application. The web app only needs network access to the Azure AI Search service and the three settings above.
+If searches return `403` after role propagation, confirm that Azure AI Search allows role-based access under **Settings > Keys**. If the Search service restricts public network access, the App Service also needs an allowed outbound path or private-network integration.
 
 ## Search API
 
