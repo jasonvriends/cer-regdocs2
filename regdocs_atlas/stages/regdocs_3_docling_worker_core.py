@@ -177,7 +177,7 @@ def upsert_analysis(
             started_at,finished_at,raw_json_path,markdown_path,page_count,table_count,
             section_count,warning_count,elapsed_seconds,attempt_count,artifact_source,
             error_code,error_message,created_at,updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'docling',?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'docling',?,?,?,?)
         ON CONFLICT(file_id,file_sha256,analyzer_id,api_version) DO UPDATE SET
             run_id=excluded.run_id,status=excluded.status,started_at=excluded.started_at,
             finished_at=excluded.finished_at,raw_json_path=excluded.raw_json_path,
