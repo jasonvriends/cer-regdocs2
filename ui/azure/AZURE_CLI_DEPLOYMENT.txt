@@ -1,0 +1,245 @@
+REGDOCS ATLAS UI - MANUAL AZURE APP SERVICE DEPLOYMENT
+======================================================
+
+Run these commands in a Bash shell from the repository root while on the
+ui-phase-1-scaffold branch. Read each section before running it.
+
+This deployment creates a public website and a billable Linux B1 App Service
+plan. It does not create or modify the regdocs-chunks index contents.
+
+Prerequisites
+-------------
+
+- Azure CLI (az)
+- Node.js 22 or newer and npm
+- zip and curl
+- Permission to create App Service resources and assign an Azure role on the
+  existing Azure AI Search service
+
+
+1. Get the current branch
+-------------------------
+
+git switch ui-phase-1-scaffold
+git pull --ff-only origin ui-phase-1-scaffold
+
+
+2. Set deployment values
+------------------------
+
+# Replace the three values inside angle brackets before continuing.
+# Find SUBSCRIPTION_ID and SEARCH_RESOURCE_GROUP on the Azure AI Search
+# resource's Overview page in the Azure portal.
+
+SUBSCRIPTION_ID="<your-azure-subscription-id>"
+SEARCH_RESOURCE_GROUP="<resource-group-containing-the-search-service>"
+
+# This Search service and index were read from the latest local Stage 5 run.
+SEARCH_SERVICE_NAME="regdocs-atlas-canadacentral"
+SEARCH_INDEX_NAME="regdocs-chunks"
+
+# APP_NAME must be globally unique because it becomes APP_NAME.azurewebsites.net.
+APP_NAME="<globally-unique-app-name>"
+APP_RESOURCE_GROUP="regdocs-atlas-web"
+LOCATION="canadacentral"
+APP_SERVICE_SKU="B1"
+
+
+3. Sign in and select the subscription
+--------------------------------------
+
+az login
+az account set --subscription "$SUBSCRIPTION_ID"
+az account show --query "{subscription:name, subscriptionId:id, signedInAs:user.name}" --output table
+
+
+4. Confirm the existing Azure AI Search service
+-----------------------------------------------
+
+az search service show \
+  --resource-group "$SEARCH_RESOURCE_GROUP" \
+  --name "$SEARCH_SERVICE_NAME" \
+  --query "{name:name, location:location, disableLocalAuth:disableLocalAuth, authOptions:authOptions, publicNetworkAccess:publicNetworkAccess}" \
+  --output json
+
+# The following check only changes an API-key-only service. In that case it
+# enables "Both": API keys continue working for the Python indexer, and managed
+# identity becomes available to the web app. An existing roles-only or "Both"
+# configuration is left unchanged.
+
+LOCAL_AUTH_DISABLED=$(az search service show \
+  --resource-group "$SEARCH_RESOURCE_GROUP" \
+  --name "$SEARCH_SERVICE_NAME" \
+  --query disableLocalAuth \
+  --output tsv)
+
+AAD_FAILURE_MODE=$(az search service show \
+  --resource-group "$SEARCH_RESOURCE_GROUP" \
+  --name "$SEARCH_SERVICE_NAME" \
+  --query authOptions.aadOrApiKey.aadAuthFailureMode \
+  --output tsv)
+
+if [[ "${LOCAL_AUTH_DISABLED,,}" != "true" && -z "$AAD_FAILURE_MODE" ]]; then
+  az search service update \
+    --resource-group "$SEARCH_RESOURCE_GROUP" \
+    --name "$SEARCH_SERVICE_NAME" \
+    --aad-auth-failure-mode http401WithBearerChallenge \
+    --auth-options aadOrApiKey \
+    --output none
+else
+  echo "Azure AI Search already accepts managed-identity authentication."
+fi
+
+
+5. Create the empty App Service resource group
+----------------------------------------------
+
+az group create \
+  --name "$APP_RESOURCE_GROUP" \
+  --location "$LOCATION" \
+  --output table
+
+
+6. Preview the infrastructure changes
+-------------------------------------
+
+# "what-if" is read-only. Review its output before proceeding.
+# The template will create one Linux App Service plan, one web app with a
+# system-assigned managed identity, and one Search Index Data Reader assignment.
+
+az deployment group what-if \
+  --resource-group "$APP_RESOURCE_GROUP" \
+  --template-file ui/azure/main.bicep \
+  --parameters \
+    appName="$APP_NAME" \
+    location="$LOCATION" \
+    searchResourceGroupName="$SEARCH_RESOURCE_GROUP" \
+    searchServiceName="$SEARCH_SERVICE_NAME" \
+    searchIndexName="$SEARCH_INDEX_NAME" \
+    appServiceSku="$APP_SERVICE_SKU"
+
+
+7. Create or update the App Service resources
+---------------------------------------------
+
+az deployment group create \
+  --name "regdocs-atlas-ui" \
+  --resource-group "$APP_RESOURCE_GROUP" \
+  --template-file ui/azure/main.bicep \
+  --parameters \
+    appName="$APP_NAME" \
+    location="$LOCATION" \
+    searchResourceGroupName="$SEARCH_RESOURCE_GROUP" \
+    searchServiceName="$SEARCH_SERVICE_NAME" \
+    searchIndexName="$SEARCH_INDEX_NAME" \
+    appServiceSku="$APP_SERVICE_SKU" \
+  --query properties.outputs \
+  --output json
+
+
+8. Inspect what Azure created
+-----------------------------
+
+az webapp show \
+  --resource-group "$APP_RESOURCE_GROUP" \
+  --name "$APP_NAME" \
+  --query "{name:name, host:defaultHostName, state:state, httpsOnly:httpsOnly, identity:identity.principalId}" \
+  --output table
+
+APP_PRINCIPAL_ID=$(az webapp identity show \
+  --resource-group "$APP_RESOURCE_GROUP" \
+  --name "$APP_NAME" \
+  --query principalId \
+  --output tsv)
+
+SEARCH_SCOPE=$(az search service show \
+  --resource-group "$SEARCH_RESOURCE_GROUP" \
+  --name "$SEARCH_SERVICE_NAME" \
+  --query id \
+  --output tsv)
+
+az role assignment list \
+  --assignee "$APP_PRINCIPAL_ID" \
+  --scope "$SEARCH_SCOPE" \
+  --output table
+
+az webapp config appsettings list \
+  --resource-group "$APP_RESOURCE_GROUP" \
+  --name "$APP_NAME" \
+  --query "[?starts_with(name, 'AZURE_SEARCH_') || name == 'NODE_ENV' || name == 'WEBSITE_NODE_DEFAULT_VERSION'].{name:name,value:value}" \
+  --output table
+
+
+9. Build and package the UI locally
+-----------------------------------
+
+cd ui
+npm ci
+npm run typecheck
+npm run build
+
+DEPLOY_DIR=$(mktemp -d)
+mkdir -p "$DEPLOY_DIR/app/.next"
+cp -R .next/standalone/. "$DEPLOY_DIR/app/"
+cp -R .next/static "$DEPLOY_DIR/app/.next/static"
+
+if [ -d public ]; then
+  cp -R public "$DEPLOY_DIR/app/public"
+fi
+
+(cd "$DEPLOY_DIR/app" && zip -qr "$DEPLOY_DIR/regdocs-atlas-ui.zip" .)
+cd ..
+
+
+10. Deploy the tested package and restart the website
+-----------------------------------------------------
+
+az webapp deploy \
+  --resource-group "$APP_RESOURCE_GROUP" \
+  --name "$APP_NAME" \
+  --src-path "$DEPLOY_DIR/regdocs-atlas-ui.zip" \
+  --type zip \
+  --clean true \
+  --output table
+
+az webapp restart \
+  --resource-group "$APP_RESOURCE_GROUP" \
+  --name "$APP_NAME"
+
+
+11. Verify the live website and Azure AI Search connection
+----------------------------------------------------------
+
+APP_HOST=$(az webapp show \
+  --resource-group "$APP_RESOURCE_GROUP" \
+  --name "$APP_NAME" \
+  --query defaultHostName \
+  --output tsv)
+
+APP_URL="https://${APP_HOST}"
+echo "$APP_URL"
+
+curl --fail-with-body "$APP_URL/api/health"
+curl --fail-with-body "$APP_URL/api/search?q=pipeline&top=5"
+
+# A new role assignment can take several minutes to become effective. If the
+# health endpoint succeeds but Search initially returns 401 or 403, wait a few
+# minutes and retry the Search URL.
+
+
+12. View logs if the site does not start
+----------------------------------------
+
+az webapp log tail \
+  --resource-group "$APP_RESOURCE_GROUP" \
+  --name "$APP_NAME"
+
+# Press Ctrl+C to stop following the logs.
+
+
+Future UI deployments
+---------------------
+
+For later code updates, do not recreate the Azure resources. Pull the branch,
+then repeat sections 9, 10, and 11. Run the what-if and deployment commands
+again only when ui/azure/main.bicep changes or the Azure configuration changes.
