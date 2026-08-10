@@ -6,7 +6,6 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 VERSION_PATH = PROJECT_ROOT / "VERSION"
-RELEASE_NOTES_PATH = PROJECT_ROOT / "RELEASE_NOTES.md"
 
 
 def release_version() -> str:
