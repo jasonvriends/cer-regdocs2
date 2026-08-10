@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Stage 5: publish normalized REGDOCS chunks to Azure AI Search."""
+"""Stage 5: publish normalized REGDOCS chunks to Azure AI Search.
+
+Canonical implementation now lives in ``regdocs_atlas.stages``. The historical
+``pipeline/regdocs_5_index_core.py`` implementation has been retired.
+"""
 from __future__ import annotations
 
 import argparse
@@ -14,9 +18,10 @@ from itertools import zip_longest
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional, Sequence
 
-from regdocs_paths import INDEX_DIR, NORMALIZE_DIR, resolve_stored_path, stored_path
+from ..paths import INDEX_DIR, NORMALIZE_DIR, resolve_stored_path, stored_path
+from ..version import release_version
 
-SCRIPT_VERSION = "5.0.1"
+COMPONENT_VERSION = "5.0.1"
 DEFAULT_INDEX_NAME = "regdocs-chunks"
 DEFAULT_BATCH_SIZE = 500
 DEFAULT_BATCH_BYTES = 12 * 1024 * 1024
@@ -283,7 +288,7 @@ def write_manifest(output_dir: Path, args: argparse.Namespace, meta: dict[str, A
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "last_run.json"
     payload = {
-        "stage": "index", "script_version": SCRIPT_VERSION, "status": status,
+        "stage": "index", "component_version": COMPONENT_VERSION, "status": status,
         "started_at": started, "finished_at": utcnow(), "elapsed_seconds": round(elapsed, 3),
         "endpoint": args.endpoint, "index_name": args.index_name,
         "authentication": "api_key" if args.api_key else "default_azure_credential",
@@ -387,10 +392,10 @@ def run(args: argparse.Namespace) -> int:
         if callable(close): close()
 
 
-def main() -> int:
-    args = parser().parse_args()
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parser().parse_args(list(argv) if argv is not None else None)
     if args.version:
-        print(SCRIPT_VERSION); return 0
+        print(release_version()); return 0
     try: return run(args)
     except Exception as exc:
         print(f"FATAL: {exc}", file=sys.stderr); return 1

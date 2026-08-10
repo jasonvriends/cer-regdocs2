@@ -1,0 +1,18 @@
+# Runtime dependencies for REGDOCS Atlas.
+# Python 3.10+; current development environment uses Python 3.12.
+# Install once for all pipeline stages:
+#   python -m pip install -r requirements.txt
+
+beautifulsoup4==4.15.0
+httpx==0.28.1
+lxml==6.1.1
+tqdm==4.68.4
+
+azure-ai-contentunderstanding==1.1.0
+azure-core==1.41.0
+azure-identity==1.25.3
+pypdf==6.14.2
+
+docling>=2,<3
+
+azure-search-documents==12.0.0

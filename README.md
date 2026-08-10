@@ -1,495 +1,618 @@
-# REGDOCS Processing Pipeline
+# REGDOCS Atlas
 
-An auditable five-stage pipeline for collecting public regulatory records from
-the Canada Energy Regulator (CER) REGDOCS registry, turning them into a
-normalized provenance-preserving corpus, and publishing searchable chunks to
-Azure AI Search.
+REGDOCS Atlas is a Python pipeline for collecting public records from the Canada Energy Regulator (CER) REGDOCS system and turning them into data that can be searched, analyzed, and reused.
 
-## Pipeline
+You do **not** need to be a Python programmer to operate it. Most work is done with commands that start with:
 
-```text
-Canada Energy Regulator REGDOCS
-              |
-              v
-1. Scout / catalogue
-   metadata + raw HTML evidence
-              |
-              v
-2. Download / verify
-   source files + hashes + versions
-              |
-              v
-3. Analyze
-   Azure Content Understanding or local Docling
-   provider-native artifacts + durable per-document workers
-              |
-              v
-4. Normalize
-   documents + pages + chunks + tables + provenance
-              |
-              v
-5. Index
-   Azure AI Search chunk index
-   full-text + filters/facets, later semantic/vector/RAG
+```bash
+python pipeline.py
 ```
 
-Stages 1–4 share one SQLite pipeline ledger. Stage 5 treats Azure AI Search as a
-rebuildable derivative retrieval index rather than a new source of truth.
-Source evidence, downloaded files, analysis artifacts, normalized projections,
-and search publication remain separate so each layer can be audited and rebuilt
-independently.
+If you are new to the project, read this file first. When you need every command and every switch, use **[SYNTAX.md](SYNTAX.md)**.
 
-## Repository layout
+---
+
+## What does this project do?
+
+Think of REGDOCS Atlas as a five-step assembly line:
 
 ```text
-.
-├── README.md
-├── ROADMAP.md
-├── pipeline/
-│   ├── requirements.txt
-│   ├── regdocs_paths.py
-│   ├── regdocs_1_scout.py
-│   ├── regdocs_1_scout.md
-│   ├── regdocs_2_download.py
-│   ├── regdocs_2_download.md
-│   ├── regdocs_3_azure.py
-│   ├── regdocs_3_azure_worker.py
-│   ├── regdocs_3_azure.md
-│   ├── regdocs_3_docling.py
-│   ├── regdocs_3_docling_worker.py
-│   ├── regdocs_3_docling.md
-│   ├── regdocs_4_normalize.py
-│   ├── regdocs_4_normalize.md
-│   ├── regdocs_5_index.py
-│   └── regdocs_5_index.md
-├── database/
-│   ├── regdocs.db
-│   ├── locks/
-│   └── backups/
-└── workspace/
-    ├── 1_scout/
-    │   ├── raw/regdocs/
-    │   └── run/
-    ├── 2_download/
-    │   ├── files/
-    │   │   ├── .partial/
-    │   │   └── _versions/
-    │   └── run/
-    ├── 3_analyze/
-    │   ├── content-understanding/
-    │   │   ├── raw/
-    │   │   └── markdown/
-    │   └── docling/
-    ├── 4_normalize/
-    │   ├── documents.jsonl
-    │   ├── pages.jsonl
-    │   ├── chunks.jsonl
-    │   ├── tables.jsonl
-    │   └── provenance.jsonl
-    └── 5_index/
-        └── last_run.json
+CER REGDOCS website
+        │
+        ▼
+1. SCOUT       Find records and save evidence about what REGDOCS returned
+        │
+        ▼
+2. DOWNLOAD    Download the source files, such as PDFs
+        │
+        ▼
+3. ANALYZE     Read the files with Azure Content Understanding or Docling
+        │
+        ▼
+4. NORMALIZE   Turn analyzer output into one consistent local format
+        │
+        ▼
+5. INDEX       Publish search-ready chunks to Azure AI Search
 ```
 
-`pipeline/` is version-controlled implementation and documentation.
-`database/` and `workspace/` are persistent local operational state and are
-ignored by Git. They are not disposable caches.
+The project also keeps a local SQLite database at `database/regdocs.db`. That database is the pipeline's **ledger**: it records what has been found, downloaded, analyzed, normalized, and processed.
 
-Each stage script keeps only a short purpose, invocation syntax, and pointer in
-its module header. Operational policy, examples, recovery behavior, and known
-limitations live in the adjacent same-named Markdown file.
+### The five stages in plain language
 
-SQLite may create `regdocs.db-wal`, `regdocs.db-shm`, or
-`regdocs.db-journal` beside the main database while it is in use.
+| Stage | Name | What it does | Uses the internet? | Can cost money? |
+|---|---|---|---:|---:|
+| 1 | Scout | Finds REGDOCS records and saves source evidence | Yes | No |
+| 2 | Download | Downloads the actual source files | Yes | No |
+| 3 | Analyze | Extracts document structure and text | Azure: yes; Docling: no | **Azure can** |
+| 4 | Normalize | Converts analysis into consistent JSONL files | No | No |
+| 5 | Index | Publishes searchable chunks to Azure AI Search | Yes | Azure Search charges may apply |
 
-## Stages
+---
 
-### 1 — Scout
+# The most important safety rule
 
-`pipeline/regdocs_1_scout.py` searches REGDOCS, expands explicit Folder and
-Compound Document membership, collects facets and detail metadata, and
-preserves successful source HTML responses by SHA-256.
+## Protect `workspace/3_analyze/`
 
-Primary outputs:
+Azure document analysis can be expensive to reproduce. Successful Stage 3 results are saved under:
 
 ```text
-database/regdocs.db
-workspace/1_scout/raw/regdocs/
-workspace/1_scout/run/
+workspace/3_analyze/
 ```
 
-Detailed documentation: [Stage 1 — Scout](pipeline/regdocs_1_scout.md).
+Do not delete that directory just because it is not stored in Git.
 
-### 2 — Download
+Also do **not** run this command in a working REGDOCS Atlas checkout:
 
-`pipeline/regdocs_2_download.py` selects eligible files from the ledger,
-downloads and validates their bytes, records hashes and detected types,
-reconciles existing files, and archives replaced versions.
-
-Primary outputs:
-
-```text
-database/regdocs.db
-workspace/2_download/files/
-workspace/2_download/run/
+```bash
+git clean -fdx
 ```
 
-Detailed documentation: [Stage 2 — Download](pipeline/regdocs_2_download.md).
+That command can delete ignored files, including the local `workspace/` and `database/` directories.
 
-### 3 — Analyze
-
-Stage 3 has provider-specific analyzers.
-
-`pipeline/regdocs_3_azure.py` is the durable Azure AI Content Understanding
-supervisor. It launches exactly one `regdocs_3_azure_worker.py` child per
-document, preserves raw JSON and Markdown, and records analysis status and
-provenance in SQLite. If a worker segfaults or is OOM-killed, the supervisor can
-retry that document in a fresh process and quarantine repeated crash cases
-without terminating the remaining queue.
-
-PDFs over 300 pages are counted locally and analyzed automatically in inclusive
-`Content-Range` requests of at most 300 pages. The original PDF is not
-physically split. Each successful range is saved independently so an interrupted
-large document can normally resume without rebilling completed ranges.
-
-`pipeline/regdocs_3_docling.py` is the local Docling supervisor and similarly
-isolates each document in `regdocs_3_docling_worker.py`.
-
-Primary outputs:
+The important local data is:
 
 ```text
-database/regdocs.db
-workspace/3_analyze/content-understanding/
-workspace/3_analyze/docling/
+workspace/1_scout/       REGDOCS source evidence and Scout manifests
+workspace/2_download/    downloaded source files and metadata
+workspace/3_analyze/     Azure and Docling analysis artifacts
+database/regdocs.db      local SQLite pipeline ledger
 ```
 
-Large Azure PDFs additionally create per-range raw JSON and metadata below the
-canonical raw JSON's `<sha256>.parts/` directory.
-
-Detailed documentation:
-
-- [Stage 3 — Azure](pipeline/regdocs_3_azure.md)
-- [Stage 3 — Docling](pipeline/regdocs_3_docling.md)
-
-### 4 — Normalize
-
-`pipeline/regdocs_4_normalize.py` locally converts successful layout analyses
-into deterministic JSONL projections for documents, pages, chunks, tables, and
-chunk-to-source provenance. It makes no network calls. Stage 4 processes each
-Azure `contents[]` entry independently, including the multiple entries produced
-when Stage 3 recombines a ranged large-PDF analysis.
-
-Stage 4.1.0 qualifies every paragraph/table/figure provenance pointer with its
-`content_index`, for example `/contents/2/paragraphs/12`, while retaining the
-original Azure-local pointer as `local_element`. This makes provenance
-unambiguous across large PDFs without losing original page numbers or polygon
-geometry.
-
-Primary outputs:
+Stage 4 and Stage 5 are designed to be recreated from earlier results:
 
 ```text
-database/regdocs.db
 workspace/4_normalize/
+workspace/5_index/
 ```
 
-Detailed documentation: [Stage 4 — Normalize](pipeline/regdocs_4_normalize.md).
+The SQLite ledger can also be rebuilt from the durable Stage 1-3 artifacts.
 
-### 5 — Index
+---
 
-`pipeline/regdocs_5_index.py` validates `chunks.jsonl` against
-`provenance.jsonl`, maps each chunk into an Azure AI Search document, creates the
-search index when needed, and pushes documents in bounded batches.
+# Install the project
 
-Stage 5.0 starts with full-text search plus metadata filters and facets. It keeps
-stable REGDOCS `chunk_id`, document/page metadata, source URLs, source hashes,
-and compact globally qualified element paths in the search index. Detailed
-polygons remain in Stage 4 provenance and can be resolved by `chunk_id`.
+These examples assume Linux or WSL. Run them from the repository root.
 
-Primary outputs:
-
-```text
-Azure AI Search index: regdocs-chunks
-workspace/5_index/last_run.json
-```
-
-Azure AI Search is a derivative index. Rebuilding it does not replace or delete
-Stages 1–4 source evidence.
-
-Detailed documentation: [Stage 5 — Index](pipeline/regdocs_5_index.md).
-
-## JSON, JSONL, and Markdown
-
-Stage 3 Azure raw `.json` is the canonical machine-readable Azure analysis
-result. It contains pages, paragraphs, tables, sections, spans, source
-regions/polygons, Markdown, warnings, and analyzer metadata.
-
-Stage 3 Azure `.md` is a human-readable derivative of that JSON. It is
-convenient for reading and inspection but does not preserve the full
-structural/coordinate contract.
-
-Stage 4 `.jsonl` files contain one JSON record per line. `chunks.jsonl` is the
-primary Stage 5 search input, joined with compact identities from
-`provenance.jsonl`. Stage 5 does not directly index the Stage 3 Markdown file.
-
-## Ledger
-
-SQLite is the Stage 1–4 processing ledger, not the final search database. The
-acquisition stages own five base tables:
-
-| Table | Purpose |
-|---|---|
-| `documents` | REGDOCS identity, metadata, relationships, and stage status |
-| `runs` | Run parameters, progress, heartbeat, counters, and summaries |
-| `errors` | Structured stage warnings and failures |
-| `raw_snapshots` | Hashes and paths for preserved REGDOCS HTML |
-| `files` | Downloaded versions, hashes, types, and current-file state |
-
-Downstream processing stages add:
-
-| Table | Purpose |
-|---|---|
-| `analyses` | Stage 3 analyzer identity, artifact paths, status, and counts |
-| `normalizations` | Stage 4 version/config identity, status, hashes, and counts |
-
-Stage 5 currently writes a local `last_run.json` publication manifest rather
-than adding a SQLite table. Azure Search remains rebuildable from Stage 4.
-
-## Quick start
-
-Create and activate a virtual environment:
+## 1. Create a Python virtual environment
 
 ```bash
 python -m venv .venv
+```
+
+A virtual environment gives this project its own Python packages instead of mixing them with packages used by other projects.
+
+## 2. Activate it
+
+```bash
 source .venv/bin/activate
 ```
 
-Python 3.10 or newer is required. Install the shared dependencies for all five
-stages:
+Windows PowerShell:
 
-```bash
-python -m pip install -r pipeline/requirements.txt
+```powershell
+.venv\Scripts\Activate.ps1
 ```
 
-The requirements file includes Scout's parser/progress dependencies, Azure
-Content Understanding and identity libraries for Stage 3, `pypdf` for Stage 3
-PDF page counting, and `azure-search-documents` for Stage 5.
-
-### Run Stage 1
+## 3. Install the required packages
 
 ```bash
-python pipeline/regdocs_1_scout.py
+python -m pip install -r requirements.txt
 ```
 
-Useful read-only commands:
+## 4. Check that the command works
 
 ```bash
-python pipeline/regdocs_1_scout.py --status
-python pipeline/regdocs_1_scout.py --status-json
-python pipeline/regdocs_1_scout.py --check-schema
-python pipeline/regdocs_1_scout.py --audit
+python pipeline.py version
+python pipeline.py help
+python pipeline.py status
 ```
 
-### Run Stage 2
+The current project version is stored in the `VERSION` file.
 
-Preview selection before downloading:
+---
+
+# How the command line is designed
+
+REGDOCS Atlas is intentionally cautious.
+
+A stage name by itself does **not** start work. It shows help instead:
 
 ```bash
-python pipeline/regdocs_2_download.py --dry-run --limit 25
+python pipeline.py scout
+python pipeline.py download
+python pipeline.py analyze azure
+python pipeline.py analyze docling
+python pipeline.py normalize
+python pipeline.py index
 ```
 
-Download eligible files:
+To perform work, you must choose an action such as `run`, `plan`, `publish`, `probe`, or `repair`.
+
+For example:
 
 ```bash
-python pipeline/regdocs_2_download.py
+python pipeline.py download plan
 ```
 
-### Run Stage 3 — Azure
-
-Configure Azure through the shell environment. Do not place an API key in a
-command line, script, or documentation.
+previews downloads, while:
 
 ```bash
-export CONTENTUNDERSTANDING_ENDPOINT="https://<resource>.services.ai.azure.com"
-export CONTENTUNDERSTANDING_KEY="<key>"  # omit when using DefaultAzureCredential
-python pipeline/regdocs_3_azure.py --dry-run --limit 10
-python pipeline/regdocs_3_azure.py --limit 10
+python pipeline.py download run
 ```
 
-No special command is required for a large PDF. For example:
+actually downloads files.
+
+This distinction is especially important for Azure analysis because `run` can submit billable work.
+
+---
+
+# A beginner's first workflow
+
+The normal order is:
+
+```text
+Scout → Download → Analyze → Normalize → Index
+```
+
+You do not always need to run every stage. If a stage is already complete, its planning or status command should show that there is little or nothing left to do.
+
+## Before doing anything large
+
+Start with:
 
 ```bash
-python pipeline/regdocs_3_azure.py --document-id 4647200
+python pipeline.py status
+python pipeline.py scout coverage
 ```
 
-A 986-page PDF is automatically submitted as `1-300`, `301-600`, `601-900`,
-and `901-986`, then recombined into the normal canonical Stage 3 JSON and
-Markdown artifacts.
+`status` shows the overall pipeline state. `scout coverage` shows which filing dates have already been successfully collected.
 
-Stage 3 Azure can incur charges and requires one explicit selection scope. Keep
-initial runs bounded. After reviewing a complete no-Azure-call preview, run all
-remaining eligible files with:
+---
+
+## Stage 1 — Scout
+
+Scout finds REGDOCS records and preserves evidence from the REGDOCS website.
+
+A normal Scout run requires a start date and an end date:
 
 ```bash
-python pipeline/regdocs_3_azure.py --all --dry-run
-python pipeline/regdocs_3_azure.py --all
+python pipeline.py scout run \
+  --start-date 2026-08-01 \
+  --end-date 2026-08-09
 ```
 
-If a document repeatedly crashes the worker, it is quarantined so the queue can
-continue. Retry quarantined documents explicitly with:
+If you want to test a date range first, use `probe` with a small limit:
 
 ```bash
-python pipeline/regdocs_3_azure.py --limit 1000 --retry-quarantined
+python pipeline.py scout probe \
+  --start-date 2026-08-09 \
+  --end-date 2026-08-09 \
+  --limit 5
 ```
 
-See the Azure Stage 3 runbook before a full run, and do not use `--force` unless
-you intend to resubmit matching successful analyses. For a large PDF, `--force`
-also bypasses saved range-part recovery and resubmits every range.
+`probe` still contacts REGDOCS and still saves run/error/raw-snapshot evidence, but it does not update the main document records in the same way as a normal acquisition run.
 
-### Run Stage 3 — Docling
-
-The local Docling provider uses the same one-document-per-child durability
-pattern:
+Useful Scout checks:
 
 ```bash
-python pipeline/regdocs_3_docling.py --max-documents 10
+python pipeline.py scout coverage
+python pipeline.py scout status
+python pipeline.py scout audit
 ```
 
-See [Stage 3 — Docling](pipeline/regdocs_3_docling.md) for its installation and
-runtime requirements.
+---
 
-### Run Stage 4
+## Stage 2 — Download
 
-Normalize one document as a pilot:
+First preview what would be downloaded:
 
 ```bash
-python pipeline/regdocs_4_normalize.py \
-  --document-id 4647200 \
-  --output-dir workspace/4_normalize/pilot
+python pipeline.py download plan
 ```
 
-Normalize all current successful analyses:
+Then download the eligible files:
 
 ```bash
-python pipeline/regdocs_4_normalize.py
+python pipeline.py download run
 ```
 
-Stage 4 replaces all five JSONL files in its selected output directory. Always
-send a filtered `--document-id` or `--limit` run to a separate pilot directory.
-
-Inspect the latest normalization run:
+For a small test:
 
 ```bash
-python pipeline/regdocs_4_normalize.py --status
+python pipeline.py download run --limit 25
 ```
 
-### Run Stage 5
-
-Validate the final normalized corpus without contacting Azure Search:
+For one known document:
 
 ```bash
-python pipeline/regdocs_5_index.py --dry-run
+python pipeline.py download run --document-id 4657417
 ```
 
-Configure Azure AI Search:
+Downloaded files are stored under `workspace/2_download/`.
+
+---
+
+## Stage 3 — Analyze
+
+Stage 3 has two providers.
+
+### Option A: Azure Content Understanding
+
+Azure analysis is the billable path. **Always preview the selection first.**
+
+Preview all currently eligible documents:
 
 ```bash
-export AZURE_SEARCH_ENDPOINT="https://<service-name>.search.windows.net"
-az login
+python pipeline.py analyze azure plan --all
 ```
 
-For initial key-based setup, `AZURE_SEARCH_ADMIN_KEY` is also supported through
-the environment. Do not put the key in a command line.
-
-Create/update the full default index:
+Preview only ten:
 
 ```bash
-python pipeline/regdocs_5_index.py
+python pipeline.py analyze azure plan --limit 10
 ```
 
-Use a different index name for a pilot:
+Analyze one document:
 
 ```bash
-python pipeline/regdocs_5_index.py \
-  --document-id 4647200 \
-  --index-name regdocs-chunks-pilot
+python pipeline.py analyze azure run --document-id 4657417
 ```
 
-Run a keyword smoke test:
+Analyze every currently eligible document:
 
 ```bash
-python pipeline/regdocs_5_index.py --query "caribou habitat"
+python pipeline.py analyze azure run --all
 ```
 
-Run a query with a filter:
+Large PDFs are automatically handled in page ranges small enough for the Azure Content Understanding request limit. Existing valid range artifacts can be reused instead of being submitted again.
+
+### Option B: Docling
+
+Docling runs locally and does not create Azure Content Understanding charges.
+
+Check status:
 
 ```bash
-python pipeline/regdocs_5_index.py \
-  --query "acid rock drainage" \
-  --filter "document_id eq '4647200'"
+python pipeline.py analyze docling status
 ```
 
-For a known full rebuild that must remove stale chunk keys:
+Test one document:
 
 ```bash
-python pipeline/regdocs_5_index.py --recreate-index
+python pipeline.py analyze docling run --max-documents 1
 ```
 
-`--recreate-index` cannot be combined with `--document-id` or `--limit`; use a
-separate pilot index for subsets.
-
-## Verification
-
-Stages 1 and 2 include offline self-tests:
+Run more:
 
 ```bash
-python pipeline/regdocs_1_scout.py --self-test
-python pipeline/regdocs_2_download.py --self-test
+python pipeline.py analyze docling run --max-documents 100
 ```
 
-Useful operational checks include:
+Both Azure and Docling use isolated child processes so a document-level crash is less likely to bring down the whole batch.
+
+---
+
+## Stage 4 — Normalize
+
+Different analyzers produce different output. Normalize converts that output into one consistent structure for pages, chunks, tables, and provenance.
+
+Preview Azure normalization:
 
 ```bash
-python pipeline/regdocs_1_scout.py --audit
-python pipeline/regdocs_2_download.py --status-json
-python pipeline/regdocs_4_normalize.py --status
-python pipeline/regdocs_5_index.py --dry-run
+python pipeline.py normalize plan --provider azure
 ```
 
-For a large-PDF Azure Stage 3 run, verify the reported combined page count
-matches the source PDF page count before proceeding to Stage 4. The Azure
-worker enforces this invariant before publishing a ranged canonical artifact.
+Run it:
 
-For a Stage 4 ranged-PDF pilot, inspect a provenance record with
-`content_index > 0` and verify its evidence pointer begins with the same
-`/contents/<content_index>/` value. The Stage 4 runbook includes a ready-to-run
-verification snippet.
+```bash
+python pipeline.py normalize run --provider azure
+```
 
-After Stage 5 publication, use the CLI `--query` mode or Azure AI Search Search
-Explorer to confirm that results retain `chunk_id`, original document ID, page
-range, and source URL.
+Use several local workers:
 
-## Operational principles
+```bash
+python pipeline.py normalize run --provider azure --concurrency 4
+```
 
-- Preserve `workspace/1_scout/raw/`; it is source evidence, not cache.
-- Treat source-file SHA-256 as the definitive downloaded version identity.
-- Keep acquisition, analysis, normalization, indexing, and later AI layers
-  independently reproducible.
-- Prefer resumable ledger and artifact state, including large-PDF range parts,
-  and atomic filesystem commits.
-- Keep source-document page/geometry provenance and analyzer-element provenance
-  explicit and independently traceable.
-- Treat Azure AI Search as a rebuildable retrieval layer, not authoritative
-  evidence storage.
-- Measure keyword/filter retrieval before adding semantic, vector, or LLM
-  complexity.
-- Keep credentials out of command lines, files, logs, and version control.
-- Run conservatively against the public REGDOCS service and billable cloud
-  services.
+Use Docling results instead:
 
-Future product direction and open decisions are tracked in
-[ROADMAP.md](ROADMAP.md).
+```bash
+python pipeline.py normalize run --provider docling --concurrency 4
+```
 
-## Disclaimer
+### Important Normalize warning
 
-This repository is not affiliated with or endorsed by the Canada Energy
-Regulator. REGDOCS remains the authoritative public access system for the
-source regulatory records.
+A real Normalize run replaces the canonical Stage 4 output with the documents selected for that run.
+
+For example:
+
+```bash
+python pipeline.py normalize run --provider azure --limit 10
+```
+
+can produce a canonical Stage 4 corpus containing only those selected documents.
+
+For testing, use `plan` or send the output to another directory:
+
+```bash
+python pipeline.py normalize run \
+  --provider azure \
+  --document-id 4657417 \
+  --output-dir /tmp/regdocs-normalize-test
+```
+
+---
+
+## Stage 5 — Index and search
+
+Stage 5 converts normalized chunks into Azure AI Search documents.
+
+Preview first:
+
+```bash
+python pipeline.py index plan
+```
+
+Publish:
+
+```bash
+python pipeline.py index publish
+```
+
+Search the published index:
+
+```bash
+python pipeline.py index query "compressor station" --top 10
+```
+
+For testing, you can publish to another index name:
+
+```bash
+python pipeline.py index publish --index-name regdocs-chunks-test
+```
+
+---
+
+# Azure setup
+
+REGDOCS Atlas reads Azure settings from environment variables in the shell that launches the command. It does not automatically load a `.env` file.
+
+Never commit secrets or API keys to Git.
+
+## Azure Content Understanding
+
+At minimum, provide an endpoint:
+
+```bash
+export CONTENTUNDERSTANDING_ENDPOINT="https://YOUR-RESOURCE.cognitiveservices.azure.com/"
+```
+
+You can also provide a key:
+
+```bash
+export CONTENTUNDERSTANDING_KEY="YOUR-KEY"
+```
+
+If the key is not supplied, the project uses Azure Identity and `DefaultAzureCredential`.
+
+Common settings:
+
+```bash
+export CONTENTUNDERSTANDING_API_VERSION="2025-11-01"
+export CONTENTUNDERSTANDING_ANALYZER_ID="prebuilt-layout"
+export CONTENTUNDERSTANDING_POLLING_INTERVAL="3"
+```
+
+## Azure AI Search
+
+```bash
+export AZURE_SEARCH_ENDPOINT="https://YOUR-SERVICE.search.windows.net"
+export AZURE_SEARCH_ADMIN_KEY="YOUR-KEY"
+export AZURE_SEARCH_INDEX_NAME="regdocs-chunks"
+```
+
+See [SYNTAX.md](SYNTAX.md#azure-environment-variables) for the full environment-variable reference.
+
+---
+
+# Where files are stored
+
+The main local layout is:
+
+```text
+.
+├── pipeline.py              public command entry point
+├── regdocs_atlas/           application code
+├── requirements.txt         Python dependencies
+├── README.md                beginner guide and architecture overview
+├── SYNTAX.md                complete command reference
+├── VERSION                  project version
+├── database/                local database, backups, and locks; ignored by Git
+└── workspace/               downloaded and generated artifacts; ignored by Git
+    ├── 1_scout/
+    ├── 2_download/
+    ├── 3_analyze/
+    ├── 4_normalize/
+    └── 5_index/
+```
+
+Inside the Python package:
+
+```text
+regdocs_atlas/
+├── cli.py                   shared command-line routing
+├── paths.py                 standard project paths
+├── version.py               reads VERSION
+├── costs.py                 Azure usage/cost reporting
+├── db/                      SQLite schema, migrations, and helpers
+├── runtime/                 locks, logging, console output, atomic I/O
+├── artifacts/               artifact inventory and recovery planning
+├── stages/                  executable Stage 1-5 code and workers
+├── scout_*.py               Scout manifests, coverage, and recovery helpers
+├── analysis_manifests.py    durable Stage 3 manifest support
+└── rebuild*.py, flatten.py  database recovery and clean rebuild tools
+```
+
+---
+
+# Database and recovery
+
+The active database is:
+
+```text
+database/regdocs.db
+```
+
+It is useful, but it is not the only copy of important information. The project deliberately saves durable artifacts to disk so the ledger can be reconstructed.
+
+Check what recovery material exists:
+
+```bash
+python pipeline.py rebuild inventory
+python pipeline.py rebuild plan
+python pipeline.py rebuild prepare
+```
+
+Create a rebuilt database beside the active one:
+
+```bash
+python pipeline.py rebuild create --output database/regdocs.rebuilt.db
+```
+
+Verify it:
+
+```bash
+python pipeline.py rebuild verify --db database/regdocs.rebuilt.db
+```
+
+Compare it with the active database:
+
+```bash
+python pipeline.py rebuild compare \
+  --source database/regdocs.db \
+  --rebuilt database/regdocs.rebuilt.db
+```
+
+The key Stage 1-3 recovery result is:
+
+```text
+source_and_stage3_equivalent: true
+```
+
+A clean operational database can also be built with:
+
+```bash
+python pipeline.py rebuild create --flat
+```
+
+That rebuilds from durable Stage 1-3 evidence and then removes historical run/error/recovery bookkeeping from the new database. It does not overwrite the active database and does not contact REGDOCS or Azure.
+
+---
+
+# Logs and locks
+
+State-changing root commands share a global pipeline lock:
+
+```text
+database/locks/pipeline.lock
+```
+
+Stage-specific locks also exist as extra protection.
+
+The current state-changing run is logged to:
+
+```text
+workspace/pipeline.log
+```
+
+When another state-changing stage starts, the previous log is compressed under:
+
+```text
+workspace/logs/
+```
+
+The project keeps a bounded set of recent log archives instead of allowing that directory to grow forever.
+
+If a command reports an unexpected lock, first make sure another pipeline process is not still running. Do not use `--force-lock` just to make the error disappear.
+
+---
+
+# Check Azure analysis cost information
+
+Show configured estimate rates:
+
+```bash
+python pipeline.py cost rates
+```
+
+Show the latest Azure analysis cost snapshot:
+
+```bash
+python pipeline.py cost azure
+```
+
+Show one recorded run:
+
+```bash
+python pipeline.py cost azure --run-id 123
+```
+
+These are estimates based on saved usage and configured rates. Azure billing is the final source for actual charges.
+
+---
+
+# Useful words in this repository
+
+| Word | Plain-language meaning |
+|---|---|
+| **CLI** | Command-line interface: a program you control by typing commands |
+| **Ledger** | The SQLite database that records pipeline state |
+| **Artifact** | A file produced or preserved by a pipeline stage |
+| **Manifest** | A structured list describing saved artifacts and their identities |
+| **Hash / SHA-256** | A fingerprint used to check whether a file is the same file as before |
+| **JSONL** | A text format where each line is one JSON record |
+| **Chunk** | A smaller piece of a document used for search |
+| **Provenance** | Information showing where extracted content came from |
+| **Canonical output** | The main official local output used by the next stage |
+| **Provider** | The document-analysis engine: Azure or Docling |
+| **Worker** | A process that handles a piece of work, usually one document |
+
+---
+
+# Documentation map
+
+Use the files this way:
+
+- **README.md** — understand the project, install it, and learn the normal workflow.
+- **SYNTAX.md** — look up exact commands, switches, environment variables, safety notes, and troubleshooting examples.
+- **VERSION** — the current release number used by `python pipeline.py version`.
+
+Published release notes are kept on the repository's GitHub Releases page.
+
+If you are unsure what a command will do, use its help or planning action before running it:
+
+```bash
+python pipeline.py help
+python pipeline.py help analyze azure
+python pipeline.py analyze azure plan --limit 5
+```

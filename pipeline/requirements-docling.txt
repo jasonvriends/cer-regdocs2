@@ -1,4 +1,0 @@
-# Optional dependencies for experimental Stage 3b local analysis.
-# Kept separate because Docling and its ML/runtime dependencies are substantially
-# heavier than the core REGDOCS pipeline environment.
-docling>=2,<3

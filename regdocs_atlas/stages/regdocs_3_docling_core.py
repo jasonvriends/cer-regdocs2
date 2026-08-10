@@ -37,7 +37,7 @@ from regdocs_paths import (
     stored_path,
 )
 
-SCRIPT_VERSION = "3d.3.0"
+SCRIPT_VERSION = "3d.3.1"
 PARSER_VERSION = "regdocs-docling-projection-2026-08-08-v1"
 DEFAULT_ANALYZER_ID = "docling-standard"
 DEFAULT_OUTPUT_DIR = ANALYZE_DIR / "docling"
@@ -516,12 +516,13 @@ def main() -> int:
         initial_selected = selectable_ids(
             con, state, args.analyzer_id, version, args.max_attempts
         )
-        total = len(initial_selected)
+        eligible_total = len(initial_selected)
+        total = min(eligible_total, args.max_documents or eligible_total)
         run_id = create_supervisor_run(con, args, version, total)
 
         print(
             f"Run {run_id}: Docling supervisor {SCRIPT_VERSION}; "
-            f"{total} document(s) eligible"
+            f"{eligible_total} document(s) eligible; run target={total}"
         )
         print("Concurrency:    1 child process")
         print(f"Crash retries:  up to {args.max_attempts} attempt(s) per document")
@@ -537,10 +538,6 @@ def main() -> int:
             return 0
 
         progress_width = len(str(total))
-        document_ordinals = {
-            document_id: index
-            for index, document_id in enumerate(initial_selected, start=1)
-        }
 
         while True:
             if args.max_documents is not None and launched >= args.max_documents:
@@ -564,13 +561,12 @@ def main() -> int:
             save_state(args.state_file, state)
 
             launched += 1
-            document_index = document_ordinals.get(document_id, min(completed + 1, total))
             attempt = int(info["attempts"])
             attempt_text = (
                 f" attempt {attempt}/{args.max_attempts}" if attempt > 1 else ""
             )
             print(
-                f"[{document_index:0{progress_width}d}/{total}] "
+                f"[{launched:0{progress_width}d}/{total}] "
                 f"{document_id}{attempt_text} ... ",
                 end="",
                 flush=True,

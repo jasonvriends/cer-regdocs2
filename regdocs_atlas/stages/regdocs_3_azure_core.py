@@ -220,7 +220,13 @@ def canonical_success_is_usable(
         return False
     actual_analyzer = payload.get("analyzerId") or payload.get("analyzer_id")
     actual_api = payload.get("apiVersion") or payload.get("api_version")
-    return actual_analyzer == analyzer_id and actual_api == api_version
+    contents = payload.get("contents")
+    return (
+        actual_analyzer == analyzer_id
+        and actual_api == api_version
+        and isinstance(contents, list)
+        and bool(contents)
+    )
 
 
 def _analysis_columns(con: sqlite3.Connection) -> set[str]:

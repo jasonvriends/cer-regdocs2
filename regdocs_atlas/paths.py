@@ -1,27 +1,35 @@
-#!/usr/bin/env python3
-"""Shared canonical paths and stored-path resolution for the pipeline.
-
-The repository layout and persistence contract are documented in ``README.md``.
-"""
+"""Canonical repository paths used by the REGDOCS Atlas pipeline."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-PIPELINE_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = PIPELINE_DIR.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PIPELINE_DIR = PROJECT_ROOT / "pipeline"
 
 DATABASE_DIR = PROJECT_ROOT / "database"
 DATABASE_PATH = DATABASE_DIR / "regdocs.db"
+DATABASE_BACKUP_DIR = DATABASE_DIR / "backups"
 LOCKS_DIR = DATABASE_DIR / "locks"
+
+# Preferred orchestration lock. Commands launched through pipeline.py use this
+# single mutation lock. Stage-specific locks remain temporarily for direct legacy
+# entry points and defense-in-depth during the package refactor.
+PIPELINE_LOCK_PATH = LOCKS_DIR / "pipeline.lock"
 SCOUT_LOCK_PATH = LOCKS_DIR / "1_scout.lock"
 DOWNLOAD_LOCK_PATH = LOCKS_DIR / "2_download.lock"
 ANALYZE_LOCK_PATH = LOCKS_DIR / "3_analyze.lock"
+NORMALIZE_LOCK_PATH = LOCKS_DIR / "4_normalize.lock"
+MIGRATION_LOCK_PATH = LOCKS_DIR / "schema_migrate.lock"
 
 WORKSPACE_DIR = PROJECT_ROOT / "workspace"
+PIPELINE_LOG_PATH = WORKSPACE_DIR / "pipeline.log"
 
 SCOUT_DIR = WORKSPACE_DIR / "1_scout"
 SCOUT_RAW_DIR = SCOUT_DIR / "raw" / "regdocs"
+SCOUT_MANIFEST_DIR = SCOUT_DIR / "manifests"
+SCOUT_DOCUMENT_MANIFEST_DIR = SCOUT_MANIFEST_DIR / "documents"
+SCOUT_SNAPSHOT_MANIFEST_DIR = SCOUT_MANIFEST_DIR / "snapshots"
 SCOUT_RUN_DIR = SCOUT_DIR / "run"
 SCOUT_PROGRESS_PATH = SCOUT_RUN_DIR / "progress.json"
 SCOUT_LOG_PATH = SCOUT_RUN_DIR / "scout.log"
@@ -34,6 +42,8 @@ DOWNLOAD_LOG_PATH = DOWNLOAD_RUN_DIR / "download.log"
 
 ANALYZE_DIR = WORKSPACE_DIR / "3_analyze"
 CONTENT_UNDERSTANDING_DIR = ANALYZE_DIR / "content-understanding"
+DOCLING_DIR = ANALYZE_DIR / "docling"
+ANALYSIS_MANIFEST_DIR = ANALYZE_DIR / "manifests" / "analyses"
 
 NORMALIZE_DIR = WORKSPACE_DIR / "4_normalize"
 INDEX_DIR = WORKSPACE_DIR / "5_index"
@@ -49,12 +59,7 @@ def stored_path(path: Path) -> str:
 
 
 def resolve_stored_path(value: str | Path, *, legacy_base: Path | None = None) -> Path:
-    """Resolve a recorded path, with compatibility for the former DB-relative layout.
-
-    New repository paths begin with ``workspace`` or ``database`` and resolve
-    from ``PROJECT_ROOT``. Other relative values retain the former behavior
-    when a legacy base directory is supplied.
-    """
+    """Resolve a recorded path with compatibility for the old DB-relative layout."""
     path = Path(value).expanduser()
     if path.is_absolute():
         return path.resolve()
