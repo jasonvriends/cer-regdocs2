@@ -1062,7 +1062,7 @@ For “how many downloaded files do I have?”, `current_files` is usually the u
 ## Total analyzed pages by analyzer
 
 ```bash
-sqlite3 -readonly -header -column database/regdocs.db "SELECT analyzer_id, COUNT(*) AS successful_documents, COALESCE(SUM(page_count),0) AS pages FROM analyses WHERE status='SUCCEEDED' GROUP BY analyzer_id ORDER BY pages DESC;"
+sqlite3 -readonly -header -column database/regdocs.db "SELECT analyzer_id, COUNT(*) AS documents, COALESCE(SUM(page_count),0) AS total_pages FROM analyses WHERE status='SUCCEEDED' GROUP BY analyzer_id ORDER BY total_pages DESC;"
 ```
 
 Keep this grouped by `analyzer_id`. The same source file can have results from more than one analyzer, so adding every successful analysis row together can double-count the corpus.
@@ -1355,31 +1355,7 @@ Use the read-only queries in [Section 13](#13-useful-read-only-sqlite-questions)
 
 ---
 
-# 17. Bash tab completion
-
-Bash completion is optional.
-
-Enable it from the repository root:
-
-```bash
-source scripts/completions/install-bash.sh
-```
-
-Examples after installation:
-
-```text
-python pipeline.py down<TAB>                 -> download
-python pipeline.py download r<TAB>           -> run
-python pipeline.py analyze az<TAB>            -> azure
-python pipeline.py analyze azure p<TAB>       -> plan
-python pipeline.py normalize run --pro<TAB>   -> --provider
-```
-
-The installer enables completion in the current Bash shell and adds an idempotent source line to `~/.bashrc` for future Bash shells.
-
----
-
-# 18. What should be backed up?
+# 17. What should be backed up?
 
 The most important local data is:
 

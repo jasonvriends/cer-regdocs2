@@ -582,26 +582,6 @@ These are estimates based on saved usage and configured rates. Azure billing is 
 
 ---
 
-# Optional Bash tab completion
-
-The repository includes Bash completion for commands such as:
-
-```text
-python pipeline.py down<TAB>
-python pipeline.py analyze az<TAB>
-python pipeline.py normalize run --pro<TAB>
-```
-
-Enable it from the repository root:
-
-```bash
-source scripts/completions/install-bash.sh
-```
-
-The installer enables completion in the current Bash shell and adds the completion file to `~/.bashrc` for future Bash sessions.
-
----
-
 # Useful words in this repository
 
 | Word | Plain-language meaning |

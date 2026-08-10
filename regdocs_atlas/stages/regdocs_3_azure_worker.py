@@ -631,16 +631,12 @@ def _existing_path(value: Optional[str]) -> Optional[Path]:
     return p if p.is_file() else None
 
 
-def _load_and_validate_result_json(
-    raw_path: Path,
+def _load_and_validate_result_json_payload(
+    data: Any,
     analyzer_id: str,
     api_version: str,
+    expected_page_count: Optional[int] = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    try:
-        data = json.loads(raw_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise ValueError(f"invalid JSON: {exc}") from exc
-
     if not isinstance(data, dict):
         raise ValueError("top-level Azure result must be a JSON object")
 
@@ -655,9 +651,11 @@ def _load_and_validate_result_json(
             f"API version mismatch: artifact={actual_api!r}, expected={api_version!r}"
         )
 
-    contents = data.get("contents") or []
+    contents = data.get("contents")
     if not isinstance(contents, list):
         raise ValueError("contents is not a list")
+    if not contents:
+        raise ValueError("contents is empty")
 
     markdown_parts: list[str] = []
     page_count = 0
@@ -681,6 +679,10 @@ def _load_and_validate_result_json(
 
     warnings = data.get("warnings") or []
     warning_count = len(warnings) if isinstance(warnings, list) else 0
+    if expected_page_count is not None and page_count != expected_page_count:
+        raise ValueError(
+            f"page count mismatch: source={expected_page_count}, result={page_count}"
+        )
     metadata = {
         "page_count": page_count,
         "table_count": table_count,
@@ -689,6 +691,24 @@ def _load_and_validate_result_json(
         "markdown": "\n\n".join(markdown_parts),
     }
     return data, metadata
+
+
+def _load_and_validate_result_json(
+    raw_path: Path,
+    analyzer_id: str,
+    api_version: str,
+    expected_page_count: Optional[int] = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        data = json.loads(raw_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"invalid JSON: {exc}") from exc
+    return _load_and_validate_result_json_payload(
+        data,
+        analyzer_id,
+        api_version,
+        expected_page_count,
+    )
 
 
 def find_reconcilable_artifacts(
@@ -723,6 +743,16 @@ def find_reconcilable_artifacts(
 
     seen: set[Path] = set()
     validation_errors: list[str] = []
+    expected_page_count: Optional[int] = None
+    source_path = _existing_path(candidate.db_path)
+    source_extension = (candidate.extension or Path(candidate.db_path).suffix).lower()
+    if source_path is not None and source_extension == ".pdf":
+        try:
+            expected_page_count = pdf_page_count(source_path)
+        except Exception as exc:
+            validation_errors.append(
+                f"{source_path}: could not read source PDF page count: {exc}"
+            )
     for source_kind, raw_path in raw_candidates:
         try:
             resolved = raw_path.expanduser().resolve()
@@ -734,7 +764,7 @@ def find_reconcilable_artifacts(
 
         try:
             _, metadata = _load_and_validate_result_json(
-                resolved, analyzer_id, api_version
+                resolved, analyzer_id, api_version, expected_page_count
             )
         except ValueError as exc:
             validation_errors.append(f"{resolved}: {exc}")
@@ -1090,6 +1120,7 @@ def analyze_one(
     max_attempts: int,
     retry_base_delay: float,
     retry_max_delay: float,
+    expected_page_count: Optional[int] = None,
 ) -> AnalysisOutcome:
     start = time.monotonic()
     operation_id: Optional[str] = None
@@ -1138,30 +1169,37 @@ def analyze_one(
             result_dict = result.as_dict()
             result_api_version = getattr(result, "api_version", None)
 
+            try:
+                _, metadata = _load_and_validate_result_json_payload(
+                    result_dict,
+                    analyzer_id,
+                    api_version,
+                    expected_page_count,
+                )
+            except ValueError as exc:
+                error_code = (
+                    "PAGE_COUNT_MISMATCH"
+                    if str(exc).startswith("page count mismatch:")
+                    else "INVALID_ANALYSIS_RESULT"
+                )
+                return AnalysisOutcome(
+                    document_id=candidate.document_id,
+                    file_id=candidate.file_id,
+                    status="FAILED",
+                    operation_id=operation_id,
+                    api_version=result_api_version,
+                    error_code=error_code,
+                    error_message=str(exc),
+                    elapsed_seconds=time.monotonic() - start,
+                    attempt_count=attempt,
+                )
+
             raw_path, md_path = canonical_artifact_paths(
                 output_dir, analyzer_id, api_version, candidate
             )
 
-            markdown_parts: list[str] = []
-            page_count = 0
-            table_count = 0
-            section_count = 0
-
-            for content in getattr(result, "contents", []) or []:
-                markdown = getattr(content, "markdown", None)
-                if markdown:
-                    markdown_parts.append(markdown)
-                pages = getattr(content, "pages", None) or []
-                tables = getattr(content, "tables", None) or []
-                sections = getattr(content, "sections", None) or []
-                page_count += len(pages)
-                table_count += len(tables)
-                section_count += len(sections)
-
             atomic_write_text(raw_path, json_dumps(result_dict))
-            atomic_write_text(md_path, "\n\n".join(markdown_parts))
-
-            warnings = getattr(result, "warnings", None) or []
+            atomic_write_text(md_path, metadata["markdown"])
 
             return AnalysisOutcome(
                 document_id=candidate.document_id,
@@ -1171,10 +1209,10 @@ def analyze_one(
                 api_version=result_api_version,
                 raw_json_path=stored_path(raw_path),
                 markdown_path=stored_path(md_path),
-                page_count=page_count,
-                table_count=table_count,
-                section_count=section_count,
-                warning_count=len(warnings),
+                page_count=int(metadata["page_count"]),
+                table_count=int(metadata["table_count"]),
+                section_count=int(metadata["section_count"]),
+                warning_count=int(metadata["warning_count"]),
                 elapsed_seconds=time.monotonic() - start,
                 attempt_count=attempt,
                 artifact_source="azure",
@@ -1368,6 +1406,7 @@ def analyze_one(
             max_attempts,
             retry_base_delay,
             retry_max_delay,
+            None,
         )
 
     start_time = time.monotonic()
@@ -1424,6 +1463,7 @@ def analyze_one(
             max_attempts,
             retry_base_delay,
             retry_max_delay,
+            page_count,
         )
 
     ranges = page_ranges(page_count)

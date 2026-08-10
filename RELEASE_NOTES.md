@@ -231,24 +231,6 @@ The root console keeps stage output consistent while preserving detailed child d
 
 ---
 
-## Bash completion
-
-Optional Bash completion is included under:
-
-```text
-scripts/completions/
-```
-
-Enable it with:
-
-```bash
-source scripts/completions/install-bash.sh
-```
-
-It supports the public `python pipeline.py ...` command form, stage actions, providers, public switches, and common fixed values.
-
----
-
 ## Versioning
 
 The project version is stored in one place:
