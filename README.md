@@ -308,7 +308,7 @@ Run more:
 python pipeline.py analyze docling run --max-documents 100
 ```
 
-Both Azure and Docling use isolated child processes so a document-level crash is less likely to bring down the whole batch.
+Both Azure and Docling use isolated child processes so a document-level crash is less likely to bring down the whole batch. The Docling supervisor also terminates a child that runs longer than 20 minutes, retries it in a fresh process, and quarantines the document after the configured maximum attempts. Override the limit with `--document-timeout-seconds` when a known large document needs more time.
 
 ---
 

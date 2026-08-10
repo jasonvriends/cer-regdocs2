@@ -122,7 +122,8 @@ Actions:
   run                      Run local Docling conversion in isolated child processes
 
 Docling has no fake/offline dry-run action. Use status, then bound a real local
-run with --max-documents when testing.
+run with --max-documents when testing. Each child has a configurable wall-clock
+timeout and is retried/quarantined instead of blocking the corpus indefinitely.
 
 Examples:
   python pipeline.py analyze docling status

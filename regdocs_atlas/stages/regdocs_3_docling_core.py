@@ -37,12 +37,14 @@ from regdocs_paths import (
     stored_path,
 )
 
-SCRIPT_VERSION = "3d.3.1"
+SCRIPT_VERSION = "3d.3.2"
 PARSER_VERSION = "regdocs-docling-projection-2026-08-08-v1"
 DEFAULT_ANALYZER_ID = "docling-standard"
 DEFAULT_OUTPUT_DIR = ANALYZE_DIR / "docling"
 DEFAULT_STATE_FILE = DEFAULT_OUTPUT_DIR / "supervisor-state.json"
 DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_DOCUMENT_TIMEOUT_SECONDS = 20 * 60
+CHILD_TERMINATION_GRACE_SECONDS = 10
 
 
 def utcnow() -> str:
@@ -269,6 +271,7 @@ def create_supervisor_run(
         "analyzer_id": args.analyzer_id,
         "docling_version": version,
         "max_attempts": args.max_attempts,
+        "document_timeout_seconds": args.document_timeout_seconds,
         "max_documents": args.max_documents,
         "retry_quarantined": args.retry_quarantined,
         "concurrency": 1,
@@ -304,6 +307,7 @@ def update_supervisor_run(
     launched: int,
     succeeded: int,
     failed_attempts: int,
+    timed_out_attempts: int,
     quarantined_now: int,
     *,
     status: Optional[str] = None,
@@ -317,13 +321,14 @@ def update_supervisor_run(
         "worker_launches": launched,
         "succeeded": succeeded,
         "failed_attempts": failed_attempts,
+        "timed_out_attempts": timed_out_attempts,
         "quarantined": quarantined_now,
         "concurrency": 1,
     }
     progress = message or (
         f"Docling completed={completed}/{total}, launches={launched}, "
         f"succeeded={succeeded}, failed_attempts={failed_attempts}, "
-        f"quarantined={quarantined_now}"
+        f"timed_out_attempts={timed_out_attempts}, quarantined={quarantined_now}"
     )
     if status is None:
         con.execute(
@@ -409,6 +414,50 @@ def child_command(args: argparse.Namespace, document_id: str, run_id: int) -> li
     ]
 
 
+def stop_child_process_group(
+    process: subprocess.Popen[str],
+    grace_seconds: float = CHILD_TERMINATION_GRACE_SECONDS,
+) -> tuple[str, str]:
+    """Terminate a child session, then force-kill it if it does not exit."""
+    if process.poll() is None:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGTERM)
+        try:
+            return process.communicate(timeout=grace_seconds)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+    return process.communicate()
+
+
+def run_child(
+    command: list[str],
+    timeout_seconds: float,
+    termination_grace_seconds: float = CHILD_TERMINATION_GRACE_SECONDS,
+) -> tuple[subprocess.CompletedProcess[str], bool]:
+    """Run one isolated worker and bound its wall-clock execution time."""
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+        timed_out = False
+    except subprocess.TimeoutExpired:
+        stdout, stderr = stop_child_process_group(process, termination_grace_seconds)
+        timed_out = True
+    except KeyboardInterrupt:
+        stop_child_process_group(process, termination_grace_seconds)
+        raise
+    return (
+        subprocess.CompletedProcess(command, int(process.returncode), stdout, stderr),
+        timed_out,
+    )
+
+
 def print_worker_diagnostics(stdout: str, stderr: str) -> None:
     blocks = []
     if stdout.strip():
@@ -436,6 +485,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force-lock", action="store_true")
     p.add_argument("--analyzer-id", default=DEFAULT_ANALYZER_ID)
     p.add_argument("--max-attempts", type=int, default=DEFAULT_MAX_ATTEMPTS)
+    p.add_argument(
+        "--document-timeout-seconds",
+        type=float,
+        default=DEFAULT_DOCUMENT_TIMEOUT_SECONDS,
+        help="Terminate and retry a child that exceeds this wall-clock duration",
+    )
     p.add_argument("--max-documents", type=int, help="Stop after launching N child documents")
     p.add_argument("--sleep-seconds", type=float, default=0.25)
     p.add_argument("--retry-quarantined", action="store_true")
@@ -451,6 +506,8 @@ def main() -> int:
         return 0
     if args.max_attempts < 1:
         raise SystemExit("--max-attempts must be >= 1")
+    if args.document_timeout_seconds <= 0:
+        raise SystemExit("--document-timeout-seconds must be > 0")
     if args.max_documents is not None and args.max_documents < 1:
         raise SystemExit("--max-documents must be >= 1")
     if args.sleep_seconds < 0:
@@ -478,12 +535,19 @@ def main() -> int:
                 doc_id for doc_id, info in state["documents"].items()
                 if isinstance(info, dict) and info.get("quarantined")
             )
+            timed_out = {
+                doc_id: int(info.get("timeout_count") or 0)
+                for doc_id, info in state["documents"].items()
+                if isinstance(info, dict) and int(info.get("timeout_count") or 0) > 0
+            }
             print(json.dumps({
                 "docling_version": version,
                 "current_documents": len(current),
                 "succeeded_current": len(done),
                 "remaining_current": len([x for x in current if x not in done]),
                 "quarantined": quarantined,
+                "timed_out_documents": dict(sorted(timed_out.items())),
+                "default_document_timeout_seconds": args.document_timeout_seconds,
                 "state_file": stored_path(args.state_file),
                 "shared_stage3_lock": stored_path(args.lock_file),
                 "concurrency": 1,
@@ -509,7 +573,8 @@ def main() -> int:
 
     con = open_db(args.db)
     run_id: Optional[int] = None
-    total = completed = launched = succeeded_run = failed_attempts = quarantined_now = 0
+    total = completed = launched = succeeded_run = failed_attempts = 0
+    timed_out_attempts = quarantined_now = 0
     started = time.monotonic()
 
     try:
@@ -525,13 +590,14 @@ def main() -> int:
             f"{eligible_total} document(s) eligible; run target={total}"
         )
         print("Concurrency:    1 child process")
-        print(f"Crash retries:  up to {args.max_attempts} attempt(s) per document")
+        print(f"Worker retries: up to {args.max_attempts} attempt(s) per document")
+        print(f"Worker timeout: {args.document_timeout_seconds:g}s per document")
         print(f"Stage 3 lock:   {args.lock_file}")
         print()
 
         if total == 0:
             update_supervisor_run(
-                con, run_id, 0, 0, 0, 0, 0, 0,
+                con, run_id, 0, 0, 0, 0, 0, 0, 0,
                 status="SUCCEEDED",
                 message="Docling supervisor: no eligible documents",
             )
@@ -557,6 +623,7 @@ def main() -> int:
             info["last_started_at"] = utcnow()
             info["last_exit_code"] = None
             info["last_signal"] = None
+            info["last_timed_out"] = False
             info["last_pipeline_run_id"] = run_id
             save_state(args.state_file, state)
 
@@ -573,12 +640,9 @@ def main() -> int:
             )
 
             try:
-                result = subprocess.run(
+                result, timed_out = run_child(
                     child_command(args, document_id, run_id),
-                    check=False,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
+                    args.document_timeout_seconds,
                 )
                 returncode = int(result.returncode)
                 worker_stdout = result.stdout or ""
@@ -588,7 +652,8 @@ def main() -> int:
                 print("INTERRUPTED")
                 update_supervisor_run(
                     con, run_id, total, completed, launched - 1, succeeded_run,
-                    failed_attempts, quarantined_now, status="INTERRUPTED",
+                    failed_attempts, timed_out_attempts, quarantined_now,
+                    status="INTERRUPTED",
                     message="Docling supervisor interrupted by user",
                 )
                 print(
@@ -599,6 +664,11 @@ def main() -> int:
 
             info["last_finished_at"] = utcnow()
             info["last_exit_code"] = returncode
+            info["last_timed_out"] = timed_out
+            if timed_out:
+                info["last_timed_out_at"] = utcnow()
+                info["last_timeout_seconds"] = args.document_timeout_seconds
+                info["timeout_count"] = int(info.get("timeout_count") or 0) + 1
             if returncode < 0:
                 try:
                     info["last_signal"] = signal.Signals(-returncode).name
@@ -610,24 +680,26 @@ def main() -> int:
             con = open_db(args.db)
             analysis = current_analysis(con, document_id, args.analyzer_id, version)
             status = str(analysis["status"]) if analysis is not None else None
-            is_success = status == "SUCCEEDED"
+            is_success = not timed_out and status == "SUCCEEDED"
 
-            if returncode == 130:
+            if not timed_out and returncode == 130:
                 print("INTERRUPTED")
                 print_worker_diagnostics(worker_stdout, worker_stderr)
                 update_supervisor_run(
                     con, run_id, total, completed, launched, succeeded_run,
-                    failed_attempts, quarantined_now, status="INTERRUPTED",
+                    failed_attempts, timed_out_attempts, quarantined_now,
+                    status="INTERRUPTED",
                     message=f"Docling worker interrupted on {document_id}",
                 )
                 return 130
 
-            if returncode == 2:
+            if not timed_out and returncode == 2:
                 print("CONFIG_ERROR")
                 print_worker_diagnostics(worker_stdout, worker_stderr)
                 update_supervisor_run(
                     con, run_id, total, completed, launched, succeeded_run,
-                    failed_attempts, quarantined_now, status="FAILED",
+                    failed_attempts, timed_out_attempts, quarantined_now,
+                    status="FAILED",
                     message=f"Docling worker configuration/input error on {document_id}",
                 )
                 return 2
@@ -652,17 +724,23 @@ def main() -> int:
                 )
             else:
                 failed_attempts += 1
+                if timed_out:
+                    timed_out_attempts += 1
                 extra = f" signal={info['last_signal']}" if info.get("last_signal") else ""
+                if timed_out:
+                    extra += f" timeout={args.document_timeout_seconds:g}s"
                 if int(info["attempts"]) >= args.max_attempts:
                     info["quarantined"] = True
                     info["quarantined_at"] = utcnow()
                     save_state(args.state_file, state)
                     quarantined_now += 1
                     completed += 1
-                    print(f"QUARANTINED exit={returncode}{extra}")
+                    reason = " reason=TIMEOUT" if timed_out else ""
+                    print(f"QUARANTINED{reason} exit={returncode}{extra}")
                     print_worker_diagnostics(worker_stdout, worker_stderr)
                 else:
-                    print(f"FAILED exit={returncode}{extra}; retrying in fresh child")
+                    outcome = "TIMED_OUT" if timed_out else "FAILED"
+                    print(f"{outcome} exit={returncode}{extra}; retrying in fresh child")
                     print_worker_diagnostics(worker_stdout, worker_stderr)
 
             update_supervisor_run(
@@ -673,6 +751,7 @@ def main() -> int:
                 launched,
                 succeeded_run,
                 failed_attempts,
+                timed_out_attempts,
                 quarantined_now,
             )
 
@@ -709,11 +788,13 @@ def main() -> int:
             launched,
             succeeded_run,
             failed_attempts,
+            timed_out_attempts,
             quarantined_now,
             status=final_status,
             message=(
                 f"Docling {final_status}: run_succeeded={succeeded_run}, "
-                f"failed_attempts={failed_attempts}, quarantined_now={quarantined_now}, "
+                f"failed_attempts={failed_attempts}, timed_out_attempts={timed_out_attempts}, "
+                f"quarantined_now={quarantined_now}, "
                 f"corpus_succeeded={len(done)}/{len(current)}, "
                 f"total_quarantined={total_quarantined}, elapsed={elapsed:.1f}s"
             ),
@@ -731,7 +812,8 @@ def main() -> int:
             with contextlib.suppress(Exception):
                 update_supervisor_run(
                     con, run_id, total, completed, launched, succeeded_run,
-                    failed_attempts, quarantined_now, status="INTERRUPTED",
+                    failed_attempts, timed_out_attempts, quarantined_now,
+                    status="INTERRUPTED",
                     message="Docling supervisor interrupted by user",
                 )
         print("\nDocling interrupted; state preserved.", file=sys.stderr)
@@ -741,7 +823,8 @@ def main() -> int:
             with contextlib.suppress(Exception):
                 update_supervisor_run(
                     con, run_id, total, completed, launched, succeeded_run,
-                    failed_attempts, quarantined_now, status="FAILED",
+                    failed_attempts, timed_out_attempts, quarantined_now,
+                    status="FAILED",
                     message=f"Docling supervisor failed: {str(exc)[:800]}",
                 )
         print(f"FATAL: {exc}", file=sys.stderr)

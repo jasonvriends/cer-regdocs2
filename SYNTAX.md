@@ -760,11 +760,12 @@ python pipeline.py analyze docling run
 | `--force-lock` | Force lock removal after confirming no Stage 3 analyzer is active | off |
 | `--analyzer-id ID` | Docling analyzer identity | `docling-standard` |
 | `--max-attempts N` | Maximum fresh-child attempts per document | `3` |
+| `--document-timeout-seconds SECONDS` | Terminate and retry a child exceeding this wall-clock duration | `1200` |
 | `--max-documents N` | Stop after launching N child documents | unlimited |
 | `--sleep-seconds SECONDS` | Pause between child launches | `0.25` |
 | `--retry-quarantined` | Reset quarantined documents and try them again | off |
 
-There is intentionally no pretend `plan` action for Docling. Use `status`, then a small real local run such as `--max-documents 1` when testing.
+There is intentionally no pretend `plan` action for Docling. Use `status`, then a small real local run such as `--max-documents 1` when testing. A timed-out worker process group is terminated, counted as a failed attempt, retried fresh, and eventually quarantined under `--max-attempts` so it cannot block the corpus indefinitely.
 
 ---
 
