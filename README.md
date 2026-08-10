@@ -446,7 +446,6 @@ The main local layout is:
 ├── requirements.txt         Python dependencies
 ├── README.md                beginner guide and architecture overview
 ├── SYNTAX.md                complete command reference
-├── RELEASE_NOTES.md         current release summary
 ├── VERSION                  project version
 ├── database/                local database, backups, and locks; ignored by Git
 └── workspace/               downloaded and generated artifacts; ignored by Git
@@ -606,8 +605,9 @@ Use the files this way:
 
 - **README.md** — understand the project, install it, and learn the normal workflow.
 - **SYNTAX.md** — look up exact commands, switches, environment variables, safety notes, and troubleshooting examples.
-- **RELEASE_NOTES.md** — see what the current release contains.
 - **VERSION** — the current release number used by `python pipeline.py version`.
+
+Published release notes are kept on the repository's GitHub Releases page.
 
 If you are unsure what a command will do, use its help or planning action before running it:
 
