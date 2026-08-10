@@ -1,8 +1,8 @@
-# REGDOCS Atlas 0.1.0
+# REGDOCS Atlas 0.0.1
 
-Version **0.1.0** is the first release described as a working REGDOCS data pipeline rather than an experiment.
+Version **0.0.1** is the first tagged release of REGDOCS Atlas. It collects the complete repository history from the initial acquisition pipeline through the current five-stage operator workflow.
 
-The goal of this release is simple: make the project easier to understand and safer to operate without changing the basic five-stage design.
+The goal of this release is simple: provide a working, recoverable REGDOCS data pipeline that is understandable and safe to operate.
 
 ---
 
@@ -25,6 +25,21 @@ That command controls the complete workflow:
 ```
 
 The project stores operational state in SQLite and keeps important source and analysis artifacts on disk so work can be checked, resumed, and rebuilt.
+
+---
+
+## Highlights since the repository began
+
+- Built the original CER REGDOCS acquisition pipeline and durable source-evidence layout.
+- Added Azure Content Understanding analysis, including resumable page-range processing for large PDFs and globally qualified provenance.
+- Added Docling as a local second analysis perspective with isolated workers, bounded runs, quarantine controls, and independent database writes.
+- Added provider-selecting normalization and Azure AI Search publishing to complete the five-stage pipeline.
+- Consolidated public operations under `python pipeline.py` with explicit plan, status, run, validation, recovery, and cost commands.
+- Added central SQLite migrations, integrity-checked backups, artifact-driven ledger reconstruction, durable Scout and analysis manifests, flat rebuilds, and quantitative rebuild comparison.
+- Added consistent live stage dashboards, thread-safe console output, bounded compressed log rotation, and global mutation locking.
+- Rewrote the README and operator command reference for new users, including copy/paste read-only SQLite diagnostics.
+- Hardened Azure and Docling success validation so empty or malformed analyzer output cannot be recorded as a successful analysis.
+- Corrected Docling run selection/progress reporting so `--max-documents N` displays and processes the requested bounded queue.
 
 ---
 
@@ -138,6 +153,8 @@ Large PDFs are processed in page ranges that fit the Azure request limit. Valid 
 
 Automatic application-level Azure resubmission retries remain disabled. A failed document is retried on a later normal pipeline run instead of being repeatedly resubmitted inside the same supervisor run.
 
+Successful Azure results are validated before they are committed. Empty content and inconsistent page counts are treated as failures instead of silently replacing a previously useful result.
+
 ---
 
 ## Stage 3 — Docling
@@ -153,6 +170,8 @@ It uses isolated child processes and supports:
 - retrying quarantined documents when explicitly requested.
 
 Docling does not create Azure Content Understanding charges.
+
+Docling uses its own analyzer identity and write path, so Azure Content Understanding and Docling results remain separate perspectives on the same source document. Its bounded-run progress display reflects the selected `--max-documents` queue rather than the full eligible corpus.
 
 ---
 
@@ -229,6 +248,8 @@ Before the next state-changing run starts, the previous log is compressed under 
 
 The root console keeps stage output consistent while preserving detailed child diagnostics in the pipeline log.
 
+High-volume stages render live progress dashboards. Scout retains facet-level progress and heartbeat activity, while Download, Normalize, and Index show bounded work totals without flooding the terminal.
+
 ---
 
 ## Versioning
@@ -248,7 +269,7 @@ python pipeline.py version
 For this release it returns:
 
 ```text
-0.1.0
+0.0.1
 ```
 
 Analyzer identities, parser identities, API versions, and other compatibility values stored in durable artifacts are separate from the project release number. They continue to identify whether saved artifacts are compatible with the code that produced or consumes them.
