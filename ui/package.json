@@ -1,6 +1,6 @@
 {
   "name": "regdocs-atlas-ui",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -9,7 +9,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@azure/identity": "4.13.1",
     "@azure/search-documents": "13.0.0",
     "next": "16.2.12",
     "react": "19.2.8",
