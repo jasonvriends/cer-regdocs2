@@ -11,3 +11,12 @@ venv/
 # Python bytecode
 __pycache__/
 *.py[cod]
+
+# REGDOCS Atlas UI
+/ui/node_modules/
+/ui/.next/
+/ui/out/
+/ui/*.tsbuildinfo
+/ui/.env*
+!/ui/.env.local.example
+/ui/npm-debug.log*

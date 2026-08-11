@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+  --atlas-ink: #18212f;
+  --atlas-muted: #657083;
+  --atlas-line: #dfe4ea;
+  --atlas-panel: #ffffff;
+  --atlas-canvas: #f4f6f8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--atlas-canvas);
+  color: var(--atlas-ink);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+::selection {
+  background: #d9e9ff;
+}

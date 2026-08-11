@@ -444,6 +444,7 @@ The main local layout is:
 ├── pipeline.py              public command entry point
 ├── regdocs_atlas/           application code
 ├── requirements.txt         Python dependencies
+├── ui/                      Next.js Azure AI Search workbench
 ├── README.md                beginner guide and architecture overview
 ├── SYNTAX.md                complete command reference
 ├── VERSION                  project version
