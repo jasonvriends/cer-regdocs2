@@ -1,5 +1,5 @@
 import { DefaultAzureCredential } from "@azure/identity";
-import { AzureKeyCredential, SearchClient } from "@azure/search-documents";
+import { AzureKeyCredential, SearchClient, type SearchOptions } from "@azure/search-documents";
 
 export type RegdocsSearchDocument = {
   chunk_id: string;
@@ -40,6 +40,7 @@ export type RegdocsSearchDocument = {
   azure_figure_id?: string | null;
   element_paths?: string[] | null;
   local_element_paths?: string[] | null;
+  content_vector?: number[] | null;
 };
 
 export type AtlasSearchResult = RegdocsSearchDocument & {
@@ -71,6 +72,7 @@ export type AtlasSearchRequest = {
   roles?: string[];
   page?: number;
   sort?: AtlasSearchSort;
+  retrievalMode?: "lexical" | "semantic" | "hybrid";
 };
 
 export type AtlasSearchResponse = {
@@ -83,6 +85,8 @@ export type AtlasSearchResponse = {
 
 let cachedClient: SearchClient<RegdocsSearchDocument> | undefined;
 let cachedSignature = "";
+const embeddingCredential = new DefaultAzureCredential();
+let embeddingToken: { token: string; expiresOnTimestamp: number } | null = null;
 
 function searchConfig() {
   const endpoint = process.env.AZURE_SEARCH_ENDPOINT?.trim();
@@ -117,6 +121,39 @@ function getSearchClient() {
   }
 
   return cachedClient;
+}
+
+async function embedQuery(text: string) {
+  const endpoint = process.env.FOUNDRY_PROJECT_ENDPOINT?.trim().replace(/\/$/, "");
+  const model = process.env.FOUNDRY_EMBEDDING_DEPLOYMENT?.trim();
+  const apiKey = process.env.FOUNDRY_API_KEY?.trim();
+  if (!endpoint || !model) {
+    throw new Error("Hybrid search requires FOUNDRY_PROJECT_ENDPOINT and FOUNDRY_EMBEDDING_DEPLOYMENT");
+  }
+  const url = `${endpoint.endsWith("/openai/v1") ? endpoint : `${endpoint}/openai/v1`}/embeddings`;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (apiKey) {
+    headers["api-key"] = apiKey;
+  } else {
+    if (!embeddingToken || embeddingToken.expiresOnTimestamp - Date.now() < 60_000) {
+      const token = await embeddingCredential.getToken("https://ai.azure.com/.default");
+      if (!token) throw new Error("Unable to acquire a Foundry embedding token");
+      embeddingToken = token;
+    }
+    headers.Authorization = `Bearer ${embeddingToken.token}`;
+  }
+  const dimensions = Number.parseInt(process.env.FOUNDRY_EMBEDDING_DIMENSIONS || "1536", 10);
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ model, input: text, dimensions, encoding_format: "float" }),
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`Foundry query embedding failed (${response.status})`);
+  const payload = (await response.json()) as { data?: Array<{ embedding?: number[] }> };
+  const vector = payload.data?.[0]?.embedding;
+  if (!vector?.length) throw new Error("Foundry query embedding response was empty");
+  return vector;
 }
 
 function cleanValues(values: string[] | undefined) {
@@ -255,16 +292,43 @@ export async function searchRegdocs(request: AtlasSearchRequest): Promise<AtlasS
   const client = getSearchClient();
   const query = request.query.trim() || "*";
   const top = Math.min(Math.max(request.top ?? 20, 1), 50);
-  const response = await client.search(query, {
+  const configuredMode = process.env.AZURE_SEARCH_RETRIEVAL_MODE?.trim().toLowerCase();
+  const requestedMode = request.retrievalMode ??
+    (configuredMode === "semantic" || configuredMode === "hybrid" ? configuredMode : "lexical");
+  const advancedRetrieval = requestedMode !== "lexical" && request.sort !== "chunk" && query !== "*";
+  const options: SearchOptions<RegdocsSearchDocument> = advancedRetrieval
+    ? {
+        queryType: "semantic",
+        semanticSearchOptions: {
+          configurationName: process.env.AZURE_SEARCH_SEMANTIC_CONFIG?.trim() || "regdocs-semantic",
+          captions: { captionType: "extractive", highlight: false },
+        },
+      }
+    : { queryType: "simple" };
+  if (advancedRetrieval && requestedMode === "hybrid") {
+    const vector = await embedQuery(query);
+    options.vectorSearchOptions = {
+      queries: [
+        {
+          kind: "vector",
+          vector,
+          fields: ["content_vector"],
+          kNearestNeighborsCount: 50,
+        },
+      ],
+      filterMode: "preFilter",
+    };
+  }
+  Object.assign(options, {
     top,
     filter: buildFilter(request),
     facets: FACETS,
     includeTotalCount: true,
     orderBy: orderBy(request.sort),
-    queryType: "simple",
     searchMode: "any",
     select: SELECT_FIELDS,
   });
+  const response = await client.search(query, options);
 
   const results: AtlasSearchResult[] = [];
   for await (const result of response.results) {
@@ -281,4 +345,17 @@ export async function searchRegdocs(request: AtlasSearchRequest): Promise<AtlasS
     facets: normalizeFacets(response.facets),
     results,
   };
+}
+
+export async function getRegdocsChunk(chunkId: string): Promise<AtlasSearchResult | null> {
+  const client = getSearchClient();
+  const response = await client.search("*", {
+    top: 1,
+    filter: `chunk_id eq '${escapeODataString(chunkId)}'`,
+    select: SELECT_FIELDS,
+  });
+  for await (const result of response.results) {
+    return { ...result.document, score: result.score ?? null };
+  }
+  return null;
 }

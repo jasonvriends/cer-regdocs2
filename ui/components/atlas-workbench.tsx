@@ -1,6 +1,11 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
+import { AtlasAsk } from "@/components/atlas-ask";
+import { AtlasGraph } from "@/components/atlas-graph";
+import { AtlasTimeline } from "@/components/atlas-timeline";
+import { ThemeSelector } from "@/components/theme-selector";
+import type { IntelligenceScope } from "@/lib/intelligence";
 import type {
   AtlasFacets,
   AtlasSearchResponse,
@@ -11,6 +16,7 @@ import type {
 type SearchApiResponse = AtlasSearchResponse & { error?: string };
 type LeftMode = "results" | "refine";
 type RightMode = "ask" | "evidence" | "analyze";
+type ViewerMode = "document" | "timeline" | "graph";
 type FacetFilterKey =
   | "company"
   | "project"
@@ -125,6 +131,7 @@ export function AtlasWorkbench() {
   const [evidence, setEvidence] = useState<AtlasSearchResult[]>([]);
   const [leftMode, setLeftMode] = useState<LeftMode>("results");
   const [rightMode, setRightMode] = useState<RightMode>("ask");
+  const [viewerMode, setViewerMode] = useState<ViewerMode>("document");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -134,6 +141,17 @@ export function AtlasWorkbench() {
   );
 
   const activeLens = LENSES.find((lens) => lens.id === lensId) ?? LENSES[0];
+  const intelligenceScope = useMemo<IntelligenceScope>(() => {
+    if (manual.documentId.trim()) return { documentId: manual.documentId.trim() };
+    if (manual.filingId.trim()) return { filingId: manual.filingId.trim() };
+    if (manual.filingNumber.trim()) return { filingNumber: manual.filingNumber.trim() };
+    if (manual.project.trim()) return { project: manual.project.trim() };
+    if (manual.company.trim()) return { company: manual.company.trim() };
+    if (selected?.filing_id) return { filingId: selected.filing_id };
+    if (selected?.project) return { project: selected.project };
+    if (selected?.company) return { company: selected.company };
+    return {};
+  }, [manual, selected]);
   const activeFilterCount =
     Object.values(facetFilters).reduce((count, values) => count + values.length, 0) +
     Object.values(manual).filter((value) => value.trim()).length;
@@ -236,27 +254,44 @@ export function AtlasWorkbench() {
     setManual((current) => ({ ...current, documentId: result.document_id }));
     setFacetFilters((current) => ({ ...current, chunkType: [] }));
     setLeftMode("refine");
+    setViewerMode("document");
+  }
+
+  function openEvidence(result: AtlasSearchResult) {
+    setResults((current) => current.some((item) => item.chunk_id === result.chunk_id) ? current : [result, ...current]);
+    setSelectedChunkId(result.chunk_id);
+    setViewerMode("document");
+  }
+
+  async function openEvidenceById(chunkId: string) {
+    try {
+      const response = await fetch(`/api/evidence/${encodeURIComponent(chunkId)}`, { cache: "no-store" });
+      if (!response.ok) throw new Error("Evidence lookup failed");
+      openEvidence((await response.json()) as AtlasSearchResult);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Evidence lookup failed");
+    }
   }
 
   return (
-    <main className="min-h-screen bg-slate-100 text-slate-900">
-      <header className="border-b border-slate-200 bg-white">
+    <main className="min-h-screen bg-slate-100 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+      <header className="border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-950">
         <div className="mx-auto flex max-w-[1900px] items-center gap-5 px-5 py-4">
           <div className="min-w-fit">
             <div className="text-lg font-semibold tracking-tight">REGDOCS Atlas</div>
-            <div className="text-xs text-slate-500">Evidence-first regulatory research</div>
+            <div className="text-xs text-slate-500 dark:text-slate-400">Evidence-first regulatory research</div>
           </div>
 
           <form className="flex flex-1 gap-2" onSubmit={executeSearch}>
             <input
               aria-label="Search regulatory records"
-              className="w-full rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm outline-none ring-blue-500 transition focus:ring-2"
+              className="w-full rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm outline-none ring-blue-500 transition focus:ring-2 dark:border-slate-700 dark:bg-slate-900 dark:placeholder:text-slate-500"
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search regulatory records, or choose a lens below…"
               value={query}
             />
             <button
-              className="rounded-lg bg-slate-900 px-5 py-2.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-lg bg-slate-900 px-5 py-2.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50 dark:bg-blue-500 dark:text-slate-950"
               disabled={loading}
               type="submit"
             >
@@ -264,17 +299,20 @@ export function AtlasWorkbench() {
             </button>
           </form>
 
-          <select
-            aria-label="Result sort"
-            className="hidden rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm lg:block"
-            onChange={(event) => setSort(event.target.value as AtlasSearchSort)}
-            value={sort}
-          >
-            <option value="relevance">Relevance</option>
-            <option value="newest">Newest filing</option>
-            <option value="oldest">Oldest filing</option>
-            <option value="chunk">Document order</option>
-          </select>
+          <div className="flex min-w-fit gap-2">
+            <select
+              aria-label="Result sort"
+              className="hidden rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm dark:border-slate-700 dark:bg-slate-900 lg:block"
+              onChange={(event) => setSort(event.target.value as AtlasSearchSort)}
+              value={sort}
+            >
+              <option value="relevance">Relevance</option>
+              <option value="newest">Newest filing</option>
+              <option value="oldest">Oldest filing</option>
+              <option value="chunk">Document order</option>
+            </select>
+            <ThemeSelector />
+          </div>
         </div>
 
         <div className="mx-auto flex max-w-[1900px] gap-2 overflow-x-auto px-5 pb-3">
@@ -282,8 +320,8 @@ export function AtlasWorkbench() {
             <button
               className={`min-w-fit rounded-full border px-3 py-1.5 text-xs font-medium transition ${
                 lens.id === lensId
-                  ? "border-slate-900 bg-slate-900 text-white"
-                  : "border-slate-200 bg-white text-slate-600 hover:border-slate-400 hover:text-slate-900"
+                  ? "border-slate-900 bg-slate-900 text-white dark:border-blue-500 dark:bg-blue-500 dark:text-slate-950"
+                  : "border-slate-200 bg-white text-slate-600 hover:border-slate-400 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-slate-500 dark:hover:text-white"
               }`}
               key={lens.id}
               onClick={() => applyLens(lens)}
@@ -296,26 +334,26 @@ export function AtlasWorkbench() {
         </div>
       </header>
 
-      <div className="mx-auto grid min-h-[calc(100vh-126px)] max-w-[1900px] grid-cols-1 bg-white lg:grid-cols-[370px_minmax(440px,1fr)_390px]">
-        <section className="border-r border-slate-200 bg-white">
-          <div className="border-b border-slate-200 px-4 py-3">
+      <div className="mx-auto grid min-h-[calc(100vh-126px)] max-w-[1900px] grid-cols-1 bg-white dark:bg-slate-900 lg:grid-cols-[370px_minmax(440px,1fr)_390px]">
+        <section className="border-r border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+          <div className="border-b border-slate-200 px-4 py-3 dark:border-slate-800">
             <div className="flex items-center justify-between gap-3">
               <div>
-                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">{activeLens.label}</div>
-                <div className="mt-1 text-sm text-slate-700">
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">{activeLens.label}</div>
+                <div className="mt-1 text-sm text-slate-700 dark:text-slate-300">
                   {totalCount !== null ? `${totalCount.toLocaleString()} matching chunks` : activeLens.description}
                 </div>
               </div>
-              <div className="flex rounded-lg bg-slate-100 p-1 text-xs">
+              <div className="flex rounded-lg bg-slate-100 p-1 text-xs dark:bg-slate-800">
                 <button
-                  className={`rounded-md px-2.5 py-1.5 ${leftMode === "results" ? "bg-white font-medium shadow-sm" : "text-slate-500"}`}
+                  className={`rounded-md px-2.5 py-1.5 ${leftMode === "results" ? "bg-white font-medium shadow-sm dark:bg-slate-700" : "text-slate-500 dark:text-slate-400"}`}
                   onClick={() => setLeftMode("results")}
                   type="button"
                 >
                   Results
                 </button>
                 <button
-                  className={`rounded-md px-2.5 py-1.5 ${leftMode === "refine" ? "bg-white font-medium shadow-sm" : "text-slate-500"}`}
+                  className={`rounded-md px-2.5 py-1.5 ${leftMode === "refine" ? "bg-white font-medium shadow-sm dark:bg-slate-700" : "text-slate-500 dark:text-slate-400"}`}
                   onClick={() => setLeftMode("refine")}
                   type="button"
                 >
@@ -326,13 +364,13 @@ export function AtlasWorkbench() {
           </div>
 
           {error ? (
-            <div className="m-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{error}</div>
+            <div className="m-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">{error}</div>
           ) : null}
 
           {leftMode === "results" ? (
             <div className="max-h-[calc(100vh-198px)] overflow-y-auto">
               {!results.length && !error ? (
-                <div className="p-5 text-sm leading-6 text-slate-500">
+                <div className="p-5 text-sm leading-6 text-slate-500 dark:text-slate-400">
                   Choose a search lens or enter a query. Use <strong>Refine</strong> for filing, company, project, document, page, and facet filters.
                 </div>
               ) : null}
@@ -340,18 +378,18 @@ export function AtlasWorkbench() {
                 const active = selected?.chunk_id === result.chunk_id;
                 return (
                   <button
-                    className={`block w-full border-b border-slate-100 p-4 text-left transition ${active ? "bg-blue-50" : "hover:bg-slate-50"}`}
+                    className={`block w-full border-b border-slate-100 p-4 text-left transition dark:border-slate-800 ${active ? "bg-blue-50 dark:bg-blue-950/50" : "hover:bg-slate-50 dark:hover:bg-slate-800/70"}`}
                     key={result.chunk_id}
                     onClick={() => setSelectedChunkId(result.chunk_id)}
                     type="button"
                   >
                     <div className="flex items-center justify-between gap-2 text-xs">
-                      <span className="font-medium text-blue-700">{pageLabel(result)}</span>
-                      <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] uppercase text-slate-500">{result.chunk_type || "chunk"}</span>
+                      <span className="font-medium text-blue-700 dark:text-blue-300">{pageLabel(result)}</span>
+                      <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] uppercase text-slate-500 dark:bg-slate-800 dark:text-slate-400">{result.chunk_type || "chunk"}</span>
                     </div>
-                    <div className="mt-1 line-clamp-2 text-sm font-semibold text-slate-900">{titleFor(result)}</div>
-                    <div className="mt-2 line-clamp-3 text-xs leading-5 text-slate-600">{excerpt(result.content, 230)}</div>
-                    <div className="mt-2 truncate text-[11px] text-slate-400">{result.project || result.company || `Document ${result.document_id}`}</div>
+                    <div className="mt-1 line-clamp-2 text-sm font-semibold text-slate-900 dark:text-slate-100">{titleFor(result)}</div>
+                    <div className="mt-2 line-clamp-3 text-xs leading-5 text-slate-600 dark:text-slate-300">{excerpt(result.content, 230)}</div>
+                    <div className="mt-2 truncate text-[11px] text-slate-400 dark:text-slate-500">{result.project || result.company || `Document ${result.document_id}`}</div>
                   </button>
                 );
               })}
@@ -359,8 +397,8 @@ export function AtlasWorkbench() {
           ) : (
             <div className="max-h-[calc(100vh-198px)] overflow-y-auto p-4">
               <div className="flex items-center justify-between">
-                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Exact scopes</div>
-                <button className="text-xs font-medium text-blue-700 hover:underline" onClick={clearFilters} type="button">Clear all</button>
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Exact scopes</div>
+                <button className="text-xs font-medium text-blue-700 hover:underline dark:text-blue-300" onClick={clearFilters} type="button">Clear all</button>
               </div>
 
               <div className="mt-3 grid gap-2">
@@ -373,7 +411,7 @@ export function AtlasWorkbench() {
                   ["page", "Page number"],
                 ] as Array<[keyof ManualFilters, string]>).map(([field, placeholder]) => (
                   <input
-                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                    className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-950 dark:placeholder:text-slate-500"
                     key={field}
                     onChange={(event) => setManual((current) => ({ ...current, [field]: event.target.value }))}
                     placeholder={placeholder}
@@ -384,7 +422,7 @@ export function AtlasWorkbench() {
               </div>
 
               <button
-                className="mt-3 w-full rounded-md bg-slate-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+                className="mt-3 w-full rounded-md bg-slate-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-blue-500 dark:text-slate-950"
                 disabled={loading}
                 onClick={() => void executeSearch()}
                 type="button"
@@ -398,20 +436,20 @@ export function AtlasWorkbench() {
                   if (!buckets.length) return null;
                   return (
                     <div key={definition.field}>
-                      <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">{definition.label}</div>
+                      <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">{definition.label}</div>
                       <div className="mt-2 flex flex-wrap gap-1.5">
                         {buckets.map((bucket) => {
                           const active = facetFilters[definition.filter].includes(bucket.value);
                           return (
                             <button
                               className={`rounded-full border px-2.5 py-1 text-xs transition ${
-                                active ? "border-blue-700 bg-blue-50 text-blue-800" : "border-slate-200 bg-white text-slate-600 hover:border-slate-400"
+                                active ? "border-blue-700 bg-blue-50 text-blue-800 dark:border-blue-500 dark:bg-blue-950/60 dark:text-blue-200" : "border-slate-200 bg-white text-slate-600 hover:border-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-slate-500"
                               }`}
                               key={bucket.value}
                               onClick={() => toggleFacet(definition.filter, bucket.value)}
                               type="button"
                             >
-                              {bucket.value} <span className="text-slate-400">{bucket.count}</span>
+                              {bucket.value} <span className="text-slate-400 dark:text-slate-500">{bucket.count}</span>
                             </button>
                           );
                         })}
@@ -424,70 +462,79 @@ export function AtlasWorkbench() {
           )}
         </section>
 
-        <section className="min-w-0 bg-slate-100">
-          <div className="flex items-center justify-between border-b border-slate-200 bg-white px-5 py-3">
+        <section className="min-w-0 bg-slate-100 dark:bg-slate-950">
+          <div className="flex items-center justify-between border-b border-slate-200 bg-white px-5 py-3 dark:border-slate-800 dark:bg-slate-900">
             <div className="min-w-0">
-              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Evidence viewer</div>
-              <div className="mt-1 max-w-3xl truncate text-sm font-medium">{selected?.title || (selected ? `Document ${selected.document_id}` : "No document selected")}</div>
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Research viewer</div>
+              <div className="mt-1 max-w-3xl truncate text-sm font-medium">
+                {viewerMode === "document" ? selected?.title || (selected ? `Document ${selected.document_id}` : "No document selected") : viewerMode === "timeline" ? "Regulatory timeline" : "Regulatory graph"}
+              </div>
             </div>
             <div className="flex min-w-fit gap-2">
-              {selected ? (
-                <button className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50" onClick={() => scopeToDocument(selected)} type="button">
+              <div className="flex rounded-lg bg-slate-100 p-1 text-xs dark:bg-slate-800">
+                {(["document", "timeline", "graph"] as ViewerMode[]).map((mode) => (
+                  <button className={`rounded-md px-2.5 py-1.5 capitalize ${viewerMode === mode ? "bg-white font-medium shadow-sm dark:bg-slate-700" : "text-slate-500 dark:text-slate-400"}`} key={mode} onClick={() => setViewerMode(mode)} type="button">{mode}</button>
+                ))}
+              </div>
+              {selected && viewerMode === "document" ? (
+                <button className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800" onClick={() => scopeToDocument(selected)} type="button">
                   X-Ray document
                 </button>
               ) : null}
-              {selected?.source_url ? (
-                <a className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50" href={selected.source_url} rel="noreferrer" target="_blank">REGDOCS source ↗</a>
+              {selected?.source_url && viewerMode === "document" ? (
+                <a className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800" href={selected.source_url} rel="noreferrer" target="_blank">REGDOCS source ↗</a>
               ) : null}
             </div>
           </div>
 
           <div className="flex min-h-[calc(100vh-182px)] items-start justify-center overflow-auto p-6">
-            {selected ? (
-              <article className="w-full max-w-[900px] rounded-sm border border-slate-300 bg-white px-10 py-10 shadow-sm md:px-14 md:py-12">
-                <div className="mb-6 flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 pb-5">
+            {viewerMode === "timeline" ? <AtlasTimeline scope={intelligenceScope} onOpenEvidence={(chunkId) => void openEvidenceById(chunkId)} /> : null}
+            {viewerMode === "graph" ? <AtlasGraph scope={intelligenceScope} onOpenEvidence={(chunkId) => void openEvidenceById(chunkId)} /> : null}
+            {viewerMode === "document" && selected ? (
+              <article className="w-full max-w-[900px] rounded-sm border border-slate-300 bg-white px-10 py-10 shadow-sm dark:border-slate-700 dark:bg-slate-900 md:px-14 md:py-12">
+                <div className="mb-6 flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 pb-5 dark:border-slate-800">
                   <div className="min-w-0">
-                    <div className="text-xs font-semibold uppercase tracking-widest text-slate-400">Document {selected.document_id}</div>
+                    <div className="text-xs font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500">Document {selected.document_id}</div>
                     <h1 className="mt-2 text-xl font-semibold leading-7">{titleFor(selected)}</h1>
-                    <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
+                    <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500 dark:text-slate-400">
                       {selected.company ? <span>{selected.company}</span> : null}
                       {selected.project ? <span>· {selected.project}</span> : null}
                       {selected.filing_date ? <span>· {selected.filing_date}</span> : null}
                     </div>
                   </div>
-                  <div className="min-w-fit rounded-md bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-800">{pageLabel(selected)}</div>
+                  <div className="min-w-fit rounded-md bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-800 dark:bg-blue-950/60 dark:text-blue-200">{pageLabel(selected)}</div>
                 </div>
 
                 {selected.section_path?.length ? (
-                  <div className="mb-4 text-xs text-slate-500">{selected.section_path.join(" › ")}</div>
+                  <div className="mb-4 text-xs text-slate-500 dark:text-slate-400">{selected.section_path.join(" › ")}</div>
                 ) : null}
 
-                <div className="whitespace-pre-wrap text-[15px] leading-7 text-slate-800">{selected.content || "No normalized text is available for this chunk."}</div>
+                <div className="whitespace-pre-wrap text-[15px] leading-7 text-slate-800 dark:text-slate-200">{selected.content || "No normalized text is available for this chunk."}</div>
 
-                <div className="mt-8 flex flex-wrap gap-2 border-t border-slate-200 pt-5">
-                  <button className="rounded-md bg-slate-900 px-3 py-2 text-xs font-medium text-white" onClick={() => addEvidence(selected)} type="button">+ Add to evidence</button>
-                  <button className="rounded-md border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700" onClick={() => { setQuery(selected.content ? `\"${excerpt(selected.content, 90).replace(/\"/g, "")}\"` : titleFor(selected)); setLensId("search"); }} type="button">Find this passage</button>
+                <div className="mt-8 flex flex-wrap gap-2 border-t border-slate-200 pt-5 dark:border-slate-800">
+                  <button className="rounded-md bg-slate-900 px-3 py-2 text-xs font-medium text-white dark:bg-blue-500 dark:text-slate-950" onClick={() => addEvidence(selected)} type="button">+ Add to evidence</button>
+                  <button className="rounded-md border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 dark:border-slate-700 dark:text-slate-300" onClick={() => { setQuery(selected.content ? `\"${excerpt(selected.content, 90).replace(/\"/g, "")}\"` : titleFor(selected)); setLensId("search"); }} type="button">Find this passage</button>
                 </div>
 
-                <div className="mt-6 rounded-md bg-slate-50 p-4 text-xs leading-5 text-slate-500">
+                <div className="mt-6 rounded-md bg-slate-50 p-4 text-xs leading-5 text-slate-500 dark:bg-slate-800/70 dark:text-slate-400">
                   This Phase 1 viewer renders normalized Stage 4 text with document/page identity. The original-page renderer and polygon overlays remain the next source-viewer milestone.
                 </div>
               </article>
-            ) : (
+            ) : viewerMode === "document" ? (
               <div className="mt-24 max-w-md text-center">
-                <div className="text-base font-semibold text-slate-700">Evidence viewer</div>
-                <p className="mt-2 text-sm leading-6 text-slate-500">Run a search and select a result to inspect page-scoped regulatory evidence.</p>
+                <div className="text-base font-semibold text-slate-700 dark:text-slate-300">Evidence viewer</div>
+                <p className="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">Run a search and select a result to inspect page-scoped regulatory evidence.</p>
               </div>
-            )}
+            ) : null}
           </div>
         </section>
 
-        <aside className="border-l border-slate-200 bg-white">
-          <div className="border-b border-slate-200 px-4 py-3">
-            <div className="flex rounded-lg bg-slate-100 p-1 text-xs">
+        <aside className="border-l border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+          <div className="border-b border-slate-200 px-4 py-3 dark:border-slate-800">
+            <div className="flex rounded-lg bg-slate-100 p-1 text-xs dark:bg-slate-800">
               {(["ask", "evidence", "analyze"] as RightMode[]).map((mode) => (
                 <button
-                  className={`flex-1 rounded-md px-2 py-1.5 capitalize ${rightMode === mode ? "bg-white font-medium shadow-sm" : "text-slate-500"}`}
+                  className={`flex-1 rounded-md px-2 py-1.5 capitalize ${rightMode === mode ? "bg-white font-medium shadow-sm dark:bg-slate-700" : "text-slate-500 dark:text-slate-400"}`}
                   key={mode}
                   onClick={() => setRightMode(mode)}
                   type="button"
@@ -500,38 +547,23 @@ export function AtlasWorkbench() {
 
           <div className="flex h-[calc(100vh-182px)] flex-col overflow-y-auto p-4">
             {rightMode === "ask" ? (
-              <>
-                <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4 text-sm leading-6 text-slate-600">
-                  Search and evidence are live now. Grounded Foundry answers are intentionally not enabled until the cited-answer route is added.
-                </div>
-                {selected ? (
-                  <div className="mt-4 rounded-lg border border-slate-200 p-3">
-                    <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Current evidence</div>
-                    <div className="mt-1 text-sm font-medium">{titleFor(selected)}</div>
-                    <div className="mt-1 text-xs text-slate-500">{pageLabel(selected)}</div>
-                  </div>
-                ) : null}
-                <div className="mt-auto pt-4">
-                  <textarea aria-label="Ask Atlas" className="min-h-24 w-full resize-none rounded-lg border border-slate-300 bg-slate-50 p-3 text-sm text-slate-500" disabled placeholder="Ask a question about retrieved evidence…" />
-                  <button className="mt-2 w-full rounded-lg bg-slate-200 px-4 py-2.5 text-sm font-medium text-slate-500" disabled type="button">Ask · Foundry not connected</button>
-                </div>
-              </>
+              <AtlasAsk evidence={evidence} onOpenEvidence={openEvidence} scope={intelligenceScope} selected={selected} />
             ) : null}
 
             {rightMode === "evidence" ? (
               <div>
-                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Evidence board</div>
-                <p className="mt-1 text-sm leading-5 text-slate-500">Pin passages while you investigate. This board is local to the current browser session.</p>
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Evidence board</div>
+                <p className="mt-1 text-sm leading-5 text-slate-500 dark:text-slate-400">Pin passages while you investigate. This board is local to the current browser session.</p>
                 <div className="mt-4 space-y-3">
-                  {!evidence.length ? <div className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500">Use “Add to evidence” on any retrieved passage.</div> : null}
+                  {!evidence.length ? <div className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">Use “Add to evidence” on any retrieved passage.</div> : null}
                   {evidence.map((item) => (
-                    <div className="rounded-lg border border-slate-200 p-3" key={item.chunk_id}>
+                    <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-700" key={item.chunk_id}>
                       <div className="flex items-start justify-between gap-2">
                         <div className="text-sm font-medium">{titleFor(item)}</div>
-                        <button className="text-xs text-slate-400 hover:text-slate-700" onClick={() => removeEvidence(item.chunk_id)} type="button">Remove</button>
+                        <button className="text-xs text-slate-400 hover:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200" onClick={() => removeEvidence(item.chunk_id)} type="button">Remove</button>
                       </div>
-                      <div className="mt-1 text-xs text-blue-700">{pageLabel(item)} · Document {item.document_id}</div>
-                      <div className="mt-2 text-xs leading-5 text-slate-600">{excerpt(item.content, 260)}</div>
+                      <div className="mt-1 text-xs text-blue-700 dark:text-blue-300">{pageLabel(item)} · Document {item.document_id}</div>
+                      <div className="mt-2 text-xs leading-5 text-slate-600 dark:text-slate-300">{excerpt(item.content, 260)}</div>
                     </div>
                   ))}
                 </div>
@@ -540,17 +572,17 @@ export function AtlasWorkbench() {
 
             {rightMode === "analyze" ? (
               <div>
-                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Investigation starters</div>
-                <p className="mt-1 text-sm leading-5 text-slate-500">These run curated retrieval patterns against the same Azure Search index.</p>
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Investigation starters</div>
+                <p className="mt-1 text-sm leading-5 text-slate-500 dark:text-slate-400">These run curated retrieval patterns against the same Azure Search index.</p>
                 <div className="mt-4 grid gap-2">
                   {LENSES.filter((lens) => ["what-happened", "red-flags", "obligations", "tables", "figures"].includes(lens.id)).map((lens) => (
-                    <button className="rounded-lg border border-slate-200 p-3 text-left hover:border-slate-400 hover:bg-slate-50" key={lens.id} onClick={() => applyLens(lens)} type="button">
+                    <button className="rounded-lg border border-slate-200 p-3 text-left hover:border-slate-400 hover:bg-slate-50 dark:border-slate-700 dark:hover:border-slate-500 dark:hover:bg-slate-800" key={lens.id} onClick={() => applyLens(lens)} type="button">
                       <div className="text-sm font-medium">{lens.label}</div>
-                      <div className="mt-1 text-xs leading-5 text-slate-500">{lens.description}</div>
+                      <div className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">{lens.description}</div>
                     </button>
                   ))}
                 </div>
-                <div className="mt-5 rounded-lg bg-blue-50 p-3 text-xs leading-5 text-blue-900">
+                <div className="mt-5 rounded-lg bg-blue-50 p-3 text-xs leading-5 text-blue-900 dark:bg-blue-950/60 dark:text-blue-200">
                   Chronology extraction, contradiction analysis, claim ledgers, and “Who Knew What When” become grounded LLM tools after Foundry is connected. Their retrieval foundation is now in this workbench.
                 </div>
               </div>

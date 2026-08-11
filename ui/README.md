@@ -1,6 +1,6 @@
 # REGDOCS Atlas UI
 
-REGDOCS Atlas is the web research workbench for the Stage 5 Azure AI Search index.
+REGDOCS Atlas is the web research workbench for the Stage 5 Azure AI Search indexes and Stage 6 regulatory-intelligence artifacts.
 
 The Python pipeline remains responsible for acquiring, analyzing, normalizing, and publishing REGDOCS data. The `ui/` application is a separate Next.js application that reads the published `regdocs-chunks` index through server-side API routes.
 
@@ -9,6 +9,7 @@ The Python pipeline remains responsible for acquiring, analyzing, normalizing, a
 The current workbench includes:
 
 - full-stack Next.js/TypeScript application under `ui/`;
+- persistent System / Light / Dark appearance selection;
 - three-pane Search / Evidence / Ask-Analyze layout;
 - server-side Azure AI Search access using App Service managed identity or a local query key;
 - no Azure Search credentials shipped to the browser;
@@ -21,9 +22,11 @@ The current workbench includes:
 - relevance, filing-date, and chunk-order sorting;
 - evidence pinning for the current browser session;
 - normalized document/page evidence viewer;
+- document, regulatory timeline, and relationship-graph research views;
+- scoped deterministic filing chronology and regulatory entity relationships;
+- grounded Ask streaming through Microsoft Foundry Responses with validated `chunk_id` citations;
+- lexical, semantic, or hybrid retrieval, with query embeddings generated server-side;
 - health endpoint at `GET /api/health`.
-
-The Ask surface remains intentionally disabled until the grounded Microsoft Foundry route is implemented.
 
 ## Required configuration
 
@@ -31,15 +34,26 @@ The endpoint and index name select the Azure AI Search index:
 
 ```text
 AZURE_SEARCH_ENDPOINT=https://<service-name>.search.windows.net
-AZURE_SEARCH_INDEX=regdocs-chunks
+AZURE_SEARCH_INDEX=regdocs-current
+AZURE_SEARCH_RETRIEVAL_MODE=hybrid
+AZURE_SEARCH_ENTITIES_INDEX=regdocs-entities
+AZURE_SEARCH_RELATIONS_INDEX=regdocs-relations
+AZURE_SEARCH_EVENTS_INDEX=regdocs-events
+FOUNDRY_PROJECT_ENDPOINT=https://<resource>.services.ai.azure.com/api/projects/<project>
+FOUNDRY_MODEL_DEPLOYMENT=<responses-model-deployment>
+FOUNDRY_EMBEDDING_DEPLOYMENT=<embedding-deployment>
 ```
 
-Authentication is chosen automatically:
+`FOUNDRY_SAFETY_SALT` is optional but recommended for a multi-user deployment; the server uses it to hash the requester address into a privacy-preserving Responses API safety identifier. Ask also applies a process-local burst limit, which should be supplemented by the platform gateway for a scaled deployment.
 
-- In Azure App Service, leave `AZURE_SEARCH_API_KEY` unset and grant the web app's managed identity the read-only `Search Index Data Reader` role.
-- For local development, either sign in with Azure CLI and use an identity that has `Search Index Data Reader`, or set `AZURE_SEARCH_API_KEY` to a read-only query key.
+Authentication is chosen automatically for both Azure AI Search and Foundry:
 
-An admin key works locally but grants permissions the UI does not need. Never put a key in a variable beginning with `NEXT_PUBLIC_`; Next.js exposes `NEXT_PUBLIC_*` values to browser code.
+- In Azure App Service, leave `AZURE_SEARCH_API_KEY` and `FOUNDRY_API_KEY` unset. Grant the web app managed identity `Search Index Data Reader` and the appropriate Foundry project inference role.
+- For local development, either sign in with Azure CLI and use an identity with those roles, or set read-only/inference keys in `.env.local`.
+
+An Azure Search admin key works locally but grants permissions the UI does not need. Never put a key in a variable beginning with `NEXT_PUBLIC_`; Next.js exposes `NEXT_PUBLIC_*` values to browser code.
+
+The graph and timeline APIs use Azure Search when `AZURE_SEARCH_ENDPOINT` is configured. For a local preview, set `REGDOCS_INTELLIGENCE_DIR` to a Stage 6 output directory; the default fallback is `../workspace/6_enrich` relative to `ui/`.
 
 ## Local development
 
@@ -77,8 +91,10 @@ With the application running:
 
 ```bash
 curl http://localhost:3000/api/health
-curl 'http://localhost:3000/api/search?q=caribou&top=5'
+curl 'http://localhost:3000/api/search?q=caribou&top=5&retrievalMode=hybrid'
 curl 'http://localhost:3000/api/search?q=*&chunkType=table&top=5'
+curl 'http://localhost:3000/api/timeline?documentId=<document-id>'
+curl 'http://localhost:3000/api/graph?filingId=<filing-id>'
 ```
 
 A configured health response looks like:
@@ -90,7 +106,15 @@ A configured health response looks like:
   "azureSearch": {
     "endpointConfigured": true,
         "authentication": "managed_identity",
-        "indexName": "regdocs-chunks"
+    "indexName": "regdocs-current",
+    "retrievalMode": "hybrid"
+  },
+  "foundry": {
+    "endpointConfigured": true,
+    "modelConfigured": true,
+    "embeddingModelConfigured": true,
+    "askReady": true,
+    "hybridReady": true
   }
 }
 ```
@@ -104,6 +128,14 @@ Use a Linux App Service with Node.js 24 LTS and the startup command `node server
 ```text
 AZURE_SEARCH_ENDPOINT
 AZURE_SEARCH_INDEX
+AZURE_SEARCH_RETRIEVAL_MODE
+AZURE_SEARCH_ENTITIES_INDEX
+AZURE_SEARCH_RELATIONS_INDEX
+AZURE_SEARCH_EVENTS_INDEX
+FOUNDRY_PROJECT_ENDPOINT
+FOUNDRY_MODEL_DEPLOYMENT
+FOUNDRY_EMBEDDING_DEPLOYMENT
+FOUNDRY_EMBEDDING_DIMENSIONS
 ```
 
 Enable the web app's managed identity and assign it `Search Index Data Reader` on the Search service. No Python pipeline process is required in the web application.
@@ -134,6 +166,7 @@ Supported query parameters are:
 - `q`
 - `top` (maximum 50)
 - `sort=relevance|newest|oldest|chunk`
+- `retrievalMode=lexical|semantic|hybrid`
 - `page`
 - `documentId`
 - `filingId`
@@ -151,6 +184,6 @@ Facet/filter parameters can be repeated to request multiple values.
 
 ## Current boundary
 
-This UI uses the current Stage 5 lexical index. Semantic ranking, vectors, Find Similar, Filing DNA, structured relationship graphs, chronology extraction, contradiction analysis, claim ledgers, obligation extraction, and grounded Ask require later Stage 5/Foundry enhancements.
+The timeline distinguishes deterministic filing dates from model-extracted occurrence dates. The graph contains deterministic document, filing, organization, and project relationships and can include explicitly merged model relationships. The pipeline now has a scoped, resumable structured-extraction pilot for claims, obligations, occurrence chronology, and relationships; its records remain `unreviewed` and are excluded from publishing unless deliberately merged. Contradiction analysis and a human-review workbench remain later enrichment milestones.
 
-The next source-viewer milestone is serving the original document/page and applying Stage 4 provenance polygons so a search hit can jump to the exact highlighted region.
+The source viewer resolves exact normalized chunks and pages. Serving original page imagery with Stage 4 provenance polygons remains a later viewer milestone.

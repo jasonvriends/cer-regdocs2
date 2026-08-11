@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 :root {
   color-scheme: light;
@@ -7,6 +8,15 @@
   --atlas-line: #dfe4ea;
   --atlas-panel: #ffffff;
   --atlas-canvas: #f4f6f8;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --atlas-ink: #e2e8f0;
+  --atlas-muted: #94a3b8;
+  --atlas-line: #334155;
+  --atlas-panel: #0f172a;
+  --atlas-canvas: #020617;
 }
 
 * {
@@ -23,13 +33,21 @@ body {
   background: var(--atlas-canvas);
   color: var(--atlas-ink);
   font-family: Arial, Helvetica, sans-serif;
+  transition: background-color 150ms ease, color 150ms ease;
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 
 ::selection {
   background: #d9e9ff;
+}
+
+:root[data-theme="dark"] ::selection {
+  background: #1d4ed8;
+  color: #f8fafc;
 }

@@ -34,8 +34,8 @@ from regdocs_paths import (
     stored_path as portable_path,
 )
 
-SCRIPT_VERSION = "4.1.0"
-PARSER_VERSION = "regdocs-normalizer-2026-08-08-v2"
+SCRIPT_VERSION = "4.1.1"
+PARSER_VERSION = "regdocs-normalizer-2026-08-11-v3"
 DEFAULT_ANALYZER_ID = "prebuilt-layout"
 DEFAULT_API_VERSION = "2025-11-01"
 DEFAULT_TARGET_WORDS = 800
@@ -1221,25 +1221,32 @@ def build_chunks_tables_provenance(
                 },
                 content_index,
             )
-            for group_index, group in enumerate(split_table_for_search(table, target_words, max_words), start=1):
+            table_part = 0
+            for group in split_table_for_search(table, target_words, max_words):
                 text = group["text"]
                 if caption:
                     text = f"{caption}\n{text}".strip()
                 unit = TextUnit(text=text, evidence=[evidence], regions=regions, span=table.get("span"))
-                chunk_counter += 1
-                chunk_id = f"{candidate.document_id}:chunk:{chunk_counter:04d}"
-                chunk, prov = make_text_chunk(
-                    chunk_id, chunk_counter, candidate, projected, section_path, [unit], "table",
-                    {
-                        "content_index": content_index,
-                        "table_id": table_id,
-                        "table_part": group_index,
-                        "table_row_start": group["row_start"],
-                        "table_row_end": group["row_end"],
-                    },
-                )
-                chunks.append(chunk)
-                provenance.append(prov)
+                # A single tabular row can exceed max_words. Run every table
+                # group through the same structural splitter used for text and
+                # figures so embedding/index limits remain true invariants while
+                # retaining the table and row evidence on each fragment.
+                for text_group in group_text_units([unit], target_words, max_words):
+                    table_part += 1
+                    chunk_counter += 1
+                    chunk_id = f"{candidate.document_id}:chunk:{chunk_counter:04d}"
+                    chunk, prov = make_text_chunk(
+                        chunk_id, chunk_counter, candidate, projected, section_path, text_group, "table",
+                        {
+                            "content_index": content_index,
+                            "table_id": table_id,
+                            "table_part": table_part,
+                            "table_row_start": group["row_start"],
+                            "table_row_end": group["row_end"],
+                        },
+                    )
+                    chunks.append(chunk)
+                    provenance.append(prov)
 
         def emit_figure(figure_idx: int, section_path: list[str]) -> None:
             nonlocal chunk_counter

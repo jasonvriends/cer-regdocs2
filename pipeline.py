@@ -39,6 +39,7 @@ Stages:
   python pipeline.py analyze docling ACTION ...
   python pipeline.py normalize ACTION ...
   python pipeline.py index ACTION ...
+  python pipeline.py enrich ACTION ...
 
 Database / recovery:
   python pipeline.py db ACTION ...
@@ -53,6 +54,7 @@ Help:
   python pipeline.py help analyze docling
   python pipeline.py help normalize
   python pipeline.py help index
+  python pipeline.py help enrich
 """
 
 SCOUT_HELP = """Scout
@@ -153,15 +155,40 @@ INDEX_HELP = """Index / Azure AI Search
 
 Actions:
   plan                     Validate/map normalized chunks; Azure Search is not contacted
+  embed plan               Report the resumable embedding-cache work; no Foundry request
+  embed run                Generate missing embeddings; requires an explicit scope
   publish                  Create/use the index and upload selected chunks
   query TEXT               Query the existing Azure AI Search index; does not publish
 
 Examples:
   python pipeline.py index plan
+  python pipeline.py index embed plan --limit 5000
+  python pipeline.py index embed run --limit 5000
   python pipeline.py index publish
   python pipeline.py index query "pipeline abandonment" --top 5
 
 See SYNTAX.md for all Index switches.
+"""
+
+ENRICH_HELP = """Enrich / Regulatory intelligence
+
+Actions:
+  plan                     Validate normalized documents and preview derived records
+  run                      Build deterministic entities, relationships, and filing events
+  publish                  Build artifacts and publish graph/timeline indexes to Azure Search
+  extract plan             Preview a resumable Foundry structured-extraction pilot
+  extract run              Extract evidence-backed events/claims/obligations/relationships
+
+Examples:
+  python pipeline.py enrich plan
+  python pipeline.py enrich run
+  python pipeline.py enrich run --document-id 4657417
+  python pipeline.py enrich publish
+  python pipeline.py enrich extract plan --limit 10
+  python pipeline.py enrich extract run --limit 10
+
+The deterministic run is local and does not call Foundry. Optional model-derived
+events, claims, obligations, and relationships are a separate explicit action.
 """
 
 ANALYZE_HELP = """Analyze
@@ -435,12 +462,34 @@ def _route_index(rest: list[str]) -> tuple[list[str] | None, int | None]:
     if action == "plan":
         rejected = _reject_options(
             options,
-            {"--dry-run", "--query"},
+            {"--dry-run", "--query", "--promote-alias", "--alias-name"},
             use="python pipeline.py index plan [options]",
         )
         if rejected is not None:
             return None, rejected
         return ["index", "--dry-run", *options], None
+    if action == "embed":
+        if not options or options[0] not in {"plan", "run"}:
+            return None, _error("Index embed requires plan or run.", INDEX_HELP)
+        embed_action, embed_options = options[0], options[1:]
+        rejected = _reject_options(
+            embed_options,
+            {"--dry-run", "--embed", "--query", "--recreate-index"},
+            use=f"python pipeline.py index embed {embed_action} [--all|--limit N|--document-id ID]",
+        )
+        if rejected is not None:
+            return None, rejected
+        if embed_action == "run" and not any(
+            _has_option(embed_options, name) for name in ("--all", "--limit", "--document-id")
+        ):
+            return None, _error(
+                "Index embed run requires an explicit scope: --all, --limit N, or --document-id ID.",
+                INDEX_HELP,
+            )
+        translated = ["index", "--embed", *embed_options]
+        if embed_action == "plan":
+            translated.insert(2, "--dry-run")
+        return translated, None
     if action == "publish":
         rejected = _reject_options(
             options,
@@ -456,13 +505,58 @@ def _route_index(rest: list[str]) -> tuple[list[str] | None, int | None]:
         text, query_options = options[0], options[1:]
         rejected = _reject_options(
             query_options,
-            {"--dry-run", "--query", "--recreate-index"},
+            {"--dry-run", "--query", "--recreate-index", "--promote-alias", "--alias-name"},
             use='python pipeline.py index query "text" [--top N] [--filter ODATA]',
         )
         if rejected is not None:
             return None, rejected
         return ["index", "--query", text, *query_options], None
     return None, _error(f"Unknown Index action: {action}", INDEX_HELP)
+
+
+def _route_enrich(rest: list[str]) -> tuple[list[str] | None, int | None]:
+    if not rest or rest[0] in HELP_FLAGS:
+        return None, _print_help(ENRICH_HELP)
+    action, options = rest[0], rest[1:]
+    if _contains_help(options):
+        return None, _print_help(ENRICH_HELP)
+    if action == "extract":
+        if not options or options[0] not in {"plan", "run"}:
+            return None, _error("Enrich extract requires plan or run.", ENRICH_HELP)
+        extract_action, extract_options = options[0], options[1:]
+        rejected = _reject_options(
+            extract_options,
+            {"--dry-run", "--model-extract", "--publish", "--include-model-dir"},
+            use=f"python pipeline.py enrich extract {extract_action} [--all|--limit N|--document-id ID]",
+        )
+        if rejected is not None:
+            return None, rejected
+        if extract_action == "run" and not any(
+            _has_option(extract_options, name) for name in ("--all", "--limit", "--document-id")
+        ):
+            return None, _error(
+                "Enrich extract run requires an explicit scope: --all, --limit N, or --document-id ID.",
+                ENRICH_HELP,
+            )
+        translated = ["enrich", "--model-extract", *extract_options]
+        if extract_action == "plan":
+            translated.insert(2, "--dry-run")
+        return translated, None
+    if action not in {"plan", "run", "publish"}:
+        return None, _error(f"Unknown Enrich action: {action}", ENRICH_HELP)
+    rejected = _reject_options(
+        options,
+        {"--dry-run", "--publish"},
+        use=f"python pipeline.py enrich {action} [options]",
+    )
+    if rejected is not None:
+        return None, rejected
+    translated = ["enrich", *options]
+    if action == "plan":
+        translated.insert(1, "--dry-run")
+    elif action == "publish":
+        translated.insert(1, "--publish")
+    return translated, None
 
 
 def _help_for(parts: list[str]) -> int:
@@ -476,6 +570,8 @@ def _help_for(parts: list[str]) -> int:
         return _print_help(NORMALIZE_HELP)
     if parts[0] == "index":
         return _print_help(INDEX_HELP)
+    if parts[0] == "enrich":
+        return _print_help(ENRICH_HELP)
     if parts[0] == "analyze":
         if len(parts) >= 2 and parts[1] == "azure":
             return _print_help(AZURE_HELP)
@@ -517,6 +613,8 @@ def main() -> int:
         translated, immediate = _route_normalize(args[1:])
     elif command == "index":
         translated, immediate = _route_index(args[1:])
+    elif command == "enrich":
+        translated, immediate = _route_enrich(args[1:])
     elif command in DIRECT_COMMANDS:
         return int(cli_main(args))
     else:

@@ -4,6 +4,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const SORTS = new Set<AtlasSearchSort>(["relevance", "newest", "oldest", "chunk"]);
+const RETRIEVAL_MODES = new Set(["lexical", "semantic", "hybrid"] as const);
 
 function values(url: URL, name: string) {
   return url.searchParams.getAll(name).map((value) => value.trim()).filter(Boolean);
@@ -22,12 +23,19 @@ export async function GET(request: Request) {
   const top = Math.min(requestedTop, 50);
   const requestedSort = (url.searchParams.get("sort")?.trim() || "relevance") as AtlasSearchSort;
   const sort = SORTS.has(requestedSort) ? requestedSort : "relevance";
+  const requestedRetrievalMode = url.searchParams.get("retrievalMode")?.trim();
+  const retrievalMode = RETRIEVAL_MODES.has(
+    requestedRetrievalMode as "lexical" | "semantic" | "hybrid",
+  )
+    ? (requestedRetrievalMode as "lexical" | "semantic" | "hybrid")
+    : undefined;
 
   try {
     const response = await searchRegdocs({
       query,
       top,
       sort,
+      retrievalMode,
       page: positiveInt(url.searchParams.get("page")),
       documentIds: values(url, "documentId"),
       filingIds: values(url, "filingId"),
