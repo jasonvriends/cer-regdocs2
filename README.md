@@ -431,6 +431,22 @@ export AZURE_SEARCH_ADMIN_KEY="YOUR-KEY"
 export AZURE_SEARCH_INDEX_NAME="regdocs-chunks"
 ```
 
+To add hybrid retrieval without changing that lexical index, publish to the
+versioned hybrid index with the same embedding deployment used at query time:
+
+```bash
+export AZURE_OPENAI_ENDPOINT="https://YOUR-RESOURCE.openai.azure.com"
+export AZURE_OPENAI_API_KEY="YOUR-EMBEDDING-KEY"
+export AZURE_OPENAI_EMBEDDING_DEPLOYMENT="text-embedding-3-small"
+
+python tools/publish_hybrid_index.py --dry-run --limit 100
+python tools/publish_hybrid_index.py --limit 100
+# After pilot evaluation, omit --limit to publish the complete corpus.
+```
+
+The Next.js workbench configuration for Azure AI Search hybrid retrieval and
+Microsoft Foundry cited answers is documented in [`ui/README.md`](ui/README.md).
+
 See [SYNTAX.md](SYNTAX.md#azure-environment-variables) for the full environment-variable reference.
 
 ---
