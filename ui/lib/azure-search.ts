@@ -40,6 +40,7 @@ export type RegdocsSearchDocument = {
   azure_figure_id?: string | null;
   element_paths?: string[] | null;
   local_element_paths?: string[] | null;
+  content_vector?: number[] | null;
 };
 
 export type AtlasSearchResult = RegdocsSearchDocument & {
@@ -54,6 +55,7 @@ export type AtlasFacetBucket = {
 export type AtlasFacets = Record<string, AtlasFacetBucket[]>;
 
 export type AtlasSearchSort = "relevance" | "newest" | "oldest" | "chunk";
+export type AtlasSearchMode = "keyword" | "hybrid";
 
 export type AtlasSearchRequest = {
   query: string;
@@ -71,13 +73,26 @@ export type AtlasSearchRequest = {
   roles?: string[];
   page?: number;
   sort?: AtlasSearchSort;
+  mode?: AtlasSearchMode;
+  chunkIds?: string[];
 };
 
 export type AtlasSearchResponse = {
   query: string;
+  mode: AtlasSearchMode;
   count: number;
   totalCount: number | null;
   facets: AtlasFacets;
+  results: AtlasSearchResult[];
+};
+
+export type AtlasDocumentViewResponse = {
+  documentId: string;
+  offset: number;
+  count: number;
+  totalCount: number;
+  requestedPage: number | null;
+  pageFound: boolean;
   results: AtlasSearchResult[];
 };
 
@@ -143,6 +158,7 @@ function collectionClause(field: string, values: string[] | undefined) {
 
 function buildFilter(request: AtlasSearchRequest) {
   const clauses = [
+    scalarClause("chunk_id", request.chunkIds),
     scalarClause("document_id", request.documentIds),
     scalarClause("filing_id", request.filingIds),
     scalarClause("filing_number", request.filingNumbers),
@@ -255,15 +271,45 @@ export async function searchRegdocs(request: AtlasSearchRequest): Promise<AtlasS
   const client = getSearchClient();
   const query = request.query.trim() || "*";
   const top = Math.min(Math.max(request.top ?? 20, 1), 50);
+  const hybrid = request.mode === "hybrid" && query !== "*";
+  const configuredVectorField = process.env.AZURE_SEARCH_VECTOR_FIELD?.trim();
+  const semanticConfiguration = process.env.AZURE_SEARCH_SEMANTIC_CONFIGURATION?.trim();
+  if (hybrid && !configuredVectorField) {
+    throw new Error("AZURE_SEARCH_VECTOR_FIELD is not configured");
+  }
+  const vectorField = configuredVectorField as keyof RegdocsSearchDocument | undefined;
+
   const response = await client.search(query, {
     top,
     filter: buildFilter(request),
     facets: FACETS,
     includeTotalCount: true,
     orderBy: orderBy(request.sort),
-    queryType: "simple",
+    ...(hybrid && semanticConfiguration && !orderBy(request.sort)
+      ? {
+          queryType: "semantic" as const,
+          semanticSearchOptions: {
+            configurationName: semanticConfiguration,
+            captions: { captionType: "extractive" as const, highlight: true },
+            errorMode: "partial" as const,
+          },
+        }
+      : { queryType: "simple" as const }),
     searchMode: "any",
     select: SELECT_FIELDS,
+    ...(hybrid
+      ? {
+          vectorSearchOptions: {
+            queries: [{
+              kind: "text" as const,
+              text: query,
+              fields: [vectorField!],
+              kNearestNeighborsCount: semanticConfiguration ? 50 : Math.max(top, 30),
+            }],
+            filterMode: "preFilter" as const,
+          },
+        }
+      : {}),
   });
 
   const results: AtlasSearchResult[] = [];
@@ -276,9 +322,85 @@ export async function searchRegdocs(request: AtlasSearchRequest): Promise<AtlasS
 
   return {
     query,
+    mode: request.mode ?? "keyword",
     count: results.length,
     totalCount: response.count ?? null,
     facets: normalizeFacets(response.facets),
+    results,
+  };
+}
+
+export async function getChunksByIds(chunkIds: string[]): Promise<AtlasSearchResult[]> {
+  const cleaned = cleanValues(chunkIds).slice(0, 30);
+  if (!cleaned.length) return [];
+  const response = await searchRegdocs({
+    query: "*",
+    chunkIds: cleaned,
+    top: cleaned.length,
+    sort: "chunk",
+    mode: "keyword",
+  });
+  const order = new Map(cleaned.map((id, index) => [id, index]));
+  return response.results.sort(
+    (left, right) => (order.get(left.chunk_id) ?? 999) - (order.get(right.chunk_id) ?? 999),
+  );
+}
+
+export async function getDocumentView(request: {
+  documentId: string;
+  offset?: number;
+  top?: number;
+  page?: number;
+}): Promise<AtlasDocumentViewResponse> {
+  const client = getSearchClient();
+  const documentId = request.documentId.trim();
+  const top = Math.min(Math.max(request.top ?? 60, 1), 100);
+  let offset = Math.max(request.offset ?? 0, 0);
+  let pageFound = true;
+  const documentFilter = `document_id eq '${escapeODataString(documentId)}'`;
+
+  if (request.page && Number.isInteger(request.page) && request.page > 0) {
+    const pageFilter = `${documentFilter} and page_start le ${request.page} and page_end ge ${request.page}`;
+    const anchorResponse = await client.search("*", {
+      top: 1,
+      filter: pageFilter,
+      orderBy: ["chunk_index asc"],
+      queryType: "simple",
+      select: ["chunk_index"],
+    });
+    let anchorIndex: number | null = null;
+    for await (const result of anchorResponse.results) {
+      anchorIndex = result.document.chunk_index ?? null;
+      break;
+    }
+    pageFound = anchorIndex !== null;
+    if (anchorIndex !== null) {
+      offset = Math.max(0, anchorIndex - 1 - Math.floor(top / 3));
+    }
+  }
+
+  const response = await client.search("*", {
+    top,
+    skip: offset,
+    filter: documentFilter,
+    includeTotalCount: true,
+    orderBy: ["chunk_index asc"],
+    queryType: "simple",
+    select: SELECT_FIELDS,
+  });
+
+  const results: AtlasSearchResult[] = [];
+  for await (const result of response.results) {
+    results.push({ ...result.document, score: result.score ?? null });
+  }
+
+  return {
+    documentId,
+    offset,
+    count: results.length,
+    totalCount: response.count ?? results.length,
+    requestedPage: request.page ?? null,
+    pageFound,
     results,
   };
 }
