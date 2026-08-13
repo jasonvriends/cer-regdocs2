@@ -41,7 +41,7 @@ try:
 except ImportError as exc:
     raise SystemExit(
         "Missing dependency 'httpx'. Install with: "
-        "python -m pip install -r pipeline/requirements.txt"
+        "python -m pip install -r regdocs_atlas/requirements.txt"
     ) from exc
 
 try:
@@ -49,7 +49,7 @@ try:
 except ImportError as exc:
     raise SystemExit(
         "Missing dependency 'beautifulsoup4'. Install with: "
-        "python -m pip install -r pipeline/requirements.txt"
+        "python -m pip install -r regdocs_atlas/requirements.txt"
     ) from exc
 
 try:

@@ -1,0 +1,7 @@
+# Minimal dependencies used by ui/deploy/deploy.sh in Azure Cloud Shell.
+# The full pipeline dependencies remain in requirements.txt.
+
+httpx==0.28.1
+azure-core==1.41.0
+azure-identity==1.25.3
+azure-search-documents==12.0.0

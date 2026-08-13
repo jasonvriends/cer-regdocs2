@@ -1,7 +1,7 @@
 # Runtime dependencies for REGDOCS Atlas.
 # Python 3.10+; current development environment uses Python 3.12.
-# Install once for all pipeline stages:
-#   python -m pip install -r requirements.txt
+# Install once for all pipeline stages from the repository root:
+#   python -m pip install -r regdocs_atlas/requirements.txt
 
 beautifulsoup4==4.15.0
 httpx==0.28.1

@@ -1,0 +1,20 @@
+{"id":"known-document-4647206","category":"known-item","query":"4647206","expected_document_ids":["4647206"],"notes":"Largest known document; exact identifier should favor lexical retrieval."}
+{"id":"known-schedule-a","category":"structured-data","query":"\"Schedule A\"","notes":"Exact form/table label."}
+{"id":"concept-schedule-a","category":"structured-data","query":"schedules listing project lands routes or facilities","notes":"Conceptual variant without using the exact form name."}
+{"id":"caribou-mitigation","category":"concept","query":"measures proposed to reduce effects on caribou habitat"}
+{"id":"traditional-land-use","category":"concept","query":"impacts to Indigenous traditional land use and proposed accommodation"}
+{"id":"watercourse-crossing","category":"table","query":"watercourse crossing location method and fish habitat","notes":"Likely table-heavy evidence."}
+{"id":"consultation-concerns","category":"concept","query":"concerns raised during consultation and how the company responded"}
+{"id":"emergency-response","category":"concept","query":"emergency response following a pipeline incident or release"}
+{"id":"compliance-order","category":"regulatory","query":"non-compliance inspection order corrective action deadline"}
+{"id":"abandonment-costs","category":"concept","query":"estimated pipeline abandonment costs and collection mechanism"}
+{"id":"financial-assurance","category":"concept","query":"financial resources available for unintended or uncontrolled release"}
+{"id":"greenhouse-gas","category":"concept","query":"upstream and downstream greenhouse gas emissions assessment"}
+{"id":"cumulative-effects","category":"concept","query":"cumulative environmental effects considered with other projects"}
+{"id":"hearing-process","category":"regulatory","query":"deadline to file written evidence and intervenor submissions"}
+{"id":"conditions-commitments","category":"regulatory","query":"commitments that must be completed before construction begins"}
+{"id":"route-map","category":"figure","query":"map showing proposed route and nearby communities"}
+{"id":"bilingual-french","category":"bilingual","query":"mesures d’atténuation des effets environnementaux"}
+{"id":"ocr-scan","category":"ocr","query":"handwritten signature date and approval","notes":"Use to inspect OCR-heavy/scanned results."}
+{"id":"hard-negative","category":"negative","query":"lunar mining licence on the Sea of Tranquility","expected_document_ids":[],"notes":"Should not produce a confident grounded answer."}
+{"id":"vague-natural-language","category":"concept","query":"what happened and what did the regulator require next"}
