@@ -93,6 +93,10 @@ def string_list(value: Any) -> list[str]:
     return [str(x) for x in value if x not in (None, "")] if isinstance(value, list) else []
 
 
+def optional_string(value: Any) -> Optional[str]:
+    return None if value is None else str(value)
+
+
 def element_paths(elements: Sequence[Any]) -> tuple[list[str], list[str]]:
     qualified: list[str] = []
     local: list[str] = []
@@ -126,7 +130,7 @@ def map_document(chunk: dict[str, Any], prov: dict[str, Any]) -> dict[str, Any]:
         "content_index": chunk.get("content_index"), "word_count": chunk.get("word_count"),
         "filing_date": chunk.get("filing_date"), "submitter": chunk.get("submitter"),
         "company": chunk.get("company"), "project": chunk.get("project"),
-        "filing_number": chunk.get("filing_number"), "filing_id": chunk.get("filing_id"),
+        "filing_number": chunk.get("filing_number"), "filing_id": optional_string(chunk.get("filing_id")),
         "application_types": string_list(chunk.get("application_types")),
         "commodities": string_list(chunk.get("commodities")),
         "document_types": string_list(chunk.get("document_types")),
@@ -146,9 +150,16 @@ def matches(chunk: dict[str, Any], document_ids: Optional[set[str]]) -> bool:
     return not document_ids or str(chunk.get("document_id") or "") in document_ids
 
 
-def scan_inputs(normalized_dir: Path, document_ids: Optional[set[str]], limit: Optional[int]) -> dict[str, Any]:
+def scan_inputs(
+    normalized_dir: Path,
+    document_ids: Optional[set[str]],
+    limit: Optional[int],
+    batch_size: int,
+    max_batch_bytes: int,
+) -> dict[str, Any]:
     chunks_path, prov_path = input_paths(normalized_dir)
     selected = total = payload_bytes = 0
+    expected_batches = batch_documents = batch_bytes = 0
     docs: set[str] = set()
     types: Counter[str] = Counter()
     versions: set[str] = set()
@@ -157,20 +168,34 @@ def scan_inputs(normalized_dir: Path, document_ids: Optional[set[str]], limit: O
         if not matches(chunk, document_ids) or (limit is not None and selected >= limit):
             continue
         doc = map_document(chunk, prov)
+        doc_bytes = len(stable_json(doc).encode())
+        batched_bytes = doc_bytes + 64
+        if batched_bytes > max_batch_bytes:
+            raise ValueError(f"{doc.get('chunk_id')}: mapped document exceeds --max-batch-bytes")
+        if batch_documents and (
+            batch_documents >= batch_size or batch_bytes + batched_bytes > max_batch_bytes
+        ):
+            expected_batches += 1
+            batch_documents = batch_bytes = 0
+        batch_documents += 1
+        batch_bytes += batched_bytes
         selected += 1
         docs.add(doc["document_id"])
         types[str(doc.get("chunk_type") or "unknown")] += 1
         if doc.get("normalizer_version"):
             versions.add(str(doc["normalizer_version"]))
-        payload_bytes += len(stable_json(doc).encode())
+        payload_bytes += doc_bytes
     if not selected:
         raise ValueError("No normalized chunks matched the selection")
+    if batch_documents:
+        expected_batches += 1
     return {
         "chunks_path": stored_path(chunks_path), "provenance_path": stored_path(prov_path),
         "chunks_sha256": sha256_file(chunks_path), "provenance_sha256": sha256_file(prov_path),
         "normalized_chunk_count": total, "search_document_count": selected,
         "source_document_count": len(docs), "chunk_types": dict(sorted(types.items())),
         "normalizer_versions": sorted(versions), "approx_search_document_bytes": payload_bytes,
+        "expected_batch_count": expected_batches,
     }
 
 
@@ -360,11 +385,21 @@ def run(args: argparse.Namespace) -> int:
         print(f"{shown} result(s) shown.")
         return 0
     document_ids = set(map(str, args.document_id)) if args.document_id else None
-    meta = scan_inputs(args.normalized_dir, document_ids, args.limit)
+    meta = scan_inputs(
+        args.normalized_dir,
+        document_ids,
+        args.limit,
+        args.batch_size,
+        args.max_batch_bytes,
+    )
     print(f"Validated {meta['search_document_count']} selected chunk(s) from {meta['source_document_count']} REGDOCS document(s); "
           f"{meta['normalized_chunk_count']} total normalized chunk/provenance pairs checked.")
     print(f"Chunk types: {meta['chunk_types']}")
     print(f"Mapped payload: {meta['approx_search_document_bytes'] / 1048576:.2f} MiB")
+    print(
+        f"Upload plan: {meta['expected_batch_count']} batch(es) at up to "
+        f"{args.batch_size} chunks / {args.max_batch_bytes / 1048576:.2f} MiB."
+    )
     print(f"chunks.jsonl sha256={meta['chunks_sha256']}"); print(f"provenance.jsonl sha256={meta['provenance_sha256']}")
     if args.dry_run:
         print("DRY RUN: Azure was not contacted.")
