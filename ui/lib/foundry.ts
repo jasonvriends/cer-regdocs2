@@ -4,12 +4,15 @@ import type { AtlasSearchResult } from "@/lib/azure-search";
 
 export type AtlasCitation = {
   id: string;
+  chunkId: string;
   title: string;
   documentId: string;
   filingNumber: string | null;
   pageStart: number | null;
   pageEnd: number | null;
   sourceUrl: string | null;
+  resolvedUrl: string | null;
+  fileType: string | null;
   excerpt: string;
 };
 
@@ -54,12 +57,15 @@ export async function answerWithFoundry(question: string, evidence: AtlasSearchR
 
   const citations: AtlasCitation[] = evidence.map((item, index) => ({
     id: `S${index + 1}`,
+    chunkId: item.chunk_id,
     title: sourceTitle(item),
     documentId: item.document_id,
     filingNumber: item.filing_number ?? null,
     pageStart: item.page_start ?? null,
     pageEnd: item.page_end ?? null,
     sourceUrl: item.source_url ?? null,
+    resolvedUrl: item.resolved_url ?? null,
+    fileType: item.file_types?.[0] ?? null,
     excerpt: (item.content ?? "").replace(/\s+/g, " ").trim().slice(0, 320),
   }));
 

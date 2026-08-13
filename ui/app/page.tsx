@@ -1,5 +1,9 @@
-import { AtlasWorkbench } from "@/components/atlas-workbench";
+import { AtlasChat } from "@/components/atlas-chat";
+import { cookies } from "next/headers";
 
-export default function Home() {
-  return <AtlasWorkbench />;
+export default async function Home() {
+  const cookieStore = await cookies();
+  const defaultSidebarOpen = cookieStore.get("sidebar_state")?.value !== "false";
+
+  return <AtlasChat defaultSidebarOpen={defaultSidebarOpen} />;
 }
