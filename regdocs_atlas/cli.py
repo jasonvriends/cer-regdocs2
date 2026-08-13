@@ -55,6 +55,7 @@ STAGE_FILES = {
     "docling": STAGES_DIR / "regdocs_3_docling_core.py",
     "normalize": STAGES_DIR / "regdocs_4_normalize_core.py",
     "index": STAGES_DIR / "index.py",
+    "enrich": STAGES_DIR / "enrich.py",
 }
 STAGE_LOCKS = (SCOUT_LOCK_PATH, DOWNLOAD_LOCK_PATH, ANALYZE_LOCK_PATH, NORMALIZE_LOCK_PATH)
 READ_ONLY_STAGE_FLAGS = {"--help", "-h", "--version", "--diagnostics", "--status", "--status-json"}
@@ -72,6 +73,7 @@ Usage:
   python pipeline.py analyze docling [stage options...]
   python pipeline.py normalize [--provider azure|docling] [stage options...]
   python pipeline.py index [stage options...]
+  python pipeline.py enrich [stage options...]
 
   python pipeline.py cost azure [--run-id N]
   python pipeline.py cost rates
@@ -153,7 +155,7 @@ def _read_only_stage(key: str, args: Sequence[str]) -> bool:
         # Scout probe is internally --dry-run but still persists runs, errors,
         # raw snapshots, and progress, so it must remain globally serialized.
         return bool(values & {"--audit", "--check-schema"})
-    if key in {"download", "azure", "normalize", "index"} and "--dry-run" in values:
+    if key in {"download", "azure", "normalize", "index", "enrich"} and "--dry-run" in values:
         return True
     if key == "index" and "--query" in values:
         return True
@@ -249,8 +251,8 @@ def _stage_command(key: str, args: Sequence[str]) -> list[str]:
     implementation = STAGE_FILES[key]
     if not implementation.is_file():
         raise RuntimeError(f"Stage implementation is missing: {implementation}")
-    if key == "index":
-        return [sys.executable, "-m", "regdocs_atlas.stages.index", *args]
+    if key in {"index", "enrich"}:
+        return [sys.executable, "-m", f"regdocs_atlas.stages.{key}", *args]
     return [sys.executable, str(implementation), *args]
 
 
@@ -665,6 +667,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_stage("download", _download_args(rest), stage="download")
     if command == "index":
         return _run_stage("index", rest, stage="index")
+    if command == "enrich":
+        return _run_stage("enrich", rest, stage="enrich")
     if command == "analyze":
         if not rest or rest[0] not in {"azure", "docling"}:
             print("Usage: python pipeline.py analyze azure|docling [stage options...]", file=sys.stderr)

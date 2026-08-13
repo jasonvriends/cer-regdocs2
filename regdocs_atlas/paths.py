@@ -47,6 +47,7 @@ ANALYSIS_MANIFEST_DIR = ANALYZE_DIR / "manifests" / "analyses"
 
 NORMALIZE_DIR = WORKSPACE_DIR / "4_normalize"
 INDEX_DIR = WORKSPACE_DIR / "5_index"
+ENRICH_DIR = WORKSPACE_DIR / "6_enrich"
 
 
 def stored_path(path: Path) -> str:

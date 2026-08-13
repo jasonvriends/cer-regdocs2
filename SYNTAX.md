@@ -274,6 +274,10 @@ python pipeline.py index query "..."
 | `AZURE_SEARCH_ENDPOINT` | Yes for publish/query unless `--endpoint` is supplied | Search endpoint | none |
 | `AZURE_SEARCH_ADMIN_KEY` | No | Search key | `DefaultAzureCredential` when omitted |
 | `AZURE_SEARCH_INDEX_NAME` | No | Search index name | `regdocs-chunks` |
+| `AZURE_SEARCH_ALIAS_NAME` | No | Stable read alias promoted only by explicit publish switch | none |
+| `FOUNDRY_PROJECT_ENDPOINT` | Required for embedding generation | Foundry project endpoint | none |
+| `FOUNDRY_EMBEDDING_DEPLOYMENT` | No | Embedding deployment name | `text-embedding-3-small` |
+| `FOUNDRY_EMBEDDING_DIMENSIONS` | No | Vector dimensions shared by cache/index/query | `1536` |
 
 Example:
 
@@ -281,6 +285,7 @@ Example:
 export AZURE_SEARCH_ENDPOINT="https://YOUR-SERVICE.search.windows.net"
 export AZURE_SEARCH_ADMIN_KEY="YOUR-KEY"
 export AZURE_SEARCH_INDEX_NAME="regdocs-chunks"
+export AZURE_SEARCH_ALIAS_NAME="regdocs-current"
 ```
 
 ---
@@ -911,6 +916,16 @@ The final shard merge is streamed instead of loading whole shard files into memo
 
 Stage 5 maps normalized chunks to Azure AI Search documents.
 
+## `index embed plan|run`
+
+```bash
+python pipeline.py index embed plan --all
+python pipeline.py index embed run --limit 5000
+python pipeline.py index embed run --document-id 4657417
+```
+
+`plan` reads the corpus/cache without contacting Foundry or changing the cache. `run` requires `--all`, `--limit`, or `--document-id`, validates empty/oversized inputs before any paid request, and resumes from the SQLite embedding cache.
+
 ## `index plan`
 
 ```bash
@@ -941,6 +956,14 @@ Use another index for testing:
 python pipeline.py index publish --index-name regdocs-chunks-test
 ```
 
+Hybrid blue/green publish and atomic alias promotion:
+
+```bash
+python pipeline.py index publish --profile hybrid \
+  --index-name regdocs-chunks-v2 \
+  --promote-alias --alias-name regdocs-current
+```
+
 **Safety:** NETWORK, WORKSPACE WRITE, AZURE SEARCH.
 
 ### Public Index plan/publish switches
@@ -952,6 +975,12 @@ python pipeline.py index publish --index-name regdocs-chunks-test
 | `--endpoint URL` | Azure AI Search endpoint | `AZURE_SEARCH_ENDPOINT` |
 | `--api-key KEY` | Azure Search key | `AZURE_SEARCH_ADMIN_KEY`, otherwise Azure Identity |
 | `--index-name NAME` | Search index | env, then `regdocs-chunks` |
+| `--profile lexical\|hybrid` | Index schema/retrieval profile | `lexical` |
+| `--embedding-cache PATH` | Resumable vector cache | Stage 5 workspace |
+| `--embedding-model NAME` | Foundry embedding deployment | environment / `text-embedding-3-small` |
+| `--embedding-dimensions N` | Vector dimensions | `1536` |
+| `--promote-alias` | Switch an alias only after a complete successful upload | off |
+| `--alias-name NAME` | Alias to promote; must differ from physical index | environment |
 | `--document-id ID` | Select one source document; repeatable | all |
 | `--limit N` | Maximum **chunks**, not source documents | unlimited |
 | `--batch-size N` | Search documents per upload batch | `500`, max `1000` |
@@ -959,6 +988,7 @@ python pipeline.py index publish --index-name regdocs-chunks-test
 | `--recreate-index` | Delete and recreate the index before upload | off |
 
 `--recreate-index` cannot be combined with `--document-id` or `--limit`.
+Alias promotion also rejects partial `--document-id`/`--limit` publishes.
 
 ## `index query`
 
@@ -987,6 +1017,31 @@ python pipeline.py index query "pipeline" \
 | `--filter ODATA` | Azure AI Search OData filter | none |
 
 **Safety:** NETWORK, AZURE SEARCH. Does not publish documents.
+
+---
+
+# 11A. Stage 6 — Regulatory intelligence
+
+```bash
+python pipeline.py enrich plan
+python pipeline.py enrich run
+python pipeline.py enrich run --document-id 4657417
+python pipeline.py enrich publish
+```
+
+`plan` is read-only. `run` writes deterministic `entities.jsonl`, `relations.jsonl`, `events.jsonl`, and empty versioned claim/obligation ledgers under `workspace/6_enrich`. `publish` performs that build and uploads entities, relations, and events to their dedicated Azure AI Search indexes. Use `--recreate-indexes` only with the explicit publish action.
+
+Key switches: `--normalized-dir`, `--output-dir`, repeatable `--document-id`, `--limit`, `--endpoint`, `--api-key`, `--entities-index`, `--relations-index`, `--events-index`, `--batch-size`, and `--recreate-indexes`.
+
+## `enrich extract plan|run`
+
+```bash
+python pipeline.py enrich extract plan --limit 10
+python pipeline.py enrich extract run --limit 10
+python pipeline.py enrich extract run --document-id 4657417
+```
+
+`plan` never contacts Foundry or changes the cache. `run` requires `--all`, `--limit`, or `--document-id`; validates citations against the exact request chunks; resumes from `workspace/6_enrich/model/extraction.sqlite`; and materializes separate unreviewed model ledgers. Use `enrich publish --include-model-dir workspace/6_enrich/model` only after reviewing a pilot.
 
 ---
 

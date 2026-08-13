@@ -346,6 +346,20 @@ export async function getChunksByIds(chunkIds: string[]): Promise<AtlasSearchRes
   );
 }
 
+export async function getRegdocsChunk(chunkId: string): Promise<AtlasSearchResult | null> {
+  const client = getSearchClient();
+  const response = await client.search("*", {
+    top: 1,
+    filter: `chunk_id eq '${escapeODataString(chunkId.trim())}'`,
+    queryType: "simple",
+    select: SELECT_FIELDS,
+  });
+  for await (const result of response.results) {
+    return { ...result.document, score: result.score ?? null };
+  }
+  return null;
+}
+
 export async function getDocumentView(request: {
   documentId: string;
   offset?: number;

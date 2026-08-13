@@ -14,7 +14,7 @@ If you are new to the project, read this file first. When you need every command
 
 ## What does this project do?
 
-Think of REGDOCS Atlas as a five-step assembly line:
+Think of REGDOCS Atlas as a six-step assembly line:
 
 ```text
 CER REGDOCS website
@@ -33,11 +33,14 @@ CER REGDOCS website
         │
         ▼
 5. INDEX       Publish search-ready chunks to Azure AI Search
+        │
+        ▼
+6. ENRICH      Build evidence-backed graph and chronology artifacts
 ```
 
 The project also keeps a local SQLite database at `database/regdocs.db`. That database is the pipeline's **ledger**: it records what has been found, downloaded, analyzed, normalized, and processed.
 
-### The five stages in plain language
+### The six stages in plain language
 
 | Stage | Name | What it does | Uses the internet? | Can cost money? |
 |---|---|---|---:|---:|
@@ -46,6 +49,7 @@ The project also keeps a local SQLite database at `database/regdocs.db`. That da
 | 3 | Analyze | Extracts document structure and text | Azure: yes; Docling: no | **Azure can** |
 | 4 | Normalize | Converts analysis into consistent JSONL files | No | No |
 | 5 | Index | Publishes searchable chunks to Azure AI Search | Yes | Azure Search charges may apply |
+| 6 | Enrich | Derives and publishes regulatory entities, relationships, and events | Publish only | Azure Search charges may apply |
 
 ---
 
@@ -78,11 +82,12 @@ workspace/3_analyze/     Azure and Docling analysis artifacts
 database/regdocs.db      local SQLite pipeline ledger
 ```
 
-Stage 4 and Stage 5 are designed to be recreated from earlier results:
+Stages 4 through 6 are designed to be recreated from earlier results:
 
 ```text
 workspace/4_normalize/
 workspace/5_index/
+workspace/6_enrich/
 ```
 
 The SQLite ledger can also be rebuilt from the durable Stage 1-3 artifacts.
@@ -144,6 +149,7 @@ python pipeline.py analyze azure
 python pipeline.py analyze docling
 python pipeline.py normalize
 python pipeline.py index
+python pipeline.py enrich
 ```
 
 To perform work, you must choose an action such as `run`, `plan`, `publish`, `probe`, or `repair`.
@@ -171,7 +177,7 @@ This distinction is especially important for Azure analysis because `run` can su
 The normal order is:
 
 ```text
-Scout → Download → Analyze → Normalize → Index
+Scout → Download → Analyze → Normalize → Index → Enrich
 ```
 
 You do not always need to run every stage. If a stage is already complete, its planning or status command should show that there is little or nothing left to do.
@@ -373,10 +379,25 @@ Preview first:
 python pipeline.py index plan
 ```
 
+For the hybrid v2 index, plan and generate the resumable embedding cache with an explicit scope:
+
+```bash
+python pipeline.py index embed plan --all
+python pipeline.py index embed run --all
+```
+
 Publish:
 
 ```bash
-python pipeline.py index publish
+python pipeline.py index publish --profile hybrid --index-name regdocs-chunks-v2
+```
+
+After a complete upload, optionally switch a stable Search alias atomically:
+
+```bash
+python pipeline.py index publish --profile hybrid \
+  --index-name regdocs-chunks-v2 \
+  --promote-alias --alias-name regdocs-current
 ```
 
 Search the published index:
@@ -390,6 +411,33 @@ For testing, you can publish to another index name:
 ```bash
 python pipeline.py index publish --index-name regdocs-chunks-test
 ```
+
+## Stage 6 — Enrich regulatory intelligence
+
+Preview deterministic entities, relationships, and filing chronology locally:
+
+```bash
+python pipeline.py enrich plan
+```
+
+Build the local JSONL artifacts, then explicitly publish their three Search indexes:
+
+```bash
+python pipeline.py enrich run
+python pipeline.py enrich publish
+```
+
+Run the model layer as a small, explicit pilot before expanding it:
+
+```bash
+python pipeline.py enrich extract plan --limit 10
+python pipeline.py enrich extract run --limit 10
+python pipeline.py enrich publish --include-model-dir workspace/6_enrich/model
+```
+
+Extraction is resumable and model records are marked `unreviewed`. The deterministic publish excludes them unless `--include-model-dir` is supplied.
+
+Every derived relationship and event carries its origin, schema/extractor version, review state, and available document/chunk/page evidence. Deterministic filing activity is kept distinct from later model-extracted occurrence chronology.
 
 ---
 
@@ -429,6 +477,9 @@ export CONTENTUNDERSTANDING_POLLING_INTERVAL="3"
 export AZURE_SEARCH_ENDPOINT="https://YOUR-SERVICE.search.windows.net"
 export AZURE_SEARCH_ADMIN_KEY="YOUR-KEY"
 export AZURE_SEARCH_INDEX_NAME="regdocs-chunks"
+export AZURE_SEARCH_ALIAS_NAME="regdocs-current"
+export FOUNDRY_PROJECT_ENDPOINT="https://YOUR-RESOURCE.services.ai.azure.com/api/projects/YOUR-PROJECT"
+export FOUNDRY_EMBEDDING_DEPLOYMENT="YOUR-EMBEDDING-DEPLOYMENT"
 ```
 
 To add hybrid retrieval without changing that lexical index, publish to the
