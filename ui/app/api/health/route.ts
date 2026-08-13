@@ -12,6 +12,11 @@ export async function GET() {
   const semanticConfiguration = process.env.AZURE_SEARCH_SEMANTIC_CONFIGURATION?.trim();
   const foundryEndpointConfigured = Boolean(process.env.FOUNDRY_PROJECT_ENDPOINT?.trim());
   const foundryModelConfigured = Boolean(process.env.FOUNDRY_MODEL_DEPLOYMENT?.trim());
+  const intelligenceIndexes = {
+    entities: process.env.AZURE_SEARCH_ENTITIES_INDEX?.trim() || "regdocs-entities",
+    relations: process.env.AZURE_SEARCH_RELATIONS_INDEX?.trim() || "regdocs-relations",
+    events: process.env.AZURE_SEARCH_EVENTS_INDEX?.trim() || "regdocs-events",
+  };
 
   return Response.json(
     {
@@ -28,6 +33,11 @@ export async function GET() {
         configured: foundryEndpointConfigured && foundryModelConfigured,
         projectEndpointConfigured: foundryEndpointConfigured,
         modelDeploymentConfigured: foundryModelConfigured,
+        safetyIdentifierConfigured: Boolean(process.env.FOUNDRY_SAFETY_SALT?.trim()),
+      },
+      intelligence: {
+        indexes: intelligenceIndexes,
+        localFallbackConfigured: Boolean(process.env.REGDOCS_INTELLIGENCE_DIR?.trim()),
       },
     },
     { status: endpointConfigured ? 200 : 503 },

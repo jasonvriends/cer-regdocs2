@@ -39,8 +39,15 @@ export function AtlasGraph({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestKey = useMemo(() => scopeParams(scope).toString(), [scope]);
+  const hasScope = useMemo(() => Object.values(scope).some((value) => Boolean(value?.trim())), [scope]);
 
   useEffect(() => {
+    if (!hasScope) {
+      setGraph({ nodes: [], edges: [], truncated: false });
+      setError(null);
+      setLoading(false);
+      return;
+    }
     const controller = new AbortController();
     setLoading(true);
     setError(null);
@@ -59,7 +66,7 @@ export function AtlasGraph({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [requestKey]);
+  }, [hasScope, requestKey]);
 
   const layout = useMemo(() => {
     const visibleNodes = graph.nodes.slice(0, 80);
@@ -87,13 +94,13 @@ export function AtlasGraph({
   );
 
   return (
-    <div className="w-full max-w-[1100px] rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+    <div className="w-full rounded-xl border border-border bg-card p-5 shadow-sm">
       <div className="flex items-start justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold">Regulatory graph</h2>
-          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Evidence-backed organizations, projects, filings, and documents in the active scope.</p>
+          <p className="mt-1 text-sm text-muted-foreground">Evidence-backed organizations, projects, filings, and documents in the active scope.</p>
         </div>
-        <div className="text-right text-xs text-slate-500 dark:text-slate-400">
+        <div className="text-right text-xs text-muted-foreground">
           <div>{loading ? "Loading…" : `${graph.nodes.length} nodes · ${graph.edges.length} edges`}</div>
           {graph.truncated ? <div className="mt-1 text-amber-600 dark:text-amber-300">Scoped result truncated</div> : null}
         </div>
@@ -101,13 +108,13 @@ export function AtlasGraph({
 
       {error ? <div className="mt-5 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">{error}</div> : null}
       {!loading && !error && !graph.nodes.length ? (
-        <div className="mt-8 rounded-lg border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">
-          Choose a filing, company, project, or document scope to load its graph.
+        <div className="mt-8 rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
+          {hasScope ? "No relationships are available for this scope yet." : "Choose a filing, company, project, or document filter, or open a source, to load its graph."}
         </div>
       ) : null}
 
       {graph.nodes.length ? (
-        <div className="mt-5 overflow-x-auto rounded-lg bg-slate-50 dark:bg-slate-950">
+        <div className="mt-5 overflow-x-auto rounded-lg bg-muted/40">
           <svg aria-label="Regulatory relationship graph" className="min-w-[900px]" role="img" viewBox="0 0 960 640">
             {graph.edges.map((edge) => {
               const source = layout.positions.get(edge.source_id);
@@ -120,7 +127,7 @@ export function AtlasGraph({
               return (
                 <g key={node.id} transform={`translate(${point.x} ${point.y})`}>
                   <circle fill={TYPE_COLOR[node.entity_type] || "#64748b"} r="7" />
-                  <text className="fill-slate-700 text-[10px] dark:fill-slate-300" dominantBaseline="middle" x="12">{shortLabel(node)}</text>
+                  <text className="fill-foreground text-[10px]" dominantBaseline="middle" x="12">{shortLabel(node)}</text>
                   <title>{node.entity_type}: {node.name}</title>
                 </g>
               );
@@ -132,17 +139,17 @@ export function AtlasGraph({
       {graph.edges.length ? (
         <div className="mt-4 grid gap-2 md:grid-cols-2">
           {graph.edges.slice(0, 8).map((edge) => (
-            <div className="rounded-md border border-slate-200 px-3 py-2 text-xs dark:border-slate-800" key={edge.id}>
-              <div className="truncate text-slate-700 dark:text-slate-200">
+            <div className="rounded-md border border-border px-3 py-2 text-xs" key={edge.id}>
+              <div className="truncate text-foreground">
                 {nodeNames.get(edge.source_id) || edge.source_id}
                 <span className="mx-1.5 text-slate-400">{edge.relationship_type.replaceAll("_", " ")}</span>
                 {nodeNames.get(edge.target_id) || edge.target_id}
               </div>
-              <div className="mt-1 flex items-center gap-2 text-[11px] text-slate-400">
+              <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
                 <span>{edge.origin.replaceAll("_", " ")}</span>
                 {edge.evidence_chunk_ids?.[0] && onOpenEvidence ? (
                   <button
-                    className="font-medium text-blue-600 hover:underline dark:text-blue-400"
+                    className="font-medium text-primary hover:underline"
                     onClick={() => onOpenEvidence(edge.evidence_chunk_ids![0])}
                     type="button"
                   >
@@ -155,7 +162,7 @@ export function AtlasGraph({
         </div>
       ) : null}
 
-      <div className="mt-4 flex flex-wrap gap-3 text-[11px] text-slate-500 dark:text-slate-400">
+      <div className="mt-4 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
         {TYPE_ORDER.map((type) => <span className="flex items-center gap-1.5" key={type}><span className="h-2.5 w-2.5 rounded-full" style={{ background: TYPE_COLOR[type] }} />{type}</span>)}
       </div>
     </div>

@@ -1,6 +1,6 @@
 # REGDOCS Atlas UI
 
-REGDOCS Atlas is the web research workbench for the Stage 5 Azure AI Search index.
+REGDOCS Atlas is the web research workbench for the Stage 5 Azure AI Search index and Stage 6 regulatory-intelligence artifacts.
 
 The Python pipeline remains responsible for acquiring, analyzing, normalizing, and publishing REGDOCS data. The `ui/` application is a separate Next.js application that reads the published `regdocs-chunks` index through server-side API routes.
 
@@ -16,7 +16,12 @@ The current workbench includes:
 - server-side Azure AI Search access using App Service managed identity or a local query key;
 - hybrid keyword/vector retrieval with optional semantic reranking on a vector-enabled index;
 - Microsoft Foundry grounded answers over either active search filters or exact Workspace passages;
+- streamed grounded answers with validated page-level citations;
 - deterministic document/page citation cards for every source marker returned by the model;
+- scoped regulatory timelines that distinguish filing dates from occurrence dates;
+- scoped relationship graphs for organizations, projects, filings, and documents;
+- evidence links from timeline and graph records back into the active source viewer;
+- persistent System, Light, and Dark appearance selection;
 - no Azure Search credentials shipped to the browser;
 - global corpus search;
 - Filing Dossier, Company, Project, and Document X-Ray search lenses;
@@ -46,6 +51,9 @@ AZURE_SEARCH_VECTOR_FIELD=content_vector
 AZURE_SEARCH_SEMANTIC_CONFIGURATION=regdocs-semantic
 FOUNDRY_PROJECT_ENDPOINT=https://<resource>.services.ai.azure.com/api/projects/<project>
 FOUNDRY_MODEL_DEPLOYMENT=<chat-model-deployment>
+AZURE_SEARCH_ENTITIES_INDEX=regdocs-entities
+AZURE_SEARCH_RELATIONS_INDEX=regdocs-relations
+AZURE_SEARCH_EVENTS_INDEX=regdocs-events
 ```
 
 Authentication is chosen automatically:
@@ -56,6 +64,8 @@ Authentication is chosen automatically:
 An admin key works locally but grants permissions the UI does not need. Never put a key in a variable beginning with `NEXT_PUBLIC_`; Next.js exposes `NEXT_PUBLIC_*` values to browser code.
 
 `AZURE_SEARCH_VECTOR_FIELD` enables hybrid requests. `AZURE_SEARCH_SEMANTIC_CONFIGURATION` is optional; when set, relevant hybrid queries are reranked using that index configuration. Foundry calls always use `DefaultAzureCredential`. Grant the runtime identity permission to invoke the deployed model in the Foundry project.
+
+Timeline and Relationship graph read the three Stage 6 indexes. For local previews without those indexes, set `REGDOCS_INTELLIGENCE_DIR` to a completed Stage 6 output directory. `FOUNDRY_SAFETY_SALT` is recommended for multi-user deployments; Atlas hashes it with the requester address and sends only the derived identifier to Foundry.
 
 ## Publish the hybrid index
 
@@ -127,6 +137,8 @@ curl 'http://localhost:3000/api/search?q=caribou&top=5'
 curl 'http://localhost:3000/api/search?q=effects%20on%20caribou&mode=hybrid&top=5'
 curl 'http://localhost:3000/api/search?q=*&chunkType=table&top=5'
 curl 'http://localhost:3000/api/document-view?documentId=<document-id>&page=42'
+curl 'http://localhost:3000/api/timeline?documentId=<document-id>'
+curl 'http://localhost:3000/api/graph?filingId=<filing-id>'
 curl -X POST http://localhost:3000/api/ask -H 'content-type: application/json' \
   -d '{"question":"What mitigation was proposed for caribou?","searchMode":"hybrid"}'
 ```
@@ -161,6 +173,10 @@ AZURE_SEARCH_VECTOR_FIELD
 AZURE_SEARCH_SEMANTIC_CONFIGURATION
 FOUNDRY_PROJECT_ENDPOINT
 FOUNDRY_MODEL_DEPLOYMENT
+FOUNDRY_SAFETY_SALT
+AZURE_SEARCH_ENTITIES_INDEX
+AZURE_SEARCH_RELATIONS_INDEX
+AZURE_SEARCH_EVENTS_INDEX
 ```
 
 Enable the web app's managed identity and assign it `Search Index Data Reader` on the Search service. No Python pipeline process is required in the web application.
@@ -216,12 +232,12 @@ The view is optimized for reading, searching, accessibility, and evidence collec
 
 ## Grounded Ask architecture
 
-`POST /api/ask` is a controlled retrieval-augmented generation route. For corpus questions, the server retrieves up to 12 passages from Azure AI Search using the active filters and selected keyword/hybrid mode. For Workspace questions, it refetches the exact chunk IDs from Search, so browser-supplied passage text is never trusted. Only those passages are sent to the Foundry model.
+`POST /api/ask` is a controlled retrieval-augmented generation route. For corpus questions, the server retrieves up to 12 passages from Azure AI Search using the active filters and selected keyword/hybrid mode. For Workspace questions, it refetches the exact chunk IDs from Search, so browser-supplied passage text is never trusted. Only those passages are sent to the Foundry model. The active UI requests NDJSON streaming and progressively renders the response; JSON remains available to non-streaming API clients.
 
 The prompt requires a source marker such as `[S1]` on every factual claim, treats retrieved document text as untrusted content, prohibits outside knowledge, and asks the model to disclose insufficient evidence. The server maps markers back to fixed document/page/source metadata; the model cannot invent the citation cards. Important conclusions must still be verified against the authoritative REGDOCS source.
 
 ## Current boundary
 
-Hybrid retrieval and grounded Ask are implemented but require Azure deployment configuration and CER-specific evaluation before being made the default. Find Similar, Filing DNA, structured relationship graphs, chronology extraction, contradiction analysis, claim ledgers, obligation extraction, and reviewed Schedule A datasets remain later capabilities.
+Hybrid retrieval, grounded Ask, deterministic relationship graphs, and filing chronology are implemented but require Azure deployment configuration and CER-specific evaluation. Model-derived Stage 6 records remain explicitly labeled and unreviewed unless promoted through the pipeline. Find Similar, Filing DNA, contradiction analysis, a human review workbench, and reviewed Schedule A datasets remain later capabilities.
 
 The next source-viewer milestone is optionally serving an original page image beside the HTML reconstruction and applying Stage 4 provenance polygons to the source image. The HTML view remains the accessible reading surface.

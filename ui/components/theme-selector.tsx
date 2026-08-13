@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, useEffect, useState } from "react";
+import { Moon, Monitor, Sun } from "lucide-react";
 
 type ThemePreference = "light" | "dark" | "system";
 
@@ -20,6 +21,7 @@ function applyTheme(preference: ThemePreference) {
 
   document.documentElement.dataset.theme = resolved;
   document.documentElement.dataset.themePreference = preference;
+  document.documentElement.classList.toggle("dark", resolved === "dark");
   document.documentElement.style.colorScheme = resolved;
 }
 
@@ -63,11 +65,12 @@ export function ThemeSelector() {
   }
 
   return (
-    <label className="relative block min-w-fit" title="Color theme">
+    <label className="relative flex min-w-fit items-center gap-1.5" title="Color theme">
       <span className="sr-only">Color theme</span>
+      {theme === "light" ? <Sun aria-hidden="true" className="size-3.5 text-muted-foreground" /> : theme === "dark" ? <Moon aria-hidden="true" className="size-3.5 text-muted-foreground" /> : <Monitor aria-hidden="true" className="size-3.5 text-muted-foreground" />}
       <select
         aria-label="Color theme"
-        className="rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+        className="h-8 rounded-lg border border-border bg-background px-2 text-xs text-foreground outline-none transition focus:ring-2 focus:ring-ring"
         onChange={handleChange}
         value={theme}
       >

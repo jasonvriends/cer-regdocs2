@@ -9,12 +9,16 @@ import {
 } from "@assistant-ui/react";
 import { createLocalStorageAdapter, createSimpleTitleAdapter } from "@assistant-ui/core/react";
 import {
+  Clock3,
   Database,
   Download,
   FileText,
+  GitFork,
   LibraryBig,
   Trash2,
 } from "lucide-react";
+import { AtlasGraph } from "@/components/atlas-graph";
+import { AtlasTimeline } from "@/components/atlas-timeline";
 import { AtlasContext, type AtlasScope } from "@/components/atlas-context";
 import { AtlasLogo, AtlasSidebar, ResearchSidebarTrigger } from "@/components/atlas-sidebar";
 import { AtlasSourceViewer } from "@/components/atlas-source-viewer";
@@ -25,14 +29,24 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
+import { ThemeSelector } from "@/components/theme-selector";
 import type { AtlasSearchResult } from "@/lib/azure-search";
 import { EMPTY_FILTERS, exportEvidence, resultTitle, type AtlasCitation, type AtlasFilters } from "@/lib/atlas-ui";
+import type { IntelligenceScope } from "@/lib/intelligence";
 
 type AnswerPayload = {
   answer?: string;
   citations?: AtlasCitation[];
   error?: string;
 };
+
+type AskStreamEvent =
+  | { type: "delta"; delta: string }
+  | { type: "citations"; citations: AtlasCitation[] }
+  | { type: "done" }
+  | { type: "error"; error: string };
+
+type IntelligenceView = "timeline" | "graph";
 
 const atlasBrowserStorage = {
   async getItem(key: string) { return window.localStorage.getItem(key); },
@@ -61,6 +75,8 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
   const [coverageOpen, setCoverageOpen] = useState(false);
   const [dataOpen, setDataOpen] = useState(false);
   const [preview, setPreview] = useState<AtlasSearchResult | null>(null);
+  const [intelligenceView, setIntelligenceView] = useState<IntelligenceView | null>(null);
+  const [intelligenceError, setIntelligenceError] = useState<string | null>(null);
 
   const addEvidence = useCallback((item: AtlasSearchResult) => {
     setBasket((current) => current.some((entry) => entry.chunk_id === item.chunk_id) ? current : [...current, item]);
@@ -80,11 +96,11 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
   }, []);
 
   const modelAdapter = useMemo<ChatModelAdapter>(() => ({
-    async run({ messages, abortSignal }) {
+    async *run({ messages, abortSignal }) {
       const question = messageText(messages);
       const response = await fetch("/api/ask", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Accept": "application/x-ndjson", "Content-Type": "application/json" },
         signal: abortSignal,
         body: JSON.stringify({
           question,
@@ -99,14 +115,39 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
           } : {},
         }),
       });
-      const payload = await response.json() as AnswerPayload;
-      if (!response.ok) throw new Error(payload.error || "Atlas could not answer this question.");
-      return {
-        content: [
-          { type: "text", text: payload.answer ?? "The evidence did not produce an answer." },
-          ...(payload.citations?.length ? [{ type: "data" as const, name: "regdocs-citations", data: payload.citations }] : []),
-        ],
-      };
+      if (!response.ok || !response.body) {
+        const payload = await response.json() as AnswerPayload;
+        throw new Error(payload.error || "Atlas could not answer this question.");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let answer = "";
+      let citations: AtlasCitation[] = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line) as AskStreamEvent;
+          if (event.type === "error") throw new Error(event.error);
+          if (event.type === "delta") answer += event.delta;
+          if (event.type === "citations") citations = event.citations;
+          if (event.type === "delta" || event.type === "citations") {
+            yield {
+              content: [
+                { type: "text", text: answer },
+                ...(citations.length ? [{ type: "data" as const, name: "regdocs-citations", data: citations }] : []),
+              ],
+            };
+          }
+        }
+        if (done) break;
+      }
+      if (!answer.trim()) throw new Error("The evidence did not produce an answer.");
     },
   }), [basket, filters, scope]);
 
@@ -124,6 +165,49 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
     filters.chunkTypes.forEach((value) => values.push({ key: `type:${value}`, label: value }));
     return values;
   }, [filters]);
+
+  const intelligenceScope = useMemo<IntelligenceScope>(() => {
+    const filteredScope: IntelligenceScope = {
+      documentId: filters.documentId || undefined,
+      filingNumber: filters.filingNumber || undefined,
+      company: filters.company || undefined,
+      project: filters.project || undefined,
+    };
+    if (Object.values(filteredScope).some(Boolean)) return filteredScope;
+
+    const source = preview ?? basket[0];
+    if (!source) return {};
+    return {
+      documentId: source.document_id || undefined,
+      filingId: source.filing_id || undefined,
+      filingNumber: source.filing_number || undefined,
+      company: source.company || undefined,
+      project: source.project || undefined,
+    };
+  }, [basket, filters, preview]);
+
+  const intelligenceScopeLabel = useMemo(() => {
+    const labels = [
+      intelligenceScope.documentId ? `Document ${intelligenceScope.documentId}` : null,
+      intelligenceScope.filingNumber ? `Filing ${intelligenceScope.filingNumber}` : null,
+      intelligenceScope.company,
+      intelligenceScope.project,
+    ].filter((value): value is string => Boolean(value));
+    return labels.join(" · ");
+  }, [intelligenceScope]);
+
+  async function openIntelligenceEvidence(chunkId: string) {
+    setIntelligenceError(null);
+    try {
+      const response = await fetch(`/api/evidence/${encodeURIComponent(chunkId)}`, { cache: "no-store" });
+      const payload = await response.json() as AtlasSearchResult & { error?: string };
+      if (!response.ok) throw new Error(payload.error || "Evidence lookup failed");
+      setPreview(payload);
+      setIntelligenceView(null);
+    } catch (caught) {
+      setIntelligenceError(caught instanceof Error ? caught.message : "Evidence lookup failed");
+    }
+  }
 
   const context = useMemo(() => ({
     basket,
@@ -145,7 +229,14 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
           style={{ "--sidebar-width": "18rem", "--sidebar-width-icon": "3.5rem" } as CSSProperties}
         >
           <a className="fixed left-3 top-3 z-[100] -translate-y-20 rounded-md bg-foreground px-4 py-2 text-sm font-semibold text-background shadow-lg transition-transform focus:translate-y-0" href="#atlas-main-content">Skip to main content</a>
-          <AtlasSidebar onCoverage={() => setCoverageOpen(true)} onDataset={() => setDataOpen(true)} onShelf={() => setEvidenceOpen(true)} shelfCount={basket.length} />
+          <AtlasSidebar
+            onCoverage={() => setCoverageOpen(true)}
+            onDataset={() => setDataOpen(true)}
+            onGraph={() => { setIntelligenceError(null); setIntelligenceView("graph"); }}
+            onShelf={() => setEvidenceOpen(true)}
+            onTimeline={() => { setIntelligenceError(null); setIntelligenceView("timeline"); }}
+            shelfCount={basket.length}
+          />
 
           <SidebarInset className="min-h-0 min-w-0 overflow-hidden" id="atlas-main-content" tabIndex={-1}>
             <header className="z-20 flex h-14 shrink-0 items-center border-b bg-background/90 px-3 backdrop-blur-xl sm:px-4">
@@ -154,6 +245,9 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
               <div className="hidden md:block"><div className="text-sm font-semibold">Research workspace</div><div className="text-[10px] text-muted-foreground">Ask, verify, collect</div></div>
               <div className="ml-auto flex items-center gap-2">
                 <Badge className="hidden rounded-full font-normal sm:inline-flex" variant="outline">{scope === "evidence" ? `Shelf only · ${basket.length}` : "All CER records"}</Badge>
+                <Button aria-label="Open regulatory timeline" className="hidden sm:inline-flex" onClick={() => setIntelligenceView("timeline")} size="icon-sm" title="Regulatory timeline" variant="ghost"><Clock3 className="size-4" /></Button>
+                <Button aria-label="Open relationship graph" className="hidden sm:inline-flex" onClick={() => setIntelligenceView("graph")} size="icon-sm" title="Relationship graph" variant="ghost"><GitFork className="size-4" /></Button>
+                <ThemeSelector />
                 <Button className="gap-1.5 md:hidden" onClick={() => setEvidenceOpen(true)} size="sm" variant="outline"><LibraryBig className="size-4" />Shelf<Badge className="ml-0.5 min-w-4 rounded-full px-1 text-[9px]" variant="secondary">{basket.length}</Badge></Button>
               </div>
             </header>
@@ -190,6 +284,22 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
 
           <Dialog onOpenChange={setDataOpen} open={dataOpen}>
             <DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle className="text-xl">Make a data product</DialogTitle><DialogDescription>Start with a useful shape; Atlas will find the underlying evidence first.</DialogDescription></DialogHeader><div className="space-y-2">{[["Schedule A table inventory", "Find candidate tables and reusable columns."], ["Source inventory", "Document, filing, page, company, project and link."], ["Shelf CSV", "Export the source passages currently on your shelf."]].map(([title, description], index) => <Button className="h-auto w-full justify-start gap-3 rounded-xl border px-4 py-3 text-left" disabled={index === 2 && !basket.length} key={title} onClick={() => { if (index === 0) { setFilters((current) => ({ ...current, chunkTypes: ["table"] })); runtime.thread.composer.setText("Find Schedule A tables and identify the columns needed for a reusable CSV dataset."); } else if (index === 1) { runtime.thread.composer.setText("Create a source inventory with document, filing, page, company, project, and source link."); } else { exportEvidence(basket); } setDataOpen(false); }} variant="ghost"><span className="grid size-9 place-items-center rounded-lg bg-primary/8 text-primary">{index === 2 ? <Download className="size-4" /> : index === 1 ? <FileText className="size-4" /> : <Database className="size-4" />}</span><span><strong className="block text-sm">{title}</strong><small className="text-xs text-muted-foreground">{description}</small></span></Button>)}</div></DialogContent>
+          </Dialog>
+
+          <Dialog onOpenChange={(open) => { if (!open) setIntelligenceView(null); }} open={intelligenceView !== null}>
+            <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-[min(1100px,calc(100vw-2rem))]">
+              <DialogHeader className="pr-10">
+                <DialogTitle className="text-xl">{intelligenceView === "graph" ? "Relationship graph" : "Regulatory timeline"}</DialogTitle>
+                <DialogDescription>
+                  {intelligenceScopeLabel ? `Active scope: ${intelligenceScopeLabel}` : "Use an active filter, an open source, or a saved shelf source to set the research scope."}
+                </DialogDescription>
+              </DialogHeader>
+              {!intelligenceScopeLabel ? <div><Button onClick={() => { setIntelligenceView(null); setDraftFilters(filters); setFiltersOpen(true); }} size="sm" variant="outline">Set a research filter</Button></div> : null}
+              {intelligenceError ? <div className="rounded-lg border border-destructive/25 bg-destructive/5 p-3 text-sm text-destructive">{intelligenceError}</div> : null}
+              {intelligenceView === "graph"
+                ? <AtlasGraph onOpenEvidence={(chunkId) => void openIntelligenceEvidence(chunkId)} scope={intelligenceScope} />
+                : <AtlasTimeline onOpenEvidence={(chunkId) => void openIntelligenceEvidence(chunkId)} scope={intelligenceScope} />}
+            </DialogContent>
           </Dialog>
 
         </SidebarProvider>

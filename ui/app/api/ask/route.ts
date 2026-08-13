@@ -1,4 +1,5 @@
-import { answerWithFoundry } from "@/lib/foundry";
+import { createHash } from "node:crypto";
+import { answerWithFoundry, streamWithFoundry, validCitations } from "@/lib/foundry";
 import {
   getChunksByIds,
   searchRegdocs,
@@ -15,6 +16,42 @@ type AskBody = {
   searchMode?: unknown;
   filters?: Partial<AtlasSearchRequest>;
 };
+
+const RATE_WINDOW_MS = 60_000;
+const RATE_LIMIT = 30;
+const rateBuckets = new Map<string, { started: number; count: number }>();
+
+function requesterAddress(request: Request) {
+  return request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+    || request.headers.get("x-real-ip")?.trim()
+    || "local";
+}
+
+function allowRequest(key: string) {
+  const now = Date.now();
+  if (rateBuckets.size > 10_000) {
+    for (const [candidate, bucket] of rateBuckets) {
+      if (now - bucket.started >= RATE_WINDOW_MS) rateBuckets.delete(candidate);
+    }
+  }
+  const current = rateBuckets.get(key);
+  if (!current || now - current.started >= RATE_WINDOW_MS) {
+    rateBuckets.set(key, { started: now, count: 1 });
+    return true;
+  }
+  current.count += 1;
+  return current.count <= RATE_LIMIT;
+}
+
+function safetyIdentifier(request: Request) {
+  const salt = process.env.FOUNDRY_SAFETY_SALT?.trim();
+  if (!salt) return undefined;
+  return createHash("sha256").update(`${salt}\0${requesterAddress(request)}`).digest("hex");
+}
+
+function ndjson(value: unknown) {
+  return `${JSON.stringify(value)}\n`;
+}
 
 function stringArray(value: unknown, limit = 20) {
   if (!Array.isArray(value)) return [];
@@ -40,6 +77,9 @@ function safeFilters(input: Partial<AtlasSearchRequest> | undefined): Partial<At
 }
 
 export async function POST(request: Request) {
+  if (!allowRequest(requesterAddress(request))) {
+    return Response.json({ error: "Too many Ask requests; try again shortly." }, { status: 429 });
+  }
   let body: AskBody;
   try {
     body = await request.json() as AskBody;
@@ -70,13 +110,49 @@ export async function POST(request: Request) {
       return Response.json({ error: "No CER evidence matched this question and scope." }, { status: 404 });
     }
 
-    const result = await answerWithFoundry(question, evidence);
-    return Response.json({
-      ...result,
+    const common = {
       scope: workspaceChunkIds.length ? "workspace" : "corpus",
       retrievalMode: workspaceChunkIds.length ? "exact-workspace" : requestedMode,
       evidenceCount: evidence.length,
       coverage: { primaryStart: "2026-01-01", primaryEnd: "2026-07-31" },
+    };
+    if (request.headers.get("accept")?.includes("application/x-ndjson")) {
+      const streamed = await streamWithFoundry(question, evidence, safetyIdentifier(request), request.signal);
+      const encoder = new TextEncoder();
+      const body = new ReadableStream({
+        async start(controller) {
+          let answer = "";
+          try {
+            for await (const event of streamed.events) {
+              if (event.type !== "response.output_text.delta") continue;
+              answer += event.delta;
+              controller.enqueue(encoder.encode(ndjson({ type: "delta", delta: event.delta })));
+            }
+            const citations = validCitations(answer, streamed.citations);
+            if (!answer.trim()) throw new Error("Microsoft Foundry returned an empty answer");
+            if (!citations.length) throw new Error("Microsoft Foundry returned an answer without valid evidence citations");
+            controller.enqueue(encoder.encode(ndjson({ type: "citations", citations })));
+            controller.enqueue(encoder.encode(ndjson({ type: "done", model: streamed.model, ...common })));
+          } catch (error) {
+            console.error("REGDOCS grounded answer stream failed", error);
+            controller.enqueue(encoder.encode(ndjson({ type: "error", error: "The grounded answer stream could not be completed." })));
+          } finally {
+            controller.close();
+          }
+        },
+      });
+      return new Response(body, {
+        headers: {
+          "Cache-Control": "no-store",
+          "Content-Type": "application/x-ndjson; charset=utf-8",
+        },
+      });
+    }
+
+    const result = await answerWithFoundry(question, evidence, safetyIdentifier(request));
+    return Response.json({
+      ...result,
+      ...common,
     });
   } catch (error) {
     console.error("REGDOCS grounded answer failed", error);

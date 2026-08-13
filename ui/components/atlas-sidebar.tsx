@@ -1,6 +1,6 @@
 "use client";
 
-import { BarChart3, Database, LibraryBig, PanelLeft, Plus, ShieldCheck } from "lucide-react";
+import { BarChart3, Clock3, Database, GitFork, LibraryBig, PanelLeft, Plus, ShieldCheck } from "lucide-react";
 import { ThreadList, ThreadListNew } from "@/components/assistant-ui/thread-list";
 import {
   Sidebar,
@@ -53,12 +53,16 @@ export function AtlasSidebar({
   shelfCount,
   onCoverage,
   onDataset,
+  onGraph,
   onShelf,
+  onTimeline,
 }: {
   shelfCount: number;
   onCoverage: () => void;
   onDataset: () => void;
+  onGraph: () => void;
   onShelf: () => void;
+  onTimeline: () => void;
 }) {
   const { isMobile, setOpenMobile } = useSidebar();
 
@@ -125,6 +129,18 @@ export function AtlasSidebar({
               <SidebarMenuButton onClick={() => runAndClose(onDataset)} tooltip="Make a dataset">
                 <Database aria-hidden="true" className="text-primary" />
                 <span>Make a dataset</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+            <SidebarMenuItem>
+              <SidebarMenuButton onClick={() => runAndClose(onTimeline)} tooltip="Regulatory timeline">
+                <Clock3 aria-hidden="true" className="text-primary" />
+                <span>Timeline</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+            <SidebarMenuItem>
+              <SidebarMenuButton onClick={() => runAndClose(onGraph)} tooltip="Regulatory graph">
+                <GitFork aria-hidden="true" className="text-primary" />
+                <span>Relationship graph</span>
               </SidebarMenuButton>
             </SidebarMenuItem>
             <SidebarMenuItem>
