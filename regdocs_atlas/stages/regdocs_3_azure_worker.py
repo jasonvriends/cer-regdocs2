@@ -33,7 +33,7 @@ try:
 except ImportError as exc:
     raise SystemExit(
         "Missing Stage 3 Azure dependency. Install with: "
-        "python -m pip install -r pipeline/requirements.txt"
+        "python -m pip install -r regdocs_atlas/requirements.txt"
     ) from exc
 
 from regdocs_paths import (
@@ -1287,7 +1287,7 @@ def pdf_page_count(path: Path) -> int:
     except ImportError as exc:
         raise RuntimeError(
             "Missing PDF page-count dependency. Install with: "
-            "python -m pip install -r pipeline/requirements.txt"
+            "python -m pip install -r regdocs_atlas/requirements.txt"
         ) from exc
     return len(PdfReader(str(path)).pages)
 

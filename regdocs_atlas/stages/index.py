@@ -190,7 +190,9 @@ def credential(api_key: Optional[str]) -> Any:
         from azure.core.credentials import AzureKeyCredential
         from azure.identity import DefaultAzureCredential
     except ImportError as exc:
-        raise RuntimeError("Missing Stage 5 dependency. Run: python -m pip install -r pipeline/requirements.txt") from exc
+        raise RuntimeError(
+            "Missing Stage 5 dependency. Run: python -m pip install -r regdocs_atlas/requirements.txt"
+        ) from exc
     return AzureKeyCredential(api_key) if api_key else DefaultAzureCredential()
 
 

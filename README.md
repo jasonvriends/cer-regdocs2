@@ -116,7 +116,7 @@ Windows PowerShell:
 ## 3. Install the required packages
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install -r regdocs_atlas/requirements.txt
 ```
 
 ## 4. Check that the command works
@@ -446,6 +446,9 @@ python tools/publish_hybrid_index.py --limit 100
 
 The Next.js workbench configuration for Azure AI Search hybrid retrieval and
 Microsoft Foundry cited answers is documented in [`ui/README.md`](ui/README.md).
+After uploading `workspace/` and `database/` to an existing private Blob
+container with SAS, use [`ui/deploy/`](ui/deploy/) in Azure Cloud Shell to
+provision Search, Foundry, and App Service, publish the index, and deploy the UI.
 
 See [SYNTAX.md](SYNTAX.md#azure-environment-variables) for the full environment-variable reference.
 
@@ -459,7 +462,6 @@ The main local layout is:
 .
 ├── pipeline.py              public command entry point
 ├── regdocs_atlas/           application code
-├── requirements.txt         Python dependencies
 ├── ui/                      Next.js Azure AI Search workbench
 ├── README.md                beginner guide and architecture overview
 ├── SYNTAX.md                complete command reference
@@ -477,6 +479,8 @@ Inside the Python package:
 
 ```text
 regdocs_atlas/
+├── requirements.txt         Python dependencies for every pipeline stage
+├── requirements-deploy.txt  minimal Cloud Shell publishing dependencies
 ├── cli.py                   shared command-line routing
 ├── paths.py                 standard project paths
 ├── version.py               reads VERSION

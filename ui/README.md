@@ -77,7 +77,15 @@ python tools/publish_hybrid_index.py --limit 100
 
 Validate the pilot, then run without `--limit` to idempotently publish the complete normalized corpus. Embeddings and uploads are batched; rerunning uses stable Search keys and merges the same chunks. Use a new versioned index name when changing the embedding model or dimensions.
 
+The publisher also persists vectors under `workspace/5_index/embedding-cache.sqlite`. If embedding generation or upload is interrupted, repeat the same command; completed embedding calls are reused instead of billed again. Keep the cache until the full index passes `tools/verify_ai_deployment.py`.
+
 For keyless embedding generation, omit `AZURE_OPENAI_API_KEY` and authenticate with Azure Identity. For keyless query vectorization, grant the Search service's managed identity access to the embedding deployment. If the Search service cannot call the deployment with managed identity, set `AZURE_OPENAI_VECTORIZER_API_KEY` only in the publisher environment; Azure stores it in the index vectorizer configuration.
+
+For the normal production path, upload `workspace/` and `database/` to an
+existing private Blob container with SAS, then run [`deploy/`](deploy/) from
+Azure Cloud Shell. It provisions Search, Foundry, App Service, RBAC, index
+publication, verification, and UI deployment, using the same Blob container
+for input, the resumable embedding cache, and the App Service ZIP.
 
 ## Local development
 

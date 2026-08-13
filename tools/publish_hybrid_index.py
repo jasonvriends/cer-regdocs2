@@ -8,10 +8,14 @@ is always produced by the same deployment configured for query vectorization.
 from __future__ import annotations
 
 import argparse
+from array import array
+import hashlib
 import json
 import os
+import sqlite3
 import sys
 import time
+from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional, Sequence
@@ -22,7 +26,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from regdocs_atlas.paths import NORMALIZE_DIR, resolve_stored_path, stored_path
+from regdocs_atlas.paths import INDEX_DIR, NORMALIZE_DIR, resolve_stored_path, stored_path
 from regdocs_atlas.stages.index import (
     DEFAULT_BATCH_BYTES,
     DEFAULT_INDEX_NAME,
@@ -38,6 +42,7 @@ DEFAULT_VECTOR_FIELD = "content_vector"
 DEFAULT_SEMANTIC_CONFIGURATION = "regdocs-semantic"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 DEFAULT_DIMENSIONS = 1536
+DEFAULT_CACHE_DB = INDEX_DIR / "embedding-cache.sqlite"
 
 
 def chunked(items: Iterable[dict[str, Any]], size: int) -> Iterator[list[dict[str, Any]]]:
@@ -49,7 +54,103 @@ def chunked(items: Iterable[dict[str, Any]], size: int) -> Iterator[list[dict[st
 def embedding_text(document: dict[str, Any]) -> str:
     parts = [document.get("title"), document.get("heading"), document.get("content")]
     # Conservative character cap for the embedding model's context window.
-    return "\n\n".join(str(part).strip() for part in parts if part).strip()[:24_000]
+    text = "\n\n".join(str(part).strip() for part in parts if part).strip()[:24_000]
+    return text or f"Document {document.get('document_id')} passage {document.get('chunk_id')}"
+
+
+class EmbeddingCache:
+    """Durable local embedding cache keyed by exact model input and configuration."""
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+        self.connection = sqlite3.connect(path)
+        self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS embeddings (
+                cache_key TEXT PRIMARY KEY,
+                chunk_id TEXT NOT NULL,
+                resource TEXT NOT NULL,
+                deployment TEXT NOT NULL,
+                model TEXT NOT NULL,
+                dimensions INTEGER NOT NULL,
+                vector_blob BLOB NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        self.connection.commit()
+
+    @staticmethod
+    def key(text: str, resource: str, deployment: str, model: str, dimensions: int) -> str:
+        identity = json.dumps(
+            {"resource": resource, "deployment": deployment, "model": model, "dimensions": dimensions, "text": text},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+    def get(self, cache_key: str, dimensions: int) -> Optional[list[float]]:
+        row = self.connection.execute(
+            "SELECT vector_blob FROM embeddings WHERE cache_key = ? AND dimensions = ?", (cache_key, dimensions)
+        ).fetchone()
+        if not row:
+            return None
+        packed = array("f")
+        packed.frombytes(row[0])
+        if sys.byteorder != "little":
+            packed.byteswap()
+        vector = packed.tolist()
+        if len(vector) != dimensions:
+            raise RuntimeError(f"Invalid cached vector for {cache_key}")
+        return vector
+
+    def put(
+        self,
+        cache_key: str,
+        chunk_id: str,
+        resource: str,
+        deployment: str,
+        model: str,
+        dimensions: int,
+        vector: list[float],
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT OR REPLACE INTO embeddings
+                (cache_key, chunk_id, resource, deployment, model, dimensions, vector_blob, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                cache_key,
+                chunk_id,
+                resource,
+                deployment,
+                model,
+                dimensions,
+                self._pack(vector),
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            ),
+        )
+
+    @staticmethod
+    def _pack(vector: list[float]) -> bytes:
+        packed = array("f", vector)
+        if sys.byteorder != "little":
+            packed.byteswap()
+        return packed.tobytes()
+
+    def commit(self) -> None:
+        self.connection.commit()
+
+    def count(self) -> int:
+        return int(self.connection.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0])
+
+    def close(self) -> None:
+        self.connection.commit()
+        self.connection.close()
 
 
 class EmbeddingClient:
@@ -196,16 +297,39 @@ def ensure_index(client: Any, definition: Any, recreate: bool) -> str:
 
 
 def with_embeddings(
-    documents: Iterable[dict[str, Any]], embedding_client: EmbeddingClient, vector_field: str, batch_size: int
+    documents: Iterable[dict[str, Any]],
+    embedding_client: EmbeddingClient,
+    cache: EmbeddingCache,
+    vector_field: str,
+    batch_size: int,
+    resource: str,
+    deployment: str,
+    model: str,
+    dimensions: int,
 ) -> Iterator[dict[str, Any]]:
-    completed = 0
+    completed = generated = cache_hits = 0
     for group in chunked(documents, batch_size):
-        vectors = embedding_client.embed([embedding_text(document) for document in group])
+        texts = [embedding_text(document) for document in group]
+        keys = [cache.key(text, resource, deployment, model, dimensions) for text in texts]
+        vectors: list[Optional[list[float]]] = [cache.get(key, dimensions) for key in keys]
+        missing_positions = [position for position, vector in enumerate(vectors) if vector is None]
+        if missing_positions:
+            fresh = embedding_client.embed([texts[position] for position in missing_positions])
+            for position, vector in zip(missing_positions, fresh):
+                vectors[position] = vector
+                cache.put(
+                    keys[position], str(group[position].get("chunk_id") or ""), resource, deployment, model, dimensions, vector
+                )
+            cache.commit()
+            generated += len(missing_positions)
+        cache_hits += len(group) - len(missing_positions)
         for document, vector in zip(group, vectors):
+            if vector is None:
+                raise RuntimeError(f"No vector generated for {document.get('chunk_id')}")
             document[vector_field] = vector
             yield document
         completed += len(group)
-        print(f"Embedded {completed} chunk(s)")
+        print(f"Prepared {completed} chunk(s): generated={generated}, cache_hits={cache_hits}")
 
 
 def upload(client: Any, documents: Iterable[dict[str, Any]], total: int, batch_size: int) -> tuple[int, int]:
@@ -247,6 +371,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int)
     p.add_argument("--embedding-batch-size", type=int, default=16)
     p.add_argument("--upload-batch-size", type=int, default=100)
+    p.add_argument("--cache-db", default=stored_path(DEFAULT_CACHE_DB))
     p.add_argument("--recreate-index", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     return p
@@ -254,6 +379,7 @@ def parser() -> argparse.ArgumentParser:
 
 def validate(args: argparse.Namespace) -> None:
     args.normalized_dir = resolve_stored_path(args.normalized_dir)
+    args.cache_db = resolve_stored_path(args.cache_db)
     if args.index_name == DEFAULT_INDEX_NAME:
         raise ValueError(f"Refusing to modify the lexical production index {DEFAULT_INDEX_NAME!r}; use a versioned name")
     if args.limit is not None and args.limit < 1:
@@ -290,6 +416,7 @@ def run(args: argparse.Namespace) -> int:
         f"Validated {meta['search_document_count']} chunk(s) from {meta['source_document_count']} document(s); "
         f"target={args.index_name!r}, vector={args.vector_field}/{args.dimensions}."
     )
+    print(f"Embedding cache: {stored_path(args.cache_db)}")
     if args.dry_run:
         print("DRY RUN: no embeddings were generated and Azure was not contacted.")
         return 0
@@ -303,6 +430,7 @@ def run(args: argparse.Namespace) -> int:
     embedding_client = EmbeddingClient(
         args.embedding_endpoint, args.embedding_deployment, args.dimensions, args.embedding_api_key
     )
+    cache = EmbeddingCache(args.cache_db)
     try:
         definition = hybrid_index(
             args.index_name,
@@ -315,13 +443,25 @@ def run(args: argparse.Namespace) -> int:
         )
         print(ensure_index(index_client, definition, args.recreate_index))
         documents = iter_documents(args.normalized_dir, document_ids, args.limit)
-        enriched = with_embeddings(documents, embedding_client, args.vector_field, args.embedding_batch_size)
+        print(f"Embedding cache contains {cache.count()} vector(s) before this run.")
+        enriched = with_embeddings(
+            documents,
+            embedding_client,
+            cache,
+            args.vector_field,
+            args.embedding_batch_size,
+            args.embedding_endpoint,
+            args.embedding_deployment,
+            args.embedding_model,
+            args.dimensions,
+        )
         uploaded, batch_count = upload(
             search_client, enriched, int(meta["search_document_count"]), args.upload_batch_size
         )
         print(f"Published {uploaded} hybrid chunks to {args.index_name!r} in {batch_count} upload batch(es).")
         return 0
     finally:
+        cache.close()
         embedding_client.close()
         search_client.close()
         index_client.close()

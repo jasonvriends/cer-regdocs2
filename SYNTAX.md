@@ -42,7 +42,7 @@ If the environment does not exist yet:
 
 ```bash
 python -m venv .venv
-python -m pip install -r requirements.txt
+python -m pip install -r regdocs_atlas/requirements.txt
 ```
 
 ## How to read placeholders

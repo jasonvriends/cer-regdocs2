@@ -20,3 +20,4 @@ __pycache__/
 /ui/.env*
 !/ui/.env.local.example
 /ui/npm-debug.log*
+/ui/deploy/config.env
