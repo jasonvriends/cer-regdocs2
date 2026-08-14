@@ -2,38 +2,38 @@
 
 ## Evaluation of the REGDOCS extraction corpus
 
-**Evaluation date:** 12 August 2026<br>
+**Evaluation date:** 13 August 2026<br>
 **Azure extractor:** `prebuilt-layout`, API `2025-11-01`<br>
 **Docling extractor:** `docling-standard`, Docling `2.118.1`<br>
 **Decision question:** Is Docling as good as Azure for this corpus, and can it replace Azure without unacceptable loss of quality or reliability?
 
 ## Executive summary
 
-Azure is the stronger production extractor for this REGDOCS corpus. Docling is a credible local alternative for ordinary born-digital PDFs and is sometimes better at preserving visible text, but the current Docling workflow is not an equivalent replacement. Azure is substantially faster, completes the hardest documents, retains exact page coverage, handles scanned pages more reliably, and emits a richer common schema for page geometry, sections, figures, hyperlinks, and multi-page tables.
+Azure is the stronger production extractor for this REGDOCS corpus. Docling is a credible local alternative for ordinary born-digital PDFs and is sometimes better at preserving visible text, but the completed Docling run is not an equivalent replacement. Azure is substantially faster, completes the hardest documents, retains exact page coverage, handles scanned pages more reliably, and emits a richer common schema for page geometry, sections, figures, hyperlinks, and multi-page tables.
 
 The evidence is not uniformly in Azure's favour. Docling has no cloud service charge, keeps documents local, produces attractive Markdown tables on many uncomplicated pages, and occasionally outperforms Azure on text fidelity. Its raw structured output can also contain useful image-page text that its Markdown export omits. These strengths make Docling valuable as a secondary extractor or as the first stage in a quality-gated hybrid workflow.
 
 The present recommendation is therefore:
 
 1. Keep the completed Azure dataset as the canonical production analysis.
-2. Continue collecting Docling results as a comparison and fallback dataset.
+2. Retain the completed Docling results as a comparison and fallback dataset.
 3. If cost reduction becomes important, test a Docling-first routing policy, but automatically send failures, timeouts, low-text scans, page-count mismatches, image-heavy drawings, and very large PDFs to Azure.
-4. Do not discard the Azure artifacts based on the current Docling sample.
+4. Do not discard the Azure artifacts based on the completed Docling results.
 
 The headline operational results are:
 
 | Measure | Azure | Docling | Interpretation |
 |---|---:|---:|---|
-| Complete current corpus | 8,213 / 8,213 | Still processing | Azure is complete; Docling is a growing sample |
-| Paired PDFs measured | 5,070 | 5,070 | Like-for-like timing and page comparison |
-| Paired source pages | 52,196 | 52,196 | Source PDF page count |
-| Extractor page records | 52,196 | 52,037 | Azure exact; Docling projection is 159 records short |
-| Documents with exact source page count | 5,070 / 5,070 | 5,020 / 5,070 | Docling differs on 50 paired PDFs |
-| Processing time for paired set | 9.09 h | 40.33 h | Docling took 4.44 times as long in aggregate |
-| Throughput | 5,745 pages/h | 1,290 pages/h | Measured end-to-end analysis ledger time |
-| Median document time ratio | 1.0× baseline | 4.45× Azure | Docling's median relative slowdown |
-| 95th-percentile ratio | 1.0× baseline | 8.91× Azure | Tail latency is materially worse |
-| Common-schema sections | 69,511 | 5,070 | Docling projection currently emits one broad section per document |
+| Complete current corpus | 8,213 / 8,213 | 8,203 / 8,213 | Docling completed 99.88%; nine IDs were quarantined and one remained stranded |
+| Paired PDFs measured | 8,200 | 8,200 | Like-for-like timing and page comparison |
+| Paired source pages | 86,949 | 86,949 | Source PDF page count |
+| Extractor page records | 86,949 | 86,647 | Azure exact; Docling projection is 302 records short |
+| Documents with exact source page count | 8,200 / 8,200 | 8,075 / 8,200 | Docling differs on 125 paired PDFs |
+| Processing time for paired set | 14.97 h | 67.39 h | Docling took 4.50 times as long in aggregate |
+| Throughput | 5,807 pages/h | 1,286 pages/h | Measured end-to-end analysis ledger time |
+| Median document time ratio | 1.0× baseline | 4.36× Azure | Docling's median relative slowdown |
+| 95th-percentile ratio | 1.0× baseline | 8.77× Azure | Tail latency is materially worse |
+| Common-schema sections | 118,433 | 8,200 | Docling projection currently emits one broad section per document |
 
 The Azure service reportedly cost approximately **$500**. Using the completed Azure totals of 8,213 documents and 90,484 pages, that is approximately **$0.061 per document**, **$0.0055 per page**, or **$5.53 per 1,000 pages**. Docling avoids that Azure service bill, but its local hardware, electricity, elapsed time, storage, retries, crashes, and operator attention are not zero-cost and were not priced in this evaluation.
 
@@ -45,7 +45,7 @@ This evaluation separates three kinds of evidence:
 - **Automated content proxies:** Markdown and structured-output comparison against the PDF embedded text layer, using unique five-word sequences. This reduces the reward for repeated headers and duplicated hidden text.
 - **Visual audit:** inspection of rendered PDF pages alongside Azure and Docling excerpts for OCR, tables, figures, maps, French text, duplicated text, and the largest file.
 
-The automated benchmark contains **132 unique PDFs** selected across 12 overlapping cohorts:
+The automated benchmark contains **129 unique PDFs** selected across 12 overlapping cohorts:
 
 - The 15 largest PDFs that both extractors completed.
 - Ten table-heavy documents by absolute table count.
@@ -56,7 +56,7 @@ The automated benchmark contains **132 unique PDFs** selected across 12 overlapp
 - Twelve large French-language or French-titled documents.
 - Twelve documents from each of five page-count strata: 1, 2–5, 6–20, 21–100, and 101+ pages.
 
-The page-count probe directly opened all 5,070 paired PDFs rather than trusting either extractor's reported total. The deeper benchmark read every source page of its selected documents.
+The page-count probe directly opened all 8,200 paired PDFs rather than trusting either extractor's reported total. The deeper benchmark read every source page of its selected documents.
 
 ### Important limitation: there is no perfect ground truth
 
@@ -100,22 +100,22 @@ Page 301 is a dense laboratory results table. Azure captured its work order, sam
 | ID | Source pages | Azure / Docling pages | Azure / Docling time | Automated text result |
 |---|---:|---:|---:|---|
 | `4600563` | 799 | 799 / 795 | 123 / 628 s | Azure higher sequence fidelity |
-| `4647187` | 628 | 628 / 628 | 81 / 470 s | Docling slightly higher |
-| `4596827` | 625 | 625 / 625 | 60 / 242 s | Both retain the text; Azure ordering score higher |
-| `4646669` | 572 | 572 / 572 | 91 / 303 s | Docling higher |
-| `4648189` | 514 | 514 / 514 | 68 / 201 s | Azure slightly higher |
-| `4597172` | 500 | 500 / 500 | 64 / 191 s | Both retain the text; Azure ordering score higher |
+| `4647187` | 628 | 628 / 628 | 81 / 470 s | Docling higher sequence fidelity |
+| `4673063` | 626 | 626 / 626 | 154 / 1,156 s | Azure higher sequence fidelity |
+| `4596827` | 625 | 625 / 625 | 60 / 242 s | Azure higher sequence fidelity |
+| `4664851` | 604 | 604 / 604 | 108 / 1,190 s | Azure higher sequence fidelity |
+| `4666748` | 603 | 603 / 603 | 97 / 1,122 s | Azure higher sequence fidelity |
+| `4646669` | 572 | 572 / 572 | 91 / 303 s | Docling higher sequence fidelity |
+| `4648189` | 514 | 514 / 514 | 68 / 201 s | Azure higher sequence fidelity |
+| `4597172` | 500 | 500 / 500 | 64 / 191 s | Azure higher sequence fidelity |
 | `4648190` | 499 | 499 / 499 | 78 / 226 s | Effectively tied |
-| `4572347` | 482 | 482 / 482 | 71 / 299 s | Azure higher |
-| `4652743` | 372 | 372 / 372 | 80 / 485 s | Azure materially higher |
-| `4652521` | 368 | 368 / 368 | 27 / 461 s | Azure materially higher; Docling 17.3× slower |
-| `4660247` | 333 | 333 / 307 | 54 / 338 s | Azure higher and retains exact page coverage |
-| `4647074` | 313 | 313 / 313 | 88 / 413 s | Azure higher |
-| `4646607` | 310 | 310 / 302 | 102 / 441 s | Azure higher and retains exact page coverage |
-| `4576114` | 309 | 309 / 302 | 63 / 218 s | Azure avoids duplicated hidden text |
-| `4449381` | 306 | 306 / 304 | 62 / 189 s | Essentially tied |
+| `4572347` | 482 | 482 / 482 | 71 / 299 s | Azure higher sequence fidelity |
+| `4664850` | 482 | 482 / 482 | 71 / 656 s | Docling higher sequence fidelity |
+| `4692624` | 474 | 474 / 474 | 55 / 547 s | OCR-heavy; compare by agreement and visual audit |
+| `4710294` | 463 | 463 / 455 | 54 / 513 s | OCR-heavy; compare by agreement and visual audit |
+| `4692070` | 437 | 437 / 437 | 117 / 337 s | Azure higher sequence fidelity |
 
-Across these 15 completed paired files, Azure had the higher Markdown sequence score in 11 cases, Docling in two, and two were ties. The mean scores were 0.908 for Azure and 0.852 for Docling. Comparing projected structured output rather than Markdown produced the same broad outcome: Azure won 11 and Docling four, with mean scores of 0.892 and 0.852.
+Across the 13 born-digital files in this group, Azure had the higher Markdown sequence score in nine cases, Docling in three, and one was tied; the other two files were OCR-heavy and excluded from source-text winner counts. The mean born-digital scores were 0.875 for Azure and 0.847 for Docling. Comparing projected structured output among the 13 scoreable files produced seven Azure wins, two Docling wins, and four ties, with mean scores of 0.860 and 0.851.
 
 The largest paired example, `4600563`, demonstrates that both systems can handle a very large born-digital legal compilation. On page 1 they captured the title, headings, dates, decisions, and table contents almost identically. Azure nevertheless finished roughly five times faster and preserved all 799 page records.
 
@@ -125,16 +125,16 @@ The largest paired example, `4600563`, demonstrates that both systems can handle
 
 The results do not support the claim that Docling is uniformly worse at text extraction. Both systems are strong on conventional born-digital pages. Small and medium page-count strata contain multiple Docling wins, while Azure becomes more consistently advantageous in large, complex, table-heavy, and mixed-layout documents.
 
-| Cohort | Documents | Azure Markdown wins | Docling Markdown wins | Ties | Mean Azure / Docling proxy score |
-|---|---:|---:|---:|---:|---:|
-| Largest completed | 15 | 11 | 2 | 2 | 0.908 / 0.852 |
-| Table-heavy absolute | 10 | 8 | 1 | 0* | 0.794 / 0.670 |
-| Table-dense | 10 | 8 | 2 | 0 | 0.523 / 0.404 |
-| Figure-heavy absolute | 10 | 8 | 1 | 0* | 0.795 / 0.752 |
-| Figure-dense | 10 | 8 | 2 | 0 | 0.469 / 0.360 |
-| French large sample | 12 | 8 | 3 | 1 | 0.871 / 0.847 |
+| Cohort | Documents | OCR-heavy | Azure Markdown wins | Docling Markdown wins | Ties | Mean Azure / Docling proxy score |
+|---|---:|---:|---:|---:|---:|---:|
+| Largest completed | 15 | 2 | 9 | 3 | 1 | 0.875 / 0.847 |
+| Table-heavy absolute | 10 | 1 | 6 | 3 | 0 | 0.738 / 0.603 |
+| Table-dense | 10 | 0 | 9 | 1 | 0 | 0.526 / 0.378 |
+| Figure-heavy absolute | 10 | 2 | 7 | 1 | 0 | 0.826 / 0.734 |
+| Figure-dense | 10 | 0 | 7 | 2 | 1 | 0.524 / 0.420 |
+| French large sample | 12 | 4 | 4 | 3 | 1 | 0.747 / 0.763 |
 
-\*One document in each marked cohort was classified as OCR-heavy and excluded from embedded-text winner counts.
+Winner counts and mean source-text scores exclude OCR-heavy documents because their embedded PDF text is not a reliable ground truth.
 
 The lower absolute scores for table- and figure-dense cohorts are expected: linear text sequences cannot fully represent spatial layouts. The relative comparison remains useful, but it should not be read as “52.3% accurate.”
 
@@ -148,7 +148,7 @@ Azure is not always more complete. In `4646669`, for example, Docling aligned mo
 
 ### French text
 
-The French cohort includes 12 larger French-language or French-titled PDFs totalling 1,219 Azure pages. Both systems performed well: the mean Markdown sequence scores were 0.871 for Azure and 0.847 for Docling. Azure won eight documents, Docling three, and one tied. The structured projection comparison favoured Azure ten to two.
+The French cohort includes 12 larger French-language or French-titled PDFs totalling 2,305 Azure pages and 2,279 Docling page records. Among the eight born-digital files, the mean Markdown sequence scores were 0.747 for Azure and 0.763 for Docling: Azure won four, Docling three, and one tied. Across scoreable structured projections, Azure won five and Docling three, with mean scores of 0.732 and 0.737. This final cohort is essentially even on text fidelity, with a slight mean advantage to Docling, while Azure retains better page coverage.
 
 On page 25 of the 499-page French Commission report `4648190`, both extractors produced fluent accented French and preserved the substantive bullets. Azure retained more of the opening paragraph and page structure, while Docling produced clean prose.
 
@@ -156,16 +156,16 @@ On page 25 of the 499-page French Commission report `4648190`, both extractors p
 
 ## OCR and scanned pages
 
-The benchmark includes 20 deliberately selected likely OCR-heavy documents and 26 OCR-heavy documents across all overlapping cohorts. Because these pages lack reliable source text, Azure–Docling agreement and visual inspection are more meaningful than comparison to the empty PDF text layer.
+The benchmark includes 20 deliberately selected likely OCR-heavy documents and 31 OCR-heavy documents across all overlapping cohorts. Because these pages lack reliable source text, Azure–Docling agreement and visual inspection are more meaningful than comparison to the empty PDF text layer.
 
 Across the 20-document OCR cohort:
 
-- Azure emitted 660 page records; Docling emitted 653.
-- Azure found 593 tables; Docling found 463.
-- Azure found 264 figures; Docling's native representation contained 540 picture objects.
-- Mean Markdown five-word-sequence agreement was 0.814.
-- Mean structured-projection agreement was 0.778.
-- Docling took an average of 7.14 times the Azure elapsed time per document.
+- Azure emitted 846 page records; Docling emitted 838.
+- Azure found 716 tables; Docling found 521.
+- Azure found 365 figures; Docling's native representation contained 696 picture objects.
+- Mean Markdown five-word-sequence agreement was 0.727.
+- Mean structured-projection agreement was 0.689.
+- Docling took an average of 7.15 times the Azure elapsed time per document.
 
 The reasonably high average agreement shows that Docling can OCR many scans successfully. The tail cases are important, however. The visual audit includes a scanned corporate financial statement, `4049587`, where both systems recovered substantial text but differed in reading order and table segmentation. Other benchmark pages have still more severe provider disagreement; their metrics are retained in the CSV without reproducing potentially sensitive correspondence in this public report.
 
@@ -183,21 +183,21 @@ For the ten absolute table-heavy documents:
 
 | Measure | Azure | Docling |
 |---|---:|---:|
-| Table objects | 4,007 | 3,098 |
-| Cells | 203,050 | 170,022 |
-| Empty-cell ratio | 11.3% | 10.6% |
+| Table objects | 4,641 | 2,991 |
+| Cells | 277,209 | 189,075 |
+| Empty-cell ratio | 24.2% | 10.9% |
 | Out-of-bounds cell coordinates | 0 | 0 |
-| Repeated row/column coordinates | 0 | 6,896 |
-| Multi-page table objects | 5 | 0 |
+| Repeated row/column coordinates | 0 | 5,173 |
+| Multi-page table objects | 53 | 0 |
 
 For the ten table-dense documents:
 
 | Measure | Azure | Docling |
 |---|---:|---:|
-| Table objects | 1,330 | 374 |
-| Cells | 43,388 | 46,746 |
-| Empty-cell ratio | 23.4% | 17.7% |
-| Repeated row/column coordinates | 0 | 5,317 |
+| Table objects | 1,696 | 420 |
+| Cells | 51,774 | 58,690 |
+| Empty-cell ratio | 19.3% | 16.0% |
+| Repeated row/column coordinates | 0 | 6,900 |
 
 These figures require care. Repeated Docling coordinates can represent spans or projection duplication rather than corrupted data. Azure's higher empty-cell ratio can reflect faithful preservation of intentionally blank form cells. Azure's support for multi-page tables explains why raw table counts cannot be compared as a simple score.
 
@@ -217,7 +217,7 @@ The conclusion for tables is not simply “Azure always reads cells better.” I
 
 Azure exposes figures directly in the common analysis payload. Docling's native output contains pictures, but the current Docling-to-common projection deliberately emits `figures: []`. As a result, the normalized downstream dataset cannot currently use Docling figures in the same way it uses Azure figures. This is partly a projection limitation rather than purely a model limitation.
 
-For the ten figure-heavy documents, Azure represented 2,779 figures and Docling's native payload represented 2,125 pictures. For the ten figure-dense documents, the totals were 629 and 266. Segmentation rules differ, so the numbers are descriptive rather than an accuracy ranking.
+For the ten figure-heavy documents, Azure represented 4,176 figures and Docling's native payload represented 4,226 pictures. For the ten figure-dense documents, the totals were 559 and 187. Segmentation rules differ, so the numbers are descriptive rather than an accuracy ranking.
 
 The image-heavy map document `4647207` demonstrates another subtlety. Its Docling Markdown file is empty, which initially looks like a complete failure. However, Docling's raw structured paragraphs contain map labels, kilometre posts, legal land descriptions, site IDs, and the map title. Azure's Markdown and raw output contain richer, better ordered text and structured table/figure objects, but Docling did extract useful content that its Markdown exporter omitted.
 
@@ -233,19 +233,17 @@ Document `4662461`, page 36, combines many tables, an aerial map, and four photo
 
 ### Docling
 
-At the evaluation snapshot, the crash-resilient supervisor state contained:
+The final crash-resilient supervisor state, updated at 01:56 UTC on 14 August 2026, contained:
 
-- 5,075 successful documents.
-- 5,058 first-attempt successes.
-- 17 successes after retry.
-- 20 failed attempts before eventual success.
-- Six quarantined document IDs after three attempts each.
-- Twelve timeout attempts.
-- Two records not yet finalized, including the active worker.
+- 8,203 successful documents: 8,176 on the first attempt and 27 after retry.
+- 32 failed attempts before eventual success.
+- Nine quarantined document IDs after 27 total attempts.
+- Nineteen timeout attempts across completed, quarantined, and unfinished records.
+- One stranded record with three attempts but no completed or quarantined marker.
 
-The six quarantined IDs consist of three final segmentation faults and three repeated timeouts. Two timeout IDs, `4657424` and `4657571`, have the same SHA-256, so the six IDs represent five unique underlying files.
+The nine quarantined IDs consist of five final segmentation faults and four repeated timeouts. The unfinished ID `4656998` and quarantined IDs `4657424` and `4657571` have the same SHA-256, so the ten incomplete IDs represent eight unique underlying files.
 
-The observed eventual success rate among finalized Docling IDs is approximately 99.88%. That is high. The practical problem is that failures cluster among complex files:
+Docling completed 8,203 of 8,213 corpus IDs, or approximately 99.88%. Among the 8,212 IDs that reached an explicit success or quarantine state, the eventual success rate was approximately 99.89%. That is high. The practical problem is that failures cluster among complex files:
 
 | ID | Azure pages | Size | Docling final failure | Azure result |
 |---|---:|---:|---|---|
@@ -255,6 +253,10 @@ The observed eventual success rate among finalized Docling IDs is approximately 
 | `4657424` | 149 | 42.8 MiB | Three timeouts | 32.3 s |
 | `4657571` | 149 | 42.8 MiB | Same PDF; three timeouts | 36.6 s |
 | `4659381` | 297 | 3.9 MiB | Segmentation fault | 57.0 s |
+| `4664989` | 450 | 40.3 MiB | Segmentation fault after an earlier timeout | 137.7 s |
+| `4672628` | 691 | 44.9 MiB | Three timeouts | 335.7 s |
+| `4681578` | 168 | 2.6 MiB | Segmentation fault | 56.1 s |
+| `4656998` | 149 | 42.8 MiB | Same PDF as `4657424` and `4657571`; stranded after three attempts | 35.7 s |
 
 Process isolation prevented these native crashes from stopping the overall run. That supervisor design is working as intended, but quarantined files still require a second provider.
 
@@ -268,13 +270,13 @@ Azure therefore was not failure-free. Its advantage is **eventual corpus complet
 
 ### Time
 
-On the 5,070 paired PDFs:
+On the 8,200 paired PDFs:
 
-- Azure recorded 32,709.9 seconds, or 9.09 hours.
-- Docling recorded 145,171.7 seconds, or 40.33 hours.
-- Aggregate Docling time was 4.44 times Azure time.
-- The median per-document ratio was 4.45; the 95th percentile was 8.91.
-- Azure throughput was 5,745 pages per processing hour versus 1,290 for Docling.
+- Azure recorded 53,905.3 seconds, or 14.97 hours.
+- Docling recorded 242,609.6 seconds, or 67.39 hours.
+- Aggregate Docling time was 4.50 times Azure time.
+- The median per-document ratio was 4.36; the 95th percentile was 8.77.
+- Azure throughput was 5,807 pages per processing hour versus 1,286 for Docling.
 
 These are extractor elapsed-time sums, not necessarily identical to wall-clock billing time or CPU-hours. Azure work occurs remotely while Docling consumes local compute. Both tests used the pipeline's single-worker supervisors, so these results should not be extrapolated to different concurrency or hardware without a new benchmark.
 
@@ -287,11 +289,11 @@ At the user's reported Azure bill of $500:
 - Average cost per 1,000 pages: approximately $5.53.
 - Page-rate equivalent for the 986-page stress document: approximately $5.45, although Azure billing may not allocate cost linearly in this way.
 
-Docling's incremental cloud service charge is zero. Its true cost should include machine purchase or rental, electricity, storage, roughly 70 hours of projected successful compute for the full 90,484-page corpus at the observed paired throughput, timeout waste, monitoring, and engineering time. If these local costs total more than about $500, universal Azure is cheaper for this particular corpus. If suitable idle hardware already exists and latency is unimportant, Docling may be economically attractive.
+Docling's incremental cloud service charge is zero. Its true cost should include machine purchase or rental, electricity, storage, 67.4 hours of recorded successful compute for the paired corpus, timeout and crash waste, monitoring, and engineering time. If these local costs total more than about $500, universal Azure is cheaper for this particular corpus. If suitable idle hardware already exists and latency is unimportant, Docling may be economically attractive.
 
 ### Storage and privacy
 
-The current raw artifact directories are approximately 21 GB for Azure and 4.1 GB for Docling; Markdown is approximately 309 MB and 225 MB respectively. These are not yet like-for-like totals because Azure is complete and Docling is not.
+The final artifact directories are approximately 21 GB for Azure and 7.4 GB for Docling; Markdown is approximately 261 MB and 327 MB respectively. The Docling total excludes completed artifacts for the ten incomplete IDs, so it remains slightly below full corpus coverage.
 
 Docling's strongest non-quality advantage is privacy and control: source files remain on local infrastructure and processing can continue without a cloud service dependency. Azure's advantages are managed scaling, faster completion, and richer output.
 
@@ -300,8 +302,8 @@ Docling's strongest non-quality advantage is privacy and control: source files r
 ### Where Azure is better
 
 - Completes the full corpus, including the 986-page stress test.
-- Approximately 4.44 times faster in aggregate on paired documents.
-- Exact source page coverage on all 5,070 paired PDFs.
+- Approximately 4.50 times faster in aggregate on paired documents.
+- Exact source page coverage on all 8,200 paired PDFs.
 - Stronger OCR tail behaviour in visually inspected scans.
 - More reliable reading order on most very large and complex paired PDFs.
 - Rich page words and lines, sections, figures, hyperlinks, page geometry, and multi-page table provenance.
@@ -313,7 +315,7 @@ Docling's strongest non-quality advantage is privacy and control: source files r
 - No Azure service charge.
 - Local/offline processing and greater data control.
 - Competitive text on many conventional born-digital PDFs.
-- Occasional text-fidelity wins, including two of the 15 largest paired documents.
+- Occasional text-fidelity wins, including three of the 13 scoreable born-digital documents in the largest-file cohort.
 - Often clean, readable Markdown tables for simple layouts.
 - Native raw output sometimes retains useful picture-page text absent from its Markdown.
 - Open, inspectable pipeline with no dependency on a remote service response format.
@@ -349,7 +351,7 @@ For a formal publication-quality conclusion, the last missing element is a manua
 The evaluation package contains:
 
 - [`metrics.json`](metrics.json): corpus totals, analyzer inventory, reliability snapshot, and cohort summaries.
-- [`benchmark-documents.csv`](benchmark-documents.csv): per-document metrics for all 132 benchmark PDFs.
+- [`benchmark-documents.csv`](benchmark-documents.csv): per-document metrics for all 129 benchmark PDFs.
 - [`cohort-summary.csv`](cohort-summary.csv): aggregated cohort results.
 - [`large-documents.csv`](large-documents.csv): the 15 largest completed paired PDFs.
 - [`paired-page-probes.csv`](paired-page-probes.csv): source and extractor page-count probes for all paired PDFs.
@@ -363,4 +365,4 @@ Run the benchmark from the repository root with:
 .venv/bin/python tools/render_extractor_audit.py
 ```
 
-The corpus is live: Docling was still processing while this report was prepared. Re-running the evaluator refreshes paired counts and timing figures without modifying the analysis database or extraction artifacts.
+This report is a final-run snapshot: Docling is no longer processing. It completed 8,203 corpus IDs, quarantined nine, and left one same-content duplicate stranded in supervisor state. Re-running the evaluator refreshes the generated metrics from the existing analysis database and extraction artifacts without modifying them.

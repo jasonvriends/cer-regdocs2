@@ -566,6 +566,7 @@ def docling_reliability(state_path: Path) -> dict[str, Any]:
         "quarantine_attempts": sum(attempts(v) for v in quarantined.values()),
         "timeout_attempts": sum(int(v.get("timeout_count") or 0) for v in documents.values()),
         "unfinished": len(unfinished),
+        "unfinished_documents": [{"document_id": k, **v} for k, v in unfinished.items()],
         "quarantined_documents": [{"document_id": k, **v} for k, v in quarantined.items()],
     }
 
