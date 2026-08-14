@@ -34,6 +34,19 @@ require_value() {
   [[ "$value" != *REPLACE* ]] || fail "$name still contains REPLACE in $CONFIG_FILE"
 }
 
+normalized_location() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]'
+}
+
+require_matching_location() {
+  local resource_label="$1"
+  local expected="$2"
+  local actual="$3"
+  if [[ "$(normalized_location "$actual")" != "$(normalized_location "$expected")" ]]; then
+    fail "$resource_label already exists in $actual, but this deployment is configured for $expected. Use a new resource name or set the matching per-resource location in $CONFIG_FILE."
+  fi
+}
+
 is_true() {
   [[ "${1,,}" == "true" ]]
 }
@@ -123,10 +136,27 @@ blob_exists() {
     --only-show-errors)" == "true" ]]
 }
 
+require_blob_access() {
+  local blob_name="$1"
+  local metadata
+  if ! metadata="$(az storage blob show \
+    --account-name "$STORAGE_ACCOUNT" \
+    --blob-endpoint "$STORAGE_BLOB_ENDPOINT" \
+    --container-name "$BLOB_CONTAINER" \
+    --name "$blob_name" \
+    --sas-token "$STORAGE_SAS_TOKEN" \
+    --query '[name,properties.contentLength]' \
+    --output tsv \
+    --only-show-errors)"; then
+    fail "Cannot read required Blob input $blob_name. Its region does not need to match the deployment region; check the Storage account/container names, SAS expiry and permissions, SAS IP restrictions, and the Storage firewall."
+  fi
+  [[ -n "$metadata" ]] || fail "Required Blob input is missing: $blob_name"
+  echo "Verified Blob input: $metadata"
+}
+
 download_blob() {
   local blob_name="$1"
   local destination="$2"
-  blob_exists "$blob_name" || fail "Required Blob input is missing: $blob_name"
   mkdir -p "$(dirname -- "$destination")"
   az storage blob download \
     --account-name "$STORAGE_ACCOUNT" \
@@ -173,8 +203,14 @@ PY
   upload_blob "$snapshot" "$EMBEDDING_CACHE_BLOB"
 }
 
+RESOURCE_GROUP_LOCATION="${RESOURCE_GROUP_LOCATION:-${LOCATION:-}}"
+SEARCH_LOCATION="${SEARCH_LOCATION:-${LOCATION:-}}"
+FOUNDRY_LOCATION="${FOUNDRY_LOCATION:-${LOCATION:-}}"
+APP_SERVICE_LOCATION="${APP_SERVICE_LOCATION:-${LOCATION:-}}"
+
 for name in \
   SUBSCRIPTION_ID LOCATION RESOURCE_GROUP STORAGE_ACCOUNT BLOB_CONTAINER \
+  RESOURCE_GROUP_LOCATION SEARCH_LOCATION FOUNDRY_LOCATION APP_SERVICE_LOCATION \
   NORMALIZED_BLOB_PREFIX DATABASE_BLOB EMBEDDING_CACHE_BLOB UI_PACKAGE_BLOB \
   SEARCH_SERVICE FOUNDRY_ACCOUNT FOUNDRY_PROJECT APP_SERVICE_PLAN WEB_APP \
   SEARCH_SKU SEARCH_INDEX SEARCH_VECTOR_FIELD SEARCH_SEMANTIC_CONFIGURATION \
@@ -243,12 +279,13 @@ VENV_PATH="$DEPLOY_TMP_DIR/venv"
 UI_PACKAGE_FILE="$DEPLOY_TMP_DIR/regdocs-atlas-ui.zip"
 
 log "Validating and downloading deployment inputs from Blob Storage"
+require_blob_access "$NORMALIZED_BLOB_PREFIX/chunks.jsonl"
+require_blob_access "$NORMALIZED_BLOB_PREFIX/provenance.jsonl"
+if is_true "${REQUIRE_DATABASE_BLOB:-true}"; then
+  require_blob_access "$DATABASE_BLOB"
+fi
 download_blob "$NORMALIZED_BLOB_PREFIX/chunks.jsonl" "$NORMALIZED_PATH/chunks.jsonl"
 download_blob "$NORMALIZED_BLOB_PREFIX/provenance.jsonl" "$NORMALIZED_PATH/provenance.jsonl"
-if is_true "${REQUIRE_DATABASE_BLOB:-true}"; then
-  blob_exists "$DATABASE_BLOB" || fail "Required database backup is missing from Blob Storage: $DATABASE_BLOB"
-  echo "Verified database backup: $DATABASE_BLOB"
-fi
 if blob_exists "$EMBEDDING_CACHE_BLOB"; then
   log "Restoring resumable embedding cache from Blob Storage"
   download_blob "$EMBEDDING_CACHE_BLOB" "$EMBEDDING_CACHE_FILE"
@@ -263,19 +300,25 @@ for provider in Microsoft.Search Microsoft.CognitiveServices Microsoft.Web; do
   az provider register --namespace "$provider" --wait --output none
 done
 
-log "Creating deployment resource group"
-az group create \
-  --name "$RESOURCE_GROUP" \
-  --location "$LOCATION" \
-  --tags application=regdocs-atlas managed-by=ui-deploy \
-  --output none
+log "Deployment locations: group metadata=$RESOURCE_GROUP_LOCATION; Search=$SEARCH_LOCATION; Foundry=$FOUNDRY_LOCATION; App Service=$APP_SERVICE_LOCATION"
+if ! az group show --name "$RESOURCE_GROUP" --output none 2>/dev/null; then
+  log "Creating deployment resource group"
+  az group create \
+    --name "$RESOURCE_GROUP" \
+    --location "$RESOURCE_GROUP_LOCATION" \
+    --tags application=regdocs-atlas managed-by=ui-deploy \
+    --output none
+else
+  GROUP_ACTUAL_LOCATION="$(az group show --name "$RESOURCE_GROUP" --query location --output tsv)"
+  echo "Reusing resource group $RESOURCE_GROUP (metadata location: $GROUP_ACTUAL_LOCATION)."
+fi
 
 log "Creating Azure AI Search"
 if ! az search service show --resource-group "$RESOURCE_GROUP" --name "$SEARCH_SERVICE" --output none 2>/dev/null; then
   az search service create \
     --resource-group "$RESOURCE_GROUP" \
     --name "$SEARCH_SERVICE" \
-    --location "$LOCATION" \
+    --location "$SEARCH_LOCATION" \
     --sku "$SEARCH_SKU" \
     --partition-count "$SEARCH_PARTITIONS" \
     --replica-count "$SEARCH_REPLICAS" \
@@ -286,6 +329,12 @@ if ! az search service show --resource-group "$RESOURCE_GROUP" --name "$SEARCH_S
     --public-network-access enabled \
     --output none
 else
+  SEARCH_ACTUAL_LOCATION="$(az search service show \
+    --resource-group "$RESOURCE_GROUP" \
+    --name "$SEARCH_SERVICE" \
+    --query location \
+    --output tsv)"
+  require_matching_location "Azure AI Search service $SEARCH_SERVICE" "$SEARCH_LOCATION" "$SEARCH_ACTUAL_LOCATION"
   az search service update \
     --resource-group "$RESOURCE_GROUP" \
     --name "$SEARCH_SERVICE" \
@@ -304,7 +353,7 @@ if ! az cognitiveservices account show --resource-group "$RESOURCE_GROUP" --name
   az cognitiveservices account create \
     --resource-group "$RESOURCE_GROUP" \
     --name "$FOUNDRY_ACCOUNT" \
-    --location "$LOCATION" \
+    --location "$FOUNDRY_LOCATION" \
     --kind AIServices \
     --sku S0 \
     --custom-domain "$FOUNDRY_ACCOUNT" \
@@ -312,6 +361,13 @@ if ! az cognitiveservices account show --resource-group "$RESOURCE_GROUP" --name
     --assign-identity \
     --yes \
     --output none
+else
+  FOUNDRY_ACTUAL_LOCATION="$(az cognitiveservices account show \
+    --resource-group "$RESOURCE_GROUP" \
+    --name "$FOUNDRY_ACCOUNT" \
+    --query location \
+    --output tsv)"
+  require_matching_location "Foundry account $FOUNDRY_ACCOUNT" "$FOUNDRY_LOCATION" "$FOUNDRY_ACTUAL_LOCATION"
 fi
 if ! az cognitiveservices account project show \
   --resource-group "$RESOURCE_GROUP" \
@@ -322,7 +378,7 @@ if ! az cognitiveservices account project show \
     --resource-group "$RESOURCE_GROUP" \
     --name "$FOUNDRY_ACCOUNT" \
     --project-name "$FOUNDRY_PROJECT" \
-    --location "$LOCATION" \
+    --location "$FOUNDRY_LOCATION" \
     --output none
 fi
 ensure_model_deployment \
@@ -346,10 +402,17 @@ if ! az appservice plan show --resource-group "$RESOURCE_GROUP" --name "$APP_SER
   az appservice plan create \
     --resource-group "$RESOURCE_GROUP" \
     --name "$APP_SERVICE_PLAN" \
-    --location "$LOCATION" \
+    --location "$APP_SERVICE_LOCATION" \
     --is-linux \
     --sku "$APP_SERVICE_SKU" \
     --output none
+else
+  APP_PLAN_ACTUAL_LOCATION="$(az appservice plan show \
+    --resource-group "$RESOURCE_GROUP" \
+    --name "$APP_SERVICE_PLAN" \
+    --query location \
+    --output tsv)"
+  require_matching_location "App Service plan $APP_SERVICE_PLAN" "$APP_SERVICE_LOCATION" "$APP_PLAN_ACTUAL_LOCATION"
 fi
 if ! az webapp show --resource-group "$RESOURCE_GROUP" --name "$WEB_APP" --output none 2>/dev/null; then
   az webapp create \

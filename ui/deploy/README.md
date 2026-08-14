@@ -18,6 +18,15 @@ SAS URL.
 The database is retained in Blob as the pipeline ledger and verified by the
 deployment, but the web app does not download or query it.
 
+The Storage account does not need to share a region or resource group with the
+deployment resources. A SAS authorizes the configured account and container by
+URL. Fresh deployments default to East US 2 because the configured embedding
+and chat model offers are available there; `RESOURCE_GROUP_LOCATION`,
+`SEARCH_LOCATION`, `FOUNDRY_LOCATION`, and `APP_SERVICE_LOCATION` can override
+that default independently. The deployer validates the location of any reused
+Search, Foundry, or App Service Plan resource and stops with a clear error when
+an existing resource cannot satisfy the configured location.
+
 ## 1. Create Storage and a container SAS
 
 Create the Storage account and private container before running this script.
@@ -111,7 +120,9 @@ cp config.env.example config.env
 
 Edit `config.env`. Set the subscription ID, the existing Storage account and
 container, globally unique Search/Foundry/App names, offered model versions and
-capacity, and `CONFIRM_BILLABLE_DEPLOYMENT=yes`.
+capacity, and `CONFIRM_BILLABLE_DEPLOYMENT=yes`. If Storage remains in Canada
+Central while compute is deployed elsewhere, keep its existing account and
+container values; no Storage location setting is required.
 
 Cloud Shell must have Python 3 with `venv`, `zip`, and Node.js 22 or newer. If
 its Node version is older and `nvm` is available, run `nvm install 22` first.
