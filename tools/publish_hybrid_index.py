@@ -411,7 +411,13 @@ def validate(args: argparse.Namespace) -> None:
 def run(args: argparse.Namespace) -> int:
     validate(args)
     document_ids = set(map(str, args.document_id)) if args.document_id else None
-    meta = scan_inputs(args.normalized_dir, document_ids, args.limit)
+    meta = scan_inputs(
+        args.normalized_dir,
+        document_ids,
+        args.limit,
+        args.upload_batch_size,
+        DEFAULT_BATCH_BYTES,
+    )
     print(
         f"Validated {meta['search_document_count']} chunk(s) from {meta['source_document_count']} document(s); "
         f"target={args.index_name!r}, vector={args.vector_field}/{args.dimensions}."
