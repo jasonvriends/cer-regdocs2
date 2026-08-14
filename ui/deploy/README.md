@@ -1,165 +1,154 @@
-# Blob-to-Cloud-Shell Azure deployment
+# Resumable Azure deployment from Cloud Shell
 
-This workflow separates data transfer from Azure provisioning:
+This deployment is designed for the following constraint: interactive Azure
+login works only in Azure Cloud Shell opened on a company-managed computer, and
+Cloud Shell can disconnect before a 200,000+ chunk index finishes.
 
-1. Create one private Storage account and Blob container.
-2. On the computer holding the corpus, upload `workspace/` and a consistent
-   `database/regdocs.db` snapshot with a container SAS.
-3. Open Azure Cloud Shell, clone or upload this repository, export the same SAS,
-   and run `ui/deploy/deploy.sh`.
+Cloud Shell is therefore only the control terminal. It runs short, idempotent
+Terraform and Azure CLI phases. Azure Container Registry builds the images, and
+an Azure Container Apps job performs the long index publication independently
+of the Cloud Shell session.
 
-The deployment script reads the two normalized Stage 4 files from Blob,
-restores the embedding cache when one exists, and then provisions Azure AI
-Search, Microsoft Foundry, model deployments, App Service, managed identities,
-and RBAC. It publishes and verifies the hybrid index, builds the UI, uploads the
-deployable ZIP to the same container, and tells App Service to pull that ZIP by
-SAS URL.
+No VM or container runs `az login`. The UI and indexer use user-assigned managed
+identities for Azure-to-Azure authentication.
 
-The database is retained in Blob as the pipeline ledger and verified by the
-deployment, but the web app does not download or query it.
+## Ownership boundary
 
-The Storage account does not need to share a region or resource group with the
-deployment resources. A SAS authorizes the configured account and container by
-URL. Fresh deployments default to East US 2 because the configured embedding
-and chat model offers are available there; `RESOURCE_GROUP_LOCATION`,
-`SEARCH_LOCATION`, `FOUNDRY_LOCATION`, and `APP_SERVICE_LOCATION` can override
-that default independently. The deployer validates the location of any reused
-Search, Foundry, or App Service Plan resource and stops with a clear error when
-an existing resource cannot satisfy the configured location.
+Terraform creates and manages a new resource group containing:
 
-## 1. Create Storage and a container SAS
+- Azure AI Search
+- a Microsoft Foundry resource, project, and two model deployments
+- Azure Container Registry
+- a Container Apps environment, public UI app, and manual indexing job
+- Log Analytics, managed identities, and least-privilege role assignments
 
-Create the Storage account and private container before running this script.
-Keep anonymous access disabled. Generate a container SAS with these permissions:
+The existing Storage account and Blob container are **not Terraform resources**.
+Terraform constructs their Azure resource ID only for the indexer's Blob role
+assignment; it does not import, read keys from, modify, or delete them. They can
+remain in Canada Central while the new workload runs in East US 2.
 
-- Read
-- Add
-- Create
-- Write
-- List
-
-The SAS must remain valid for the entire upload and Cloud Shell deployment. A
-full index publication can take hours, so allow a suitable margin and require
-HTTPS. App Service itself pulls the ZIP, so do not restrict the SAS to only the
-data computer or Cloud Shell IP. If the Storage account firewall limits public
-network access, it must also permit the App Service/Kudu outbound path during
-deployment; a SAS does not bypass the Storage firewall.
-
-Never commit or paste the SAS into `config.env`.
-
-## 2. Upload from the data computer
-
-Install Azure CLI, then export the SAS without a leading `?`:
-
-```bash
-export AZURE_STORAGE_SAS_TOKEN='sv=...&sp=...&sig=...'
-export REGDOCS_STORAGE_ACCOUNT='stregdocsatlasexample'
-export REGDOCS_BLOB_CONTAINER='regdocs-deployment'
-```
-
-Upload the workspace while preserving the `workspace/` prefix:
-
-```bash
-az storage blob upload-batch \
-  --account-name "$REGDOCS_STORAGE_ACCOUNT" \
-  --destination "$REGDOCS_BLOB_CONTAINER" \
-  --destination-path workspace \
-  --source workspace \
-  --sas-token "$AZURE_STORAGE_SAS_TOKEN" \
-  --overwrite true
-```
-
-Create a consistent SQLite snapshot before uploading. This matters when the
-source database uses WAL mode or another pipeline process has it open:
-
-```bash
-REGDOCS_DB_UPLOAD_DIR="$(mktemp -d -t regdocs-db-upload.XXXXXXXX)"
-python3 - database/regdocs.db "$REGDOCS_DB_UPLOAD_DIR/regdocs.db" <<'PY'
-import sqlite3
-import sys
-
-source = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-target = sqlite3.connect(sys.argv[2])
-try:
-    source.backup(target)
-finally:
-    target.close()
-    source.close()
-PY
-
-az storage blob upload \
-  --account-name "$REGDOCS_STORAGE_ACCOUNT" \
-  --container-name "$REGDOCS_BLOB_CONTAINER" \
-  --name database/regdocs.db \
-  --file "$REGDOCS_DB_UPLOAD_DIR/regdocs.db" \
-  --sas-token "$AZURE_STORAGE_SAS_TOKEN" \
-  --overwrite true
-```
-
-The deployer specifically consumes:
+The indexer reads only:
 
 ```text
 workspace/4_normalize/chunks.jsonl
 workspace/4_normalize/provenance.jsonl
-database/regdocs.db
 workspace/5_index/embedding-cache.sqlite    optional on the first run
 ```
 
-Uploading the rest of `workspace/` preserves the expensive Stage 1-3 artifacts
-but does not cause Cloud Shell to download them.
+It periodically writes a consistent embedding-cache checkpoint back to the
+third path. `database/regdocs.db` remains safely stored as the pipeline ledger,
+but neither Search indexing nor the UI needs SQLite.
 
-## 3. Run from Azure Cloud Shell
+## Why rerunning is safe
 
-In Cloud Shell, obtain this repository and enter the deployment directory:
+Terraform state lives at `terraform/regdocs-atlas.tfstate` in the existing Blob
+container and uses Azure Blob leasing for locking. Each run reconciles the same
+resources rather than creating copies.
+
+Images use the current Git commit as an immutable tag. The script:
+
+1. reuses an image if its tag exists;
+2. detects an ACR build already queued or running;
+3. queues missing builds with `--no-wait` and exits;
+4. deploys workloads only after both images exist;
+5. does not start another index execution while one is running;
+6. reuses a successful execution unless `--restart-index` is explicit.
+
+Search documents use stable keys and `merge_or_upload`, so retrying a failed job
+updates existing chunks rather than duplicating them. The remote embedding cache
+avoids paying to regenerate vectors already completed by an earlier execution.
+
+## One-time Cloud Shell setup
+
+Clone the repository and create the ignored configuration file:
 
 ```bash
 git clone <repository-url> cer-regdocs2
-cd cer-regdocs2/ui/deploy
-cp config.env.example config.env
+cd cer-regdocs2
+cp ui/deploy/config.env.example ui/deploy/config.env
+code ui/deploy/config.env
 ```
 
-Edit `config.env`. Set the subscription ID, the existing Storage account and
-container, globally unique Search/Foundry/App names, offered model versions and
-capacity, and `CONFIRM_BILLABLE_DEPLOYMENT=yes`. If Storage remains in Canada
-Central while compute is deployed elsewhere, keep its existing account and
-container values; no Storage location setting is required.
+At minimum, set:
 
-Cloud Shell must have Python 3 with `venv`, `zip`, and Node.js 22 or newer. If
-its Node version is older and `nvm` is available, run `nvm install 22` first.
+- `SUBSCRIPTION_ID`
+- a unique `NAME_SUFFIX`
+- `STORAGE_ACCOUNT`
+- `STORAGE_RESOURCE_GROUP`
+- `BLOB_CONTAINER`
+- `CONFIRM_BILLABLE_DEPLOYMENT=yes`
 
-Export the SAS in Cloud Shell and deploy:
+The defaults use East US 2, `GlobalStandard` model deployments, 1,000,000 TPM
+embedding capacity, embedding batches of 128 inputs, and Search upload batches
+of up to 1,000 documents. Azure can still reject the requested capacity when
+the subscription lacks quota; lower `EMBEDDING_CAPACITY` to the allocated quota
+if that happens. `DataZoneStandard` can replace `GlobalStandard` if policy
+requires inference to remain within the United States data zone.
+
+Generate or reuse a private container SAS. It needs Read, Create, Write, and
+List permission for input verification and Terraform state. Keep it out of
+`config.env` and Git:
 
 ```bash
+read -rsp "Paste the container SAS token: " AZURE_STORAGE_SAS_TOKEN
+printf '\n'
+AZURE_STORAGE_SAS_TOKEN="${AZURE_STORAGE_SAS_TOKEN#\?}"
+export AZURE_STORAGE_SAS_TOKEN
+```
+
+Run the deployment from the repository root:
+
+```bash
+./ui/deploy/deploy.sh
+```
+
+Terraform is preinstalled in current Azure Cloud Shell images. ACR builds Node
+and Python containers in Azure, so Cloud Shell needs no Node, Python packages,
+Docker, or SQLite CLI.
+
+## After a timeout or disconnect
+
+Return to the same clone, export a valid SAS again if needed, and run the exact
+same command:
+
+```bash
+cd ~/cer-regdocs2
 export AZURE_STORAGE_SAS_TOKEN='sv=...&sp=...&sig=...'
-chmod +x deploy.sh
-./deploy.sh
+./ui/deploy/deploy.sh
 ```
 
-You can keep the non-secret configuration elsewhere and pass it explicitly:
+The script prints which phase is already complete and continues with the next
+one. An indexing job keeps running after Cloud Shell closes. Its latest status
+appears at the end of each run and in Azure Portal under the Container Apps job
+named `job-regdocs-<suffix>`.
+
+When new `chunks.jsonl` or `provenance.jsonl` files have been uploaded and the
+last execution is already successful, explicitly start another publication:
 
 ```bash
-./deploy.sh /path/to/regdocs-production.env
+./ui/deploy/deploy.sh --restart-index
 ```
 
-## Resuming and pilot runs
+To provision the complete deployment without starting the job:
 
-The script uploads `workspace/5_index/embedding-cache.sqlite` after publication
-and also attempts to upload it when the script exits after an error or
-interrupt. It uses SQLite's backup API so the uploaded cache is consistent even
-when WAL files were involved. Rerun the same command to resume. Keep the SAS
-valid until that cache and `deploy/regdocs-atlas-ui.zip` have been written.
+```bash
+./ui/deploy/deploy.sh --no-start
+```
 
-For a lower-cost pilot, set `PUBLISH_LIMIT="100"`. Return it to blank before the
-production run. Keep the same embedding deployment and dimensions between the
-pilot and full publication.
+## Operational notes
 
-`RECREATE_INDEX=true` deletes and recreates the configured Search index. It is
-off by default.
-
-## Security notes
-
-- The SAS remains an environment variable and is never stored in App Service.
-- The generated App Service deployment command uses the SAS URL only for the
-  immediate ZIP pull from the private container.
-- Search and Foundry runtime access use managed identities rather than keys.
-- `config.env` is ignored by Git and should not contain secrets.
+- Standard Azure AI Search is the principal fixed monthly cost. Container Apps
+  UI scales to zero when idle, while the manual index job costs only while it is
+  executing. ACR Basic and Log Analytics add smaller charges.
+- A 1,000,000 TPM setting is model quota, not a reservation or a promise to
+  consume that volume. Embedding charges are based on processed tokens.
+- The UI is available before the first index execution completes, but searches
+  will not return the complete corpus until the job succeeds.
+- Keep `config.env` and SAS tokens private. Terraform state is sensitive because
+  it includes resource configuration and the generated Foundry safety salt.
+- A SAS or managed identity does not bypass the Storage firewall. The retained
+  account must permit the Container Apps job's outbound access; this template
+  does not create a VNet or private endpoint for an already locked-down account.
+- `terraform destroy` is intentionally not wrapped by the script. If used
+  manually, it removes only Terraform-managed resources, not the existing
+  Storage account or corpus blobs.

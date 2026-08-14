@@ -21,3 +21,6 @@ __pycache__/
 !/ui/.env.local.example
 /ui/npm-debug.log*
 /ui/deploy/config.env
+/ui/deploy/terraform/.terraform/
+/ui/deploy/terraform/*.tfstate*
+/ui/deploy/terraform/*.tfplan

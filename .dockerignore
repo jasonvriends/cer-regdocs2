@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+venv
+database
+workspace
+reports
+**/__pycache__
+**/*.pyc
+ui/.next
+ui/node_modules
+ui/deploy/config.env
+ui/deploy/terraform/.terraform
+ui/deploy/terraform/*.tfstate*
+ui/deploy/terraform/*.tfplan
