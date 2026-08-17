@@ -1,10 +1,16 @@
 import { createHash } from "node:crypto";
-import { answerWithFoundry, streamWithFoundry, validCitations } from "@/lib/foundry";
+import {
+  answerWithFoundry,
+  streamWithFoundry,
+  validCitations,
+  type AtlasCitation,
+} from "@/lib/foundry";
 import {
   getChunksByIds,
   searchRegdocs,
   type AtlasSearchMode,
   type AtlasSearchRequest,
+  type AtlasSearchResult,
 } from "@/lib/azure-search";
 
 export const runtime = "nodejs";
@@ -15,6 +21,12 @@ type AskBody = {
   workspaceChunkIds?: unknown;
   searchMode?: unknown;
   filters?: Partial<AtlasSearchRequest>;
+};
+
+type RetrievalResult = {
+  evidence: AtlasSearchResult[];
+  mode: AtlasSearchMode;
+  fallbackFrom?: AtlasSearchMode;
 };
 
 const RATE_WINDOW_MS = 60_000;
@@ -76,6 +88,124 @@ function safeFilters(input: Partial<AtlasSearchRequest> | undefined): Partial<At
   };
 }
 
+function sourceTitle(item: AtlasSearchResult) {
+  return item.heading || item.title || `Document ${item.document_id}`;
+}
+
+function evidenceCitations(evidence: AtlasSearchResult[]): AtlasCitation[] {
+  return evidence.map((item, index) => ({
+    id: `S${index + 1}`,
+    chunkId: item.chunk_id,
+    title: sourceTitle(item),
+    documentId: item.document_id,
+    filingNumber: item.filing_number ?? null,
+    pageStart: item.page_start ?? null,
+    pageEnd: item.page_end ?? null,
+    sourceUrl: item.source_url ?? null,
+    resolvedUrl: item.resolved_url ?? null,
+    fileType: item.file_types?.[0] ?? null,
+    excerpt: (item.content ?? "").replace(/\s+/g, " ").trim().slice(0, 320),
+  }));
+}
+
+function preferredAskMode(question: string): AtlasSearchMode {
+  const quotedPhrase = /["“][^"”]{3,}["”]/.test(question);
+  const likelyRecordIdentifier = /\b[A-Z]{1,5}[- ]?\d{4,}\b/.test(question);
+  return quotedPhrase || likelyRecordIdentifier ? "keyword" : "hybrid";
+}
+
+async function retrieveCorpusEvidence(
+  question: string,
+  filters: Partial<AtlasSearchRequest>,
+): Promise<RetrievalResult> {
+  const primaryMode = preferredAskMode(question);
+  const secondaryMode: AtlasSearchMode = primaryMode === "hybrid" ? "keyword" : "hybrid";
+  const request = {
+    query: question,
+    top: 12,
+    sort: "relevance" as const,
+    ...filters,
+  };
+
+  try {
+    const primary = await searchRegdocs({ ...request, mode: primaryMode });
+    if (primary.results.length) {
+      return { evidence: primary.results, mode: primaryMode };
+    }
+
+    try {
+      const secondary = await searchRegdocs({ ...request, mode: secondaryMode });
+      return {
+        evidence: secondary.results,
+        mode: secondaryMode,
+        fallbackFrom: primaryMode,
+      };
+    } catch (fallbackError) {
+      console.warn("REGDOCS Ask secondary retrieval mode failed", fallbackError);
+      return { evidence: [], mode: primaryMode };
+    }
+  } catch (primaryError) {
+    if (primaryMode !== "hybrid") throw primaryError;
+    console.warn("REGDOCS Ask hybrid retrieval failed; falling back to keyword", primaryError);
+    const fallback = await searchRegdocs({ ...request, mode: "keyword" });
+    return {
+      evidence: fallback.results,
+      mode: "keyword",
+      fallbackFrom: "hybrid",
+    };
+  }
+}
+
+function retryableGroundingFailure(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  return message.includes("empty answer") || message.includes("without valid evidence citations");
+}
+
+function userFacingStreamFailure(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  if (message.includes("without valid evidence citations")) {
+    return {
+      code: "citation_validation_failed",
+      error: "I found relevant CER evidence, but the generated answer could not be verified against its citations. The retrieved sources are still shown below.",
+    };
+  }
+  if (message.includes("empty answer")) {
+    return {
+      code: "empty_answer",
+      error: "I found relevant CER evidence, but the answer service returned no usable synthesis. The retrieved sources are still shown below.",
+    };
+  }
+  if (message.includes("not configured")) {
+    return {
+      code: "answer_service_not_configured",
+      error: "I found relevant CER evidence, but the answer service is not configured correctly. The retrieved sources are still shown below.",
+    };
+  }
+  return {
+    code: "answer_service_failed",
+    error: "I found relevant CER evidence, but the synthesized answer could not be completed. The retrieved sources are still shown below.",
+  };
+}
+
+async function collectGroundedAnswer(
+  question: string,
+  evidence: AtlasSearchResult[],
+  safetyId: string | undefined,
+  signal: AbortSignal,
+) {
+  const streamed = await streamWithFoundry(question, evidence, safetyId, signal);
+  let answer = "";
+  for await (const event of streamed.events) {
+    if (event.type === "response.output_text.delta") answer += event.delta;
+  }
+  if (!answer.trim()) throw new Error("Microsoft Foundry returned an empty answer");
+  const citations = validCitations(answer, streamed.citations);
+  if (!citations.length) {
+    throw new Error("Microsoft Foundry returned an answer without valid evidence citations");
+  }
+  return { answer: answer.trim(), citations, model: streamed.model };
+}
+
 export async function POST(request: Request) {
   if (!allowRequest(requesterAddress(request))) {
     return Response.json({ error: "Too many Ask requests; try again shortly." }, { status: 429 });
@@ -93,18 +223,12 @@ export async function POST(request: Request) {
   }
 
   const workspaceChunkIds = stringArray(body.workspaceChunkIds, 20);
-  const requestedMode: AtlasSearchMode = body.searchMode === "hybrid" ? "hybrid" : "keyword";
 
   try {
-    const evidence = workspaceChunkIds.length
-      ? await getChunksByIds(workspaceChunkIds)
-      : (await searchRegdocs({
-          query: question,
-          top: 12,
-          mode: requestedMode,
-          sort: "relevance",
-          ...safeFilters(body.filters),
-        })).results;
+    const retrieved = workspaceChunkIds.length
+      ? { evidence: await getChunksByIds(workspaceChunkIds), mode: "keyword" as const }
+      : await retrieveCorpusEvidence(question, safeFilters(body.filters));
+    const evidence = retrieved.evidence;
 
     if (!evidence.length) {
       return Response.json({ error: "No CER evidence matched this question and scope." }, { status: 404 });
@@ -112,36 +236,43 @@ export async function POST(request: Request) {
 
     const common = {
       scope: workspaceChunkIds.length ? "workspace" : "corpus",
-      retrievalMode: workspaceChunkIds.length ? "exact-workspace" : requestedMode,
+      retrievalMode: workspaceChunkIds.length ? "exact-workspace" : retrieved.mode,
+      retrievalFallbackFrom: workspaceChunkIds.length ? null : retrieved.fallbackFrom ?? null,
       evidenceCount: evidence.length,
       coverage: { primaryStart: "2026-01-01", primaryEnd: "2026-07-31" },
     };
+    const safetyId = safetyIdentifier(request);
+
     if (request.headers.get("accept")?.includes("application/x-ndjson")) {
-      const streamed = await streamWithFoundry(question, evidence, safetyIdentifier(request), request.signal);
       const encoder = new TextEncoder();
-      const body = new ReadableStream({
+      const sources = evidenceCitations(evidence);
+      const streamBody = new ReadableStream({
         async start(controller) {
-          let answer = "";
+          // Preserve successful retrieval in the UI even if Foundry fails later.
+          controller.enqueue(encoder.encode(ndjson({ type: "citations", citations: sources })));
           try {
-            for await (const event of streamed.events) {
-              if (event.type !== "response.output_text.delta") continue;
-              answer += event.delta;
-              controller.enqueue(encoder.encode(ndjson({ type: "delta", delta: event.delta })));
+            let grounded;
+            try {
+              grounded = await collectGroundedAnswer(question, evidence, safetyId, request.signal);
+            } catch (firstError) {
+              if (!retryableGroundingFailure(firstError) || request.signal.aborted) throw firstError;
+              console.warn("REGDOCS grounded answer validation failed; retrying once", firstError);
+              grounded = await collectGroundedAnswer(question, evidence, safetyId, request.signal);
             }
-            const citations = validCitations(answer, streamed.citations);
-            if (!answer.trim()) throw new Error("Microsoft Foundry returned an empty answer");
-            if (!citations.length) throw new Error("Microsoft Foundry returned an answer without valid evidence citations");
-            controller.enqueue(encoder.encode(ndjson({ type: "citations", citations })));
-            controller.enqueue(encoder.encode(ndjson({ type: "done", model: streamed.model, ...common })));
+
+            // Only release model text after citation validation succeeds.
+            controller.enqueue(encoder.encode(ndjson({ type: "delta", delta: grounded.answer })));
+            controller.enqueue(encoder.encode(ndjson({ type: "citations", citations: grounded.citations })));
+            controller.enqueue(encoder.encode(ndjson({ type: "done", model: grounded.model, ...common })));
           } catch (error) {
             console.error("REGDOCS grounded answer stream failed", error);
-            controller.enqueue(encoder.encode(ndjson({ type: "error", error: "The grounded answer stream could not be completed." })));
+            controller.enqueue(encoder.encode(ndjson({ type: "error", ...userFacingStreamFailure(error) })));
           } finally {
             controller.close();
           }
         },
       });
-      return new Response(body, {
+      return new Response(streamBody, {
         headers: {
           "Cache-Control": "no-store",
           "Content-Type": "application/x-ndjson; charset=utf-8",
@@ -149,7 +280,14 @@ export async function POST(request: Request) {
       });
     }
 
-    const result = await answerWithFoundry(question, evidence, safetyIdentifier(request));
+    let result;
+    try {
+      result = await answerWithFoundry(question, evidence, safetyId);
+    } catch (firstError) {
+      if (!retryableGroundingFailure(firstError)) throw firstError;
+      console.warn("REGDOCS grounded answer validation failed; retrying once", firstError);
+      result = await answerWithFoundry(question, evidence, safetyId);
+    }
     return Response.json({
       ...result,
       ...common,
@@ -159,7 +297,7 @@ export async function POST(request: Request) {
     const message = error instanceof Error ? error.message : "Grounded answer failed";
     const configurationError = message.includes("not configured");
     return Response.json(
-      { error: configurationError ? "Microsoft Foundry or the requested search mode is not configured." : "The grounded answer could not be generated." },
+      { error: configurationError ? "Microsoft Foundry or Azure AI Search is not configured." : "The grounded answer could not be generated." },
       { status: configurationError ? 503 : 502 },
     );
   }
