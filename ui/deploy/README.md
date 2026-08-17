@@ -78,6 +78,18 @@ At minimum, set:
 - `BLOB_CONTAINER`
 - `CONFIRM_BILLABLE_DEPLOYMENT=yes`
 
+To restrict the UI and its server-side `/api/*` routes to specific public IPv4
+ranges, set the optional Terraform list in `config.env`:
+
+```bash
+UI_ALLOWED_IP_CIDRS='["203.0.113.10/32","198.51.100.0/24"]'
+```
+
+Use the public egress address seen by Azure, such as the company network or VPN
+egress address, rather than a device's private address. `/32` permits one IPv4
+address. The default empty list (`[]`) leaves ingress public. The UI and API
+routes run in the same Next.js Container App, so the one allowlist covers both.
+
 The defaults use East US 2, `GlobalStandard` model deployments, 1,000,000 TPM
 embedding capacity, embedding batches of 128 inputs, and Search upload batches
 of up to 1,000 documents. Azure can still reject the requested capacity when

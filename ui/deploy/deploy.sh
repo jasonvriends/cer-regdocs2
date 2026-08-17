@@ -158,6 +158,7 @@ declare -A TF_OVERRIDES=(
   [SEARCH_INDEX]=search_index_name
   [SEARCH_VECTOR_FIELD]=search_vector_field
   [SEARCH_SEMANTIC_CONFIGURATION]=search_semantic_configuration
+  [UI_ALLOWED_IP_CIDRS]=ui_allowed_ip_cidrs
   [EMBEDDING_DEPLOYMENT]=embedding_deployment_name
   [EMBEDDING_MODEL]=embedding_model_name
   [EMBEDDING_MODEL_VERSION]=embedding_model_version
@@ -239,15 +240,20 @@ queue_build() {
     return 1
   fi
   log "Queuing server-side ACR build for $image"
-  az acr build \
-    --registry "$ACR_NAME" \
-    --image "$image" \
-    --file "$dockerfile" \
-    --no-wait \
-    --no-logs \
-    "$REPOSITORY_ROOT" \
-    --only-show-errors \
-    --output none
+  if ! (
+    cd "$REPOSITORY_ROOT"
+    az acr build \
+      --registry "$ACR_NAME" \
+      --image "$image" \
+      --file "$dockerfile" \
+      --no-wait \
+      --no-logs \
+      . \
+      --only-show-errors \
+      --output none
+  ); then
+    fail "Failed to queue the ACR build for $image"
+  fi
   return 0
 }
 

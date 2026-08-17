@@ -251,6 +251,19 @@ resource "azurerm_container_app" "ui" {
     target_port                = 3000
     transport                  = "auto"
 
+    dynamic "ip_security_restriction" {
+      for_each = {
+        for index, cidr in var.ui_allowed_ip_cidrs : format("allow-%02d", index + 1) => cidr
+      }
+
+      content {
+        name             = ip_security_restriction.key
+        description      = "Allowed by the Terraform UI ingress allowlist"
+        ip_address_range = ip_security_restriction.value
+        action           = "Allow"
+      }
+    }
+
     traffic_weight {
       latest_revision = true
       percentage      = 100

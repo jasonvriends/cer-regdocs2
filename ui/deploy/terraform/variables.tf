@@ -101,6 +101,17 @@ variable "search_semantic_configuration" {
   default = "regdocs-semantic"
 }
 
+variable "ui_allowed_ip_cidrs" {
+  description = "IPv4 CIDR ranges allowed to reach the UI and its API routes. An empty list leaves ingress public."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for cidr in var.ui_allowed_ip_cidrs : can(cidrnetmask(cidr))])
+    error_message = "Every ui_allowed_ip_cidrs entry must be an IPv4 CIDR, such as 203.0.113.10/32."
+  }
+}
+
 variable "embedding_deployment_name" {
   type    = string
   default = "regdocs-embedding-3-small"
