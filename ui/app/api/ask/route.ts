@@ -19,7 +19,6 @@ export const dynamic = "force-dynamic";
 type AskBody = {
   question?: unknown;
   workspaceChunkIds?: unknown;
-  searchMode?: unknown;
   filters?: Partial<AtlasSearchRequest>;
 };
 
@@ -120,7 +119,7 @@ async function retrieveCorpusEvidence(
 ): Promise<RetrievalResult> {
   const primaryMode = preferredAskMode(question);
   const secondaryMode: AtlasSearchMode = primaryMode === "hybrid" ? "keyword" : "hybrid";
-  const request = {
+  const searchRequest = {
     query: question,
     top: 12,
     sort: "relevance" as const,
@@ -128,13 +127,13 @@ async function retrieveCorpusEvidence(
   };
 
   try {
-    const primary = await searchRegdocs({ ...request, mode: primaryMode });
+    const primary = await searchRegdocs({ ...searchRequest, mode: primaryMode });
     if (primary.results.length) {
       return { evidence: primary.results, mode: primaryMode };
     }
 
     try {
-      const secondary = await searchRegdocs({ ...request, mode: secondaryMode });
+      const secondary = await searchRegdocs({ ...searchRequest, mode: secondaryMode });
       return {
         evidence: secondary.results,
         mode: secondaryMode,
@@ -147,7 +146,7 @@ async function retrieveCorpusEvidence(
   } catch (primaryError) {
     if (primaryMode !== "hybrid") throw primaryError;
     console.warn("REGDOCS Ask hybrid retrieval failed; falling back to keyword", primaryError);
-    const fallback = await searchRegdocs({ ...request, mode: "keyword" });
+    const fallback = await searchRegdocs({ ...searchRequest, mode: "keyword" });
     return {
       evidence: fallback.results,
       mode: "keyword",
@@ -225,8 +224,8 @@ export async function POST(request: Request) {
   const workspaceChunkIds = stringArray(body.workspaceChunkIds, 20);
 
   try {
-    const retrieved = workspaceChunkIds.length
-      ? { evidence: await getChunksByIds(workspaceChunkIds), mode: "keyword" as const }
+    const retrieved: RetrievalResult = workspaceChunkIds.length
+      ? { evidence: await getChunksByIds(workspaceChunkIds), mode: "keyword" }
       : await retrieveCorpusEvidence(question, safeFilters(body.filters));
     const evidence = retrieved.evidence;
 
