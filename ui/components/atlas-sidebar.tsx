@@ -1,6 +1,6 @@
 "use client";
 
-import { BarChart3, Clock3, Database, GitFork, LibraryBig, PanelLeft, Plus, ShieldCheck } from "lucide-react";
+import { BarChart3, ClipboardCheck, Clock3, Database, GitFork, LibraryBig, PanelLeft, Plus, Quote, ShieldCheck } from "lucide-react";
 import { ThreadList, ThreadListNew } from "@/components/assistant-ui/thread-list";
 import {
   Sidebar,
@@ -51,16 +51,20 @@ export function ResearchSidebarTrigger({ className }: { className?: string }) {
 
 export function AtlasSidebar({
   shelfCount,
+  onClaims,
   onCoverage,
   onDataset,
   onGraph,
+  onObligations,
   onShelf,
   onTimeline,
 }: {
   shelfCount: number;
+  onClaims: () => void;
   onCoverage: () => void;
   onDataset: () => void;
   onGraph: () => void;
+  onObligations: () => void;
   onShelf: () => void;
   onTimeline: () => void;
 }) {
@@ -123,6 +127,18 @@ export function AtlasSidebar({
                 <LibraryBig aria-hidden="true" className="text-primary" />
                 <span className="flex-1">Shelf</span>
                 <span aria-hidden="true" className="rounded-full bg-sidebar-accent px-1.5 text-[10px] tabular-nums">{shelfCount}</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+            <SidebarMenuItem>
+              <SidebarMenuButton onClick={() => runAndClose(onClaims)} tooltip="Findings & claims">
+                <Quote aria-hidden="true" className="text-primary" />
+                <span>Findings & claims</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+            <SidebarMenuItem>
+              <SidebarMenuButton onClick={() => runAndClose(onObligations)} tooltip="Commitments & obligations">
+                <ClipboardCheck aria-hidden="true" className="text-primary" />
+                <span>Commitments & obligations</span>
               </SidebarMenuButton>
             </SidebarMenuItem>
             <SidebarMenuItem>
