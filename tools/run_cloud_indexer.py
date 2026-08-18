@@ -95,6 +95,10 @@ def publisher_command() -> list[str]:
     limit = os.getenv("REGDOCS_PUBLISH_LIMIT", "").strip()
     if limit:
         command.extend(["--limit", limit])
+    else:
+        # Only a successful full-corpus upload prunes obsolete keys. This keeps
+        # the current production index available if embedding/upload fails.
+        command.append("--prune-stale")
     if os.getenv("REGDOCS_RECREATE_INDEX", "false").lower() == "true":
         command.append("--recreate-index")
     return command

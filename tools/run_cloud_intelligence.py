@@ -108,6 +108,9 @@ def main() -> int:
     foundry_endpoint = setting("FOUNDRY_PROJECT_ENDPOINT")
     model_deployment = setting("FOUNDRY_MODEL_DEPLOYMENT")
     search_endpoint = setting("AZURE_SEARCH_ENDPOINT")
+    max_input_characters = setting("REGDOCS_INTELLIGENCE_MAX_INPUT_CHARACTERS", "60000")
+    max_chunks = setting("REGDOCS_INTELLIGENCE_MAX_CHUNKS", "16")
+    model_limit = os.getenv("REGDOCS_INTELLIGENCE_DOCUMENT_LIMIT", "").strip()
 
     NORMALIZED_DIR.mkdir(parents=True, exist_ok=True)
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -122,6 +125,30 @@ def main() -> int:
     download_blob(container, f"{normalized_prefix}/documents.jsonl", NORMALIZED_DIR / "documents.jsonl")
     download_blob(container, f"{normalized_prefix}/chunks.jsonl", NORMALIZED_DIR / "chunks.jsonl")
     download_blob(container, cache_blob, CACHE_PATH, optional=True)
+
+    # A full-corpus run must materialize only requests that still belong to the
+    # current normalized corpus. Keep valid cache hits, but remove obsolete
+    # request hashes before model_enrichment writes its output ledgers.
+    if not model_limit and CACHE_PATH.is_file():
+        reconcile = [
+            sys.executable,
+            "tools/prune_intelligence_cache.py",
+            "--chunks",
+            str(NORMALIZED_DIR / "chunks.jsonl"),
+            "--cache",
+            str(CACHE_PATH),
+            "--model",
+            model_deployment,
+            "--max-input-characters",
+            max_input_characters,
+            "--max-chunks",
+            max_chunks,
+        ]
+        print("$ " + " ".join(reconcile), flush=True)
+        completed = subprocess.run(reconcile, cwd="/app", text=True, check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(f"Stage 6 cache reconciliation failed with exit code {completed.returncode}")
+        upload_cache(container, cache_blob)
 
     stop = threading.Event()
     terminating = threading.Event()
@@ -162,10 +189,14 @@ def main() -> int:
             foundry_endpoint,
             "--model-deployment",
             model_deployment,
+            "--model-max-input-characters",
+            max_input_characters,
+            "--model-max-chunks",
+            max_chunks,
         ]
-        model_limit = os.getenv("REGDOCS_INTELLIGENCE_DOCUMENT_LIMIT", "").strip()
         if model_limit:
-            # Pilot/debug only. The normal production job uses --all.
+            # Pilot/debug only. The normal production job uses --all and does not
+            # prune other valid cache entries or replace full production indexes.
             extract_command = [item for item in extract_command if item != "--all"]
             extract_command.extend(["--limit", model_limit])
         run_child(extract_command, terminating, child_ref)
@@ -187,24 +218,29 @@ def main() -> int:
         ]
         if model_limit:
             publish_command.extend(["--limit", model_limit])
+        else:
+            # A final full-corpus run must exactly reflect the current extraction.
+            # Recreate derived indexes so records removed by a newer extraction do
+            # not survive indefinitely as stale regulatory intelligence.
+            publish_command.append("--recreate-indexes")
         run_child(publish_command, terminating, child_ref)
 
-        run_child(
-            [
-                sys.executable,
-                "tools/publish_regulatory_records.py",
-                "--input-dir",
-                str(ENRICH_DIR),
-                "--endpoint",
-                search_endpoint,
-                "--claims-index",
-                setting("AZURE_SEARCH_CLAIMS_INDEX", "regdocs-claims"),
-                "--obligations-index",
-                setting("AZURE_SEARCH_OBLIGATIONS_INDEX", "regdocs-obligations"),
-            ],
-            terminating,
-            child_ref,
-        )
+        regulatory_command = [
+            sys.executable,
+            "tools/publish_regulatory_records.py",
+            "--input-dir",
+            str(ENRICH_DIR),
+            "--endpoint",
+            search_endpoint,
+            "--claims-index",
+            setting("AZURE_SEARCH_CLAIMS_INDEX", "regdocs-claims"),
+            "--obligations-index",
+            setting("AZURE_SEARCH_OBLIGATIONS_INDEX", "regdocs-obligations"),
+        ]
+        if not model_limit:
+            regulatory_command.append("--recreate-indexes")
+        run_child(regulatory_command, terminating, child_ref)
+
         upload_outputs(container, enrich_prefix)
         print("Stage 6 intelligence extraction and publication completed successfully", flush=True)
         return 0

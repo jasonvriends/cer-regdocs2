@@ -102,7 +102,7 @@ variable "search_semantic_configuration" {
 }
 
 variable "ui_allowed_ip_cidrs" {
-  description = "IPv4 CIDR ranges allowed to reach the UI and its API routes. An empty list leaves ingress public."
+  description = "IPv4 CIDR ranges allowed to reach the UI and all of its /api routes. An empty list leaves ingress public."
   type        = list(string)
   default     = []
 
@@ -128,7 +128,7 @@ variable "embedding_model_version" {
 }
 
 variable "embedding_sku" {
-  description = "GlobalStandard provides the broadest quota availability for this public corpus."
+  description = "GlobalStandard provides broad quota availability for this public corpus."
   type        = string
   default     = "GlobalStandard"
 }
@@ -161,13 +161,19 @@ variable "chat_deployment_name" {
 }
 
 variable "chat_model_name" {
-  type    = string
-  default = "gpt-4.1-mini"
+  description = "Foundry deployment used by grounded Ask and Stage 6 structured extraction."
+  type        = string
+  default     = "gpt-5.4-mini"
+
+  validation {
+    condition     = var.chat_model_name != "gpt-4.1-mini"
+    error_message = "gpt-4.1-mini is deprecated for REGDOCS Atlas v1. Update config.env to the current CHAT_MODEL/CHAT_MODEL_VERSION defaults before deploying."
+  }
 }
 
 variable "chat_model_version" {
   type    = string
-  default = "2025-04-14"
+  default = "2026-03-17"
 }
 
 variable "chat_sku" {
