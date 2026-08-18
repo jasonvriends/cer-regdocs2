@@ -250,6 +250,22 @@ EOF
     return 0
   fi
 
+  if [[ "${CHAT_MODEL:-}" == "gpt-4.1-mini" ]]; then
+    cat <<'EOF'
+
+CURRENT BLOCKER: config.env still uses the retired v1 default chat model setting.
+The repository's current v1 default is:
+
+  CHAT_MODEL="gpt-5.4-mini"
+  CHAT_MODEL_VERSION="2026-03-17"
+  CHAT_SKU="GlobalStandard"
+
+Update those CHAT_MODEL values in ui/deploy/config.env, then run this guide again.
+Terraform will show the model-deployment change in --plan before anything is applied.
+EOF
+    return 0
+  fi
+
   if [[ -z "$(storage_sas)" ]]; then
     cat <<'EOF'
 
