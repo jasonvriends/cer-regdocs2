@@ -1,6 +1,6 @@
 "use client";
 
-import { BarChart3, ClipboardCheck, Clock3, Database, GitFork, LibraryBig, PanelLeft, Plus, Quote, ShieldCheck } from "lucide-react";
+import { BarChart3, ClipboardCheck, Clock3, GitFork, LibraryBig, PanelLeft, Plus, Quote, ShieldCheck } from "lucide-react";
 import { ThreadList, ThreadListNew } from "@/components/assistant-ui/thread-list";
 import {
   Sidebar,
@@ -53,7 +53,6 @@ export function AtlasSidebar({
   shelfCount,
   onClaims,
   onCoverage,
-  onDataset,
   onGraph,
   onObligations,
   onShelf,
@@ -62,7 +61,6 @@ export function AtlasSidebar({
   shelfCount: number;
   onClaims: () => void;
   onCoverage: () => void;
-  onDataset: () => void;
   onGraph: () => void;
   onObligations: () => void;
   onShelf: () => void;
@@ -139,12 +137,6 @@ export function AtlasSidebar({
               <SidebarMenuButton onClick={() => runAndClose(onObligations)} tooltip="Commitments & obligations">
                 <ClipboardCheck aria-hidden="true" className="text-primary" />
                 <span>Commitments & obligations</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-            <SidebarMenuItem>
-              <SidebarMenuButton onClick={() => runAndClose(onDataset)} tooltip="Make a dataset">
-                <Database aria-hidden="true" className="text-primary" />
-                <span>Make a dataset</span>
               </SidebarMenuButton>
             </SidebarMenuItem>
             <SidebarMenuItem>
