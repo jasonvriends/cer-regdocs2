@@ -2,6 +2,8 @@ import { AzureKeyCredential, SearchClient } from "@azure/search-documents";
 import { DefaultAzureCredential } from "@azure/identity";
 import { answerWithFoundry } from "@/lib/foundry";
 import { getDocumentView, searchRegdocs, type AtlasSearchResult } from "@/lib/azure-search";
+import { getCorpusStatus } from "@/lib/corpus-status";
+import { authorizedDiagnosticsToken, diagnosticsTokenConfigured } from "@/lib/observability";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -30,6 +32,7 @@ type DiagnosticsPayload = {
     semantic: boolean;
     foundry: boolean;
     foundryModel: string | null;
+    operatorDiagnostics: boolean;
   };
   checks?: Record<string, Check>;
 };
@@ -46,6 +49,7 @@ function configuration() {
     semantic,
     foundry: foundryEndpoint && Boolean(foundryModel),
     foundryModel,
+    operatorDiagnostics: diagnosticsTokenConfigured(),
   };
 }
 
@@ -109,6 +113,17 @@ async function runDeep(): Promise<DiagnosticsPayload> {
   const config = configuration();
   const query = process.env.REGDOCS_DIAGNOSTIC_QUERY?.trim() || "Commission";
   const checks: Record<string, Check> = {};
+
+  const corpus = await timed(() => getCorpusStatus({ refresh: true }));
+  checks.corpus = corpus.value
+    ? {
+        ...corpus.check,
+        ok: corpus.value.chunkCount > 0,
+        count: corpus.value.chunkCount,
+        detail: `${corpus.value.indexName} · ${corpus.value.earliestFilingDate ?? "unknown"} → ${corpus.value.latestFilingDate ?? "unknown"}`,
+        ...(corpus.value.chunkCount > 0 ? {} : { error: `${corpus.value.indexName} contains no chunks` }),
+      }
+    : corpus.check;
 
   const keyword = await timed(() => searchRegdocs({ query, top: 1, mode: "keyword", sort: "relevance" }));
   checks.keywordSearch = keyword.value
@@ -202,6 +217,15 @@ export async function GET(request: Request) {
       generatedAt: new Date().toISOString(),
       configuration: config,
     } satisfies DiagnosticsPayload, { status: config.search ? 200 : 503 });
+  }
+
+  if (!diagnosticsTokenConfigured()) {
+    return Response.json({ error: "Operator live diagnostics are not configured." }, { status: 503 });
+  }
+  const authorization = request.headers.get("authorization");
+  const bearer = authorization?.startsWith("Bearer ") ? authorization.slice(7).trim() : null;
+  if (!authorizedDiagnosticsToken(bearer)) {
+    return Response.json({ error: "Operator authorization is required for live diagnostics." }, { status: 401 });
   }
 
   const now = Date.now();

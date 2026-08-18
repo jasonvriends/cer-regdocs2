@@ -14,6 +14,28 @@ export type AtlasCitation = {
   excerpt: string;
 };
 
+export type AtlasRunInfo = {
+  foundryUsed: boolean;
+  deployment: string | null;
+  retrievalMode: string;
+  retrievalFallbackFrom: string | null;
+  evidenceCount: number;
+  citationCount: number;
+  semanticApplied: boolean;
+  retryCount: number;
+  timings: {
+    retrievalMs: number;
+    foundryMs: number;
+    totalMs: number;
+  };
+  coverage?: {
+    indexName: string;
+    chunkCount: number;
+    earliestFilingDate: string | null;
+    latestFilingDate: string | null;
+  } | null;
+};
+
 export type AtlasFilters = {
   company: string;
   project: string;

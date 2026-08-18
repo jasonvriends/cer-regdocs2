@@ -12,6 +12,7 @@ import {
   type AtlasSearchRequest,
   type AtlasSearchResult,
 } from "@/lib/azure-search";
+import { getCorpusStatus } from "@/lib/corpus-status";
 import { reportServerError, withErrorReference } from "@/lib/observability";
 
 export const runtime = "nodejs";
@@ -114,6 +115,21 @@ function evidenceCitations(evidence: AtlasSearchResult[]): AtlasCitation[] {
     fileType: item.file_types?.[0] ?? null,
     excerpt: (item.content ?? "").replace(/\s+/g, " ").trim().slice(0, 320),
   }));
+}
+
+async function currentCoverage() {
+  try {
+    const status = await getCorpusStatus();
+    return {
+      indexName: status.indexName,
+      chunkCount: status.chunkCount,
+      earliestFilingDate: status.earliestFilingDate,
+      latestFilingDate: status.latestFilingDate,
+    };
+  } catch (error) {
+    console.warn("REGDOCS corpus status lookup failed", error);
+    return null;
+  }
 }
 
 function preferredAskMode(question: string): AtlasSearchMode {
@@ -256,13 +272,14 @@ export async function POST(request: Request) {
 
     const retrievalMode = workspaceChunkIds.length ? "exact-workspace" : retrieved.mode;
     const retrievalFallbackFrom = workspaceChunkIds.length ? null : retrieved.fallbackFrom ?? null;
+    const coverage = await currentCoverage();
     const common = {
       scope: workspaceChunkIds.length ? "workspace" : "corpus",
       retrievalMode,
       retrievalFallbackFrom,
       evidenceCount: evidence.length,
       semanticApplied: retrievalMode === "hybrid" && Boolean(process.env.AZURE_SEARCH_SEMANTIC_CONFIGURATION?.trim()),
-      coverage: { primaryStart: "2026-01-01", primaryEnd: "2026-07-31" },
+      coverage,
     };
     const safetyId = safetyIdentifier(request);
     const configuredFoundryModel = process.env.FOUNDRY_MODEL_DEPLOYMENT?.trim() || null;
@@ -272,7 +289,7 @@ export async function POST(request: Request) {
       const sources = evidenceCitations(evidence);
       const streamBody = new ReadableStream({
         async start(controller) {
-          controller.enqueue(encoder.encode(ndjson({ type: "citations", citations: sources })));
+          controller.enqueue(encoder.encode(ndjson({ type: "evidence", evidence: sources })));
           const foundryStarted = performance.now();
           let retryCount = 0;
           try {
@@ -382,6 +399,7 @@ export async function POST(request: Request) {
     });
     return Response.json({
       ...result,
+      evidence: evidenceCitations(evidence),
       ...common,
       foundry: { used: true, deployment: result.model },
       citationValidation: "passed",

@@ -31,7 +31,14 @@ import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetT
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { ThemeSelector } from "@/components/theme-selector";
 import type { AtlasSearchResult } from "@/lib/azure-search";
-import { EMPTY_FILTERS, exportEvidence, resultTitle, type AtlasCitation, type AtlasFilters } from "@/lib/atlas-ui";
+import {
+  EMPTY_FILTERS,
+  exportEvidence,
+  resultTitle,
+  type AtlasCitation,
+  type AtlasFilters,
+  type AtlasRunInfo,
+} from "@/lib/atlas-ui";
 import type { IntelligenceScope } from "@/lib/intelligence";
 
 type AnswerPayload = {
@@ -42,9 +49,30 @@ type AnswerPayload = {
 
 type AskStreamEvent =
   | { type: "delta"; delta: string }
+  | { type: "evidence"; evidence: AtlasCitation[] }
   | { type: "citations"; citations: AtlasCitation[] }
-  | { type: "done" }
+  | {
+      type: "done";
+      foundry?: { used?: boolean; deployment?: string | null };
+      retrievalMode?: string;
+      retrievalFallbackFrom?: string | null;
+      evidenceCount?: number;
+      citationCount?: number;
+      semanticApplied?: boolean;
+      retryCount?: number;
+      timings?: { retrievalMs?: number; foundryMs?: number; totalMs?: number };
+      coverage?: AtlasRunInfo["coverage"];
+    }
   | { type: "error"; error: string };
+
+type CorpusStatusPayload = {
+  indexName?: string;
+  chunkCount?: number;
+  earliestFilingDate?: string | null;
+  latestFilingDate?: string | null;
+  generatedAt?: string;
+  error?: string;
+};
 
 type IntelligenceView = "timeline" | "graph";
 
@@ -73,6 +101,9 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [coverageOpen, setCoverageOpen] = useState(false);
+  const [coverageLoading, setCoverageLoading] = useState(false);
+  const [coverageError, setCoverageError] = useState<string | null>(null);
+  const [corpusStatus, setCorpusStatus] = useState<CorpusStatusPayload | null>(null);
   const [dataOpen, setDataOpen] = useState(false);
   const [preview, setPreview] = useState<AtlasSearchResult | null>(null);
   const [intelligenceView, setIntelligenceView] = useState<IntelligenceView | null>(null);
@@ -104,7 +135,6 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
         signal: abortSignal,
         body: JSON.stringify({
           question,
-          searchMode: "hybrid",
           workspaceChunkIds: scope === "evidence" ? basket.map((item) => item.chunk_id) : [],
           filters: scope === "corpus" ? {
             companies: filters.company ? [filters.company] : [],
@@ -124,7 +154,9 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
       const decoder = new TextDecoder();
       let buffer = "";
       let answer = "";
+      let evidence: AtlasCitation[] = [];
       let citations: AtlasCitation[] = [];
+      let runInfo: AtlasRunInfo | null = null;
       while (true) {
         const { done, value } = await reader.read();
         buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
@@ -135,12 +167,37 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
           const event = JSON.parse(line) as AskStreamEvent;
           if (event.type === "error") throw new Error(event.error);
           if (event.type === "delta") answer += event.delta;
+          if (event.type === "evidence") evidence = event.evidence;
           if (event.type === "citations") citations = event.citations;
-          if (event.type === "delta" || event.type === "citations") {
+          if (event.type === "done") {
+            runInfo = {
+              foundryUsed: event.foundry?.used === true,
+              deployment: event.foundry?.deployment ?? null,
+              retrievalMode: event.retrievalMode || "unknown",
+              retrievalFallbackFrom: event.retrievalFallbackFrom ?? null,
+              evidenceCount: event.evidenceCount ?? evidence.length,
+              citationCount: event.citationCount ?? citations.length,
+              semanticApplied: event.semanticApplied === true,
+              retryCount: event.retryCount ?? 0,
+              timings: {
+                retrievalMs: event.timings?.retrievalMs ?? 0,
+                foundryMs: event.timings?.foundryMs ?? 0,
+                totalMs: event.timings?.totalMs ?? 0,
+              },
+              coverage: event.coverage ?? null,
+            };
+          }
+          if (["delta", "evidence", "citations", "done"].includes(event.type)) {
+            const sourcePart = citations.length
+              ? [{ type: "data" as const, name: "regdocs-citations", data: citations }]
+              : evidence.length
+                ? [{ type: "data" as const, name: "regdocs-evidence", data: evidence }]
+                : [];
             yield {
               content: [
                 { type: "text", text: answer },
-                ...(citations.length ? [{ type: "data" as const, name: "regdocs-citations", data: citations }] : []),
+                ...sourcePart,
+                ...(runInfo ? [{ type: "data" as const, name: "regdocs-run-info", data: runInfo }] : []),
               ],
             };
           }
@@ -209,6 +266,21 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
     }
   }
 
+  async function loadCoverage() {
+    setCoverageLoading(true);
+    setCoverageError(null);
+    try {
+      const response = await fetch("/api/corpus-status", { cache: "no-store" });
+      const payload = await response.json() as CorpusStatusPayload;
+      if (!response.ok) throw new Error(payload.error || "Corpus status could not be loaded.");
+      setCorpusStatus(payload);
+    } catch (caught) {
+      setCoverageError(caught instanceof Error ? caught.message : "Corpus status could not be loaded.");
+    } finally {
+      setCoverageLoading(false);
+    }
+  }
+
   const context = useMemo(() => ({
     basket,
     filters,
@@ -230,7 +302,7 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
         >
           <a className="fixed left-3 top-3 z-[100] -translate-y-20 rounded-md bg-foreground px-4 py-2 text-sm font-semibold text-background shadow-lg transition-transform focus:translate-y-0" href="#atlas-main-content">Skip to main content</a>
           <AtlasSidebar
-            onCoverage={() => setCoverageOpen(true)}
+            onCoverage={() => { setCoverageOpen(true); void loadCoverage(); }}
             onDataset={() => setDataOpen(true)}
             onGraph={() => { setIntelligenceError(null); setIntelligenceView("graph"); }}
             onShelf={() => setEvidenceOpen(true)}
@@ -279,7 +351,22 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
           </Sheet>
 
           <Dialog onOpenChange={setCoverageOpen} open={coverageOpen}>
-            <DialogContent className="sm:max-w-md"><DialogHeader><DialogTitle className="text-xl">Corpus coverage</DialogTitle><DialogDescription>Primary collection: January 1 – July 31, 2026</DialogDescription></DialogHeader><div className="grid grid-cols-2 gap-2">{[["6,180", "documents"], ["70,519", "pages"], ["42,180", "tables"], ["11,108", "records"]].map(([value, label]) => <div className="rounded-xl bg-muted/60 p-4" key={label}><div className="text-xl font-semibold">{value}</div><div className="text-xs text-muted-foreground">{label}</div></div>)}</div><p className="text-xs leading-5 text-muted-foreground">Atlas can only answer from indexed evidence. Verify material decisions against the original REGDOCS source.</p></DialogContent>
+            <DialogContent className="sm:max-w-md">
+              <DialogHeader>
+                <DialogTitle className="text-xl">Corpus coverage</DialogTitle>
+                <DialogDescription>Live metadata from the currently configured Azure AI Search index.</DialogDescription>
+              </DialogHeader>
+              {coverageLoading ? <p className="text-sm text-muted-foreground">Loading current index coverage…</p> : null}
+              {coverageError ? <div className="rounded-lg border border-destructive/25 bg-destructive/5 p-3 text-sm text-destructive">{coverageError}</div> : null}
+              {corpusStatus ? (
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <div className="rounded-xl bg-muted/60 p-4"><div className="text-xl font-semibold">{(corpusStatus.chunkCount ?? 0).toLocaleString()}</div><div className="text-xs text-muted-foreground">indexed chunks</div></div>
+                  <div className="rounded-xl bg-muted/60 p-4"><div className="truncate text-sm font-semibold">{corpusStatus.indexName || "unknown"}</div><div className="text-xs text-muted-foreground">Search index</div></div>
+                  <div className="rounded-xl bg-muted/60 p-4 sm:col-span-2"><div className="text-sm font-semibold">{corpusStatus.earliestFilingDate || "unknown"} → {corpusStatus.latestFilingDate || "unknown"}</div><div className="text-xs text-muted-foreground">filing dates represented in the index</div></div>
+                </div>
+              ) : null}
+              <p className="text-xs leading-5 text-muted-foreground">Atlas can only answer from indexed evidence. Verify material decisions against the original REGDOCS source.</p>
+            </DialogContent>
           </Dialog>
 
           <Dialog onOpenChange={setDataOpen} open={dataOpen}>
