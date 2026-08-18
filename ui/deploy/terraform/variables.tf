@@ -128,7 +128,7 @@ variable "embedding_model_version" {
 }
 
 variable "embedding_sku" {
-  description = "GlobalStandard provides the broadest quota availability for this public corpus."
+  description = "GlobalStandard provides broad quota availability for this public corpus."
   type        = string
   default     = "GlobalStandard"
 }
@@ -161,13 +161,14 @@ variable "chat_deployment_name" {
 }
 
 variable "chat_model_name" {
-  type    = string
-  default = "gpt-4.1-mini"
+  description = "Foundry deployment used by grounded Ask and Stage 6 structured extraction."
+  type        = string
+  default     = "gpt-5.4-mini"
 }
 
 variable "chat_model_version" {
   type    = string
-  default = "2025-04-14"
+  default = "2026-03-17"
 }
 
 variable "chat_sku" {
