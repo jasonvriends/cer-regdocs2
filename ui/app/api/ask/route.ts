@@ -64,6 +64,14 @@ function ndjson(value: unknown) {
   return `${JSON.stringify(value)}\n`;
 }
 
+function msSince(started: number) {
+  return Math.round(performance.now() - started);
+}
+
+function askTelemetry(value: Record<string, unknown>) {
+  console.info("REGDOCS ask telemetry", JSON.stringify({ operation: "atlas.ask", ...value }));
+}
+
 function stringArray(value: unknown, limit = 20) {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean))].slice(0, limit);
@@ -206,6 +214,7 @@ async function collectGroundedAnswer(
 }
 
 export async function POST(request: Request) {
+  const requestStarted = performance.now();
   if (!allowRequest(requesterAddress(request))) {
     return Response.json({ error: "Too many Ask requests; try again shortly." }, { status: 429 });
   }
@@ -222,50 +231,109 @@ export async function POST(request: Request) {
   }
 
   const workspaceChunkIds = stringArray(body.workspaceChunkIds, 20);
+  const retrievalStarted = performance.now();
 
   try {
     const retrieved: RetrievalResult = workspaceChunkIds.length
       ? { evidence: await getChunksByIds(workspaceChunkIds), mode: "keyword" }
       : await retrieveCorpusEvidence(question, safeFilters(body.filters));
+    const retrievalMs = msSince(retrievalStarted);
     const evidence = retrieved.evidence;
 
     if (!evidence.length) {
+      askTelemetry({
+        status: "no_evidence",
+        scope: workspaceChunkIds.length ? "workspace" : "corpus",
+        retrievalMode: workspaceChunkIds.length ? "exact-workspace" : retrieved.mode,
+        retrievalFallbackFrom: workspaceChunkIds.length ? null : retrieved.fallbackFrom ?? null,
+        retrievalMs,
+        totalMs: msSince(requestStarted),
+        foundryUsed: false,
+      });
       return Response.json({ error: "No CER evidence matched this question and scope." }, { status: 404 });
     }
 
+    const retrievalMode = workspaceChunkIds.length ? "exact-workspace" : retrieved.mode;
+    const retrievalFallbackFrom = workspaceChunkIds.length ? null : retrieved.fallbackFrom ?? null;
     const common = {
       scope: workspaceChunkIds.length ? "workspace" : "corpus",
-      retrievalMode: workspaceChunkIds.length ? "exact-workspace" : retrieved.mode,
-      retrievalFallbackFrom: workspaceChunkIds.length ? null : retrieved.fallbackFrom ?? null,
+      retrievalMode,
+      retrievalFallbackFrom,
       evidenceCount: evidence.length,
+      semanticApplied: retrievalMode === "hybrid" && Boolean(process.env.AZURE_SEARCH_SEMANTIC_CONFIGURATION?.trim()),
       coverage: { primaryStart: "2026-01-01", primaryEnd: "2026-07-31" },
     };
     const safetyId = safetyIdentifier(request);
+    const configuredFoundryModel = process.env.FOUNDRY_MODEL_DEPLOYMENT?.trim() || null;
 
     if (request.headers.get("accept")?.includes("application/x-ndjson")) {
       const encoder = new TextEncoder();
       const sources = evidenceCitations(evidence);
       const streamBody = new ReadableStream({
         async start(controller) {
-          // Preserve successful retrieval in the UI even if Foundry fails later.
           controller.enqueue(encoder.encode(ndjson({ type: "citations", citations: sources })));
+          const foundryStarted = performance.now();
+          let retryCount = 0;
           try {
             let grounded;
             try {
               grounded = await collectGroundedAnswer(question, evidence, safetyId, request.signal);
             } catch (firstError) {
               if (!retryableGroundingFailure(firstError) || request.signal.aborted) throw firstError;
+              retryCount = 1;
               console.warn("REGDOCS grounded answer validation failed; retrying once", firstError);
               grounded = await collectGroundedAnswer(question, evidence, safetyId, request.signal);
             }
 
-            // Only release model text after citation validation succeeds.
+            const foundryMs = msSince(foundryStarted);
+            const totalMs = msSince(requestStarted);
             controller.enqueue(encoder.encode(ndjson({ type: "delta", delta: grounded.answer })));
             controller.enqueue(encoder.encode(ndjson({ type: "citations", citations: grounded.citations })));
-            controller.enqueue(encoder.encode(ndjson({ type: "done", model: grounded.model, ...common })));
+            controller.enqueue(encoder.encode(ndjson({
+              type: "done",
+              model: grounded.model,
+              foundry: { used: true, deployment: grounded.model },
+              citationValidation: "passed",
+              citationCount: grounded.citations.length,
+              retryCount,
+              timings: { retrievalMs, foundryMs, totalMs },
+              ...common,
+            })));
+            askTelemetry({
+              status: "success",
+              ...common,
+              foundryUsed: true,
+              foundryDeployment: grounded.model,
+              citationValidation: "passed",
+              citationCount: grounded.citations.length,
+              retryCount,
+              retrievalMs,
+              foundryMs,
+              totalMs,
+            });
           } catch (error) {
+            const foundryMs = msSince(foundryStarted);
+            const failure = userFacingStreamFailure(error);
             console.error("REGDOCS grounded answer stream failed", error);
-            controller.enqueue(encoder.encode(ndjson({ type: "error", ...userFacingStreamFailure(error) })));
+            askTelemetry({
+              status: failure.code,
+              ...common,
+              foundryUsed: true,
+              foundryDeployment: configuredFoundryModel,
+              citationValidation: failure.code === "citation_validation_failed" ? "failed" : "not_completed",
+              retryCount,
+              retrievalMs,
+              foundryMs,
+              totalMs: msSince(requestStarted),
+            });
+            controller.enqueue(encoder.encode(ndjson({
+              type: "error",
+              ...failure,
+              foundry: { used: true, deployment: configuredFoundryModel },
+              retryCount,
+              timings: { retrievalMs, foundryMs, totalMs: msSince(requestStarted) },
+              ...common,
+            })));
           } finally {
             controller.close();
           }
@@ -279,22 +347,49 @@ export async function POST(request: Request) {
       });
     }
 
+    const foundryStarted = performance.now();
+    let retryCount = 0;
     let result;
     try {
       result = await answerWithFoundry(question, evidence, safetyId);
     } catch (firstError) {
       if (!retryableGroundingFailure(firstError)) throw firstError;
+      retryCount = 1;
       console.warn("REGDOCS grounded answer validation failed; retrying once", firstError);
       result = await answerWithFoundry(question, evidence, safetyId);
     }
+    const foundryMs = msSince(foundryStarted);
+    const totalMs = msSince(requestStarted);
+    askTelemetry({
+      status: "success",
+      ...common,
+      foundryUsed: true,
+      foundryDeployment: result.model,
+      citationValidation: "passed",
+      citationCount: result.citations.length,
+      retryCount,
+      retrievalMs,
+      foundryMs,
+      totalMs,
+    });
     return Response.json({
       ...result,
       ...common,
+      foundry: { used: true, deployment: result.model },
+      citationValidation: "passed",
+      citationCount: result.citations.length,
+      retryCount,
+      timings: { retrievalMs, foundryMs, totalMs },
     });
   } catch (error) {
     console.error("REGDOCS grounded answer failed", error);
     const message = error instanceof Error ? error.message : "Grounded answer failed";
     const configurationError = message.includes("not configured");
+    askTelemetry({
+      status: configurationError ? "configuration_error" : "failed",
+      foundryUsed: false,
+      totalMs: msSince(requestStarted),
+    });
     return Response.json(
       { error: configurationError ? "Microsoft Foundry or Azure AI Search is not configured." : "The grounded answer could not be generated." },
       { status: configurationError ? 503 : 502 },
