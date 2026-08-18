@@ -1,4 +1,5 @@
 import { searchRegdocs, type AtlasSearchMode, type AtlasSearchSort } from "@/lib/azure-search";
+import { publicErrorResponse } from "@/lib/observability";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,19 +49,19 @@ export async function GET(request: Request) {
 
     return Response.json(response);
   } catch (error) {
-    console.error("REGDOCS search failed", error);
     const message = error instanceof Error ? error.message : "Search failed";
     const configurationError = message.includes("AZURE_SEARCH_ENDPOINT") || message.includes("AZURE_SEARCH_VECTOR_FIELD");
-
-    return Response.json(
-      {
-        error: configurationError
-          ? mode === "hybrid"
-            ? "Hybrid search is not configured for this Atlas instance."
-            : "Azure AI Search is not configured for this Atlas instance."
-          : "Azure AI Search request failed.",
-      },
-      { status: configurationError ? 503 : 502 },
+    const userMessage = configurationError
+      ? mode === "hybrid"
+        ? "Hybrid search is not configured for this Atlas instance."
+        : "Azure AI Search is not configured for this Atlas instance."
+      : "Azure AI Search request failed.";
+    return publicErrorResponse(
+      "api.search",
+      error,
+      userMessage,
+      configurationError ? 503 : 502,
+      { mode, sort },
     );
   }
 }
