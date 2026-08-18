@@ -21,8 +21,10 @@ Usage:
   ./ui/deploy/deploy.sh [--config PATH] --status
   ./ui/deploy/deploy.sh [--config PATH] --error ATLAS-0123ABCD4567EF89
 
-Safe to run again after a Cloud Shell timeout. Terraform state is remote, ACR
-builds and Container Apps jobs continue in Azure, and completed work is reused.
+Safe to run again after a Cloud Shell timeout. Terraform state is remote and
+Container Apps jobs continue in Azure. ACR builds run server-side; if Cloud
+Shell disconnects before workloads are deployed, rerunning may rebuild the
+same deterministic commit tag before continuing safely.
 
 Preflight:
   --validate             Run local Bash, Terraform, Python, TypeScript, and
@@ -519,67 +521,43 @@ ACR_LOGIN_SERVER="$(terraform_output container_registry_login_server)"
 
 UI_IMAGE="regdocs-ui:$CURRENT_IMAGE_TAG"
 INDEXER_IMAGE="regdocs-indexer:$CURRENT_IMAGE_TAG"
+UI_NEEDS_BUILD=true
+INDEXER_NEEDS_BUILD=true
 
-# Use ACR Tasks' management-plane run history instead of `az acr repository show`.
-# The repository command can fall into registry data-plane authentication and
-# prompt for a username/password in Cloud Shell. Every image deployed by this
-# script is built with `az acr build`, so a successful run for the exact
-# deterministic repo:tag is the authoritative existence check we need.
-image_exists() {
-  local image="$1"
-  local succeeded
-  succeeded="$(az acr task list-runs \
-    --registry "$ACR_NAME" \
-    --image "$image" \
-    --run-status Succeeded \
-    --top 1 \
-    --query 'length(@)' \
-    --output tsv \
-    --only-show-errors 2>/dev/null || echo 0)"
-  [[ "$succeeded" =~ ^[0-9]+$ ]] || succeeded=0
-  (( succeeded > 0 ))
-}
+if [[ "$UI_EXISTS" == true && "$PREVIOUS_UI_IMAGE_TAG" == "$CURRENT_IMAGE_TAG" ]]; then
+  UI_NEEDS_BUILD=false
+fi
+if [[ "$INDEXER_EXISTS" == true && "$PREVIOUS_INDEXER_IMAGE_TAG" == "$CURRENT_IMAGE_TAG" ]]; then
+  INDEXER_NEEDS_BUILD=false
+fi
 
-build_active() {
-  local image="$1"
-  local active
-  active="$(az acr task list-runs --registry "$ACR_NAME" --image "$image" --query "[?status=='Queued' || status=='Running' || status=='Started'] | length(@)" --output tsv --only-show-errors 2>/dev/null || echo 0)"
-  [[ "${active:-0}" -gt 0 ]]
-}
-
-queue_build() {
+build_image() {
   local image="$1"
   local dockerfile="$2"
-  if image_exists "$image"; then
-    echo "Image already built: $image"
-    return 1
-  fi
-  if build_active "$image"; then
-    echo "Image build is already queued or running: $image"
-    return 1
-  fi
-  log "Queuing server-side ACR build for $image"
+  local label="$3"
+  log "Building $label image in Azure Container Registry: $image"
+  echo "The build runs server-side in ACR. Waiting for it to finish; this can take several minutes."
   if ! (
     cd "$REPOSITORY_ROOT"
-    az acr build --registry "$ACR_NAME" --image "$image" --file "$dockerfile" --no-wait --no-logs . --only-show-errors --output none
+    az acr build \
+      --registry "$ACR_NAME" \
+      --image "$image" \
+      --file "$dockerfile" \
+      --no-logs \
+      . \
+      --only-show-errors \
+      --output none
   ); then
-    fail "Failed to queue ACR build for $image"
+    fail "ACR build failed for $image"
   fi
-  return 0
-}
-
-show_recent_builds() {
-  az acr task list-runs --registry "$ACR_NAME" --top 5 --query '[].{Run:runId,Status:status,Started:startTime}' --output table --only-show-errors || true
+  echo "ACR build succeeded: $image"
 }
 
 if [[ "$MODE" == "ui-only" ]]; then
-  QUEUED=false
-  queue_build "$UI_IMAGE" "ui/deploy/containers/ui.Dockerfile" && QUEUED=true
-  if [[ "$QUEUED" == true ]] || ! image_exists "$UI_IMAGE"; then
-    log "ACR is building the UI image independently of this Cloud Shell session"
-    show_recent_builds
-    echo "Run the same --ui-only command again after the build finishes."
-    exit 0
+  if [[ "$UI_NEEDS_BUILD" == true ]]; then
+    build_image "$UI_IMAGE" "ui/deploy/containers/ui.Dockerfile" "UI"
+  else
+    echo "UI already uses commit image tag $CURRENT_IMAGE_TAG; no ACR rebuild needed."
   fi
 
   log "Deploying only the UI; preserving Stage 5/6 publisher image and execution state"
@@ -598,15 +576,16 @@ if [[ "$MODE" == "ui-only" ]]; then
   exit 0
 fi
 
-QUEUED=false
-queue_build "$UI_IMAGE" "ui/deploy/containers/ui.Dockerfile" && QUEUED=true
-queue_build "$INDEXER_IMAGE" "ui/deploy/containers/indexer.Dockerfile" && QUEUED=true
+if [[ "$UI_NEEDS_BUILD" == true ]]; then
+  build_image "$UI_IMAGE" "ui/deploy/containers/ui.Dockerfile" "UI"
+else
+  echo "UI already uses commit image tag $CURRENT_IMAGE_TAG; no ACR rebuild needed."
+fi
 
-if [[ "$QUEUED" == true ]] || ! image_exists "$UI_IMAGE" || ! image_exists "$INDEXER_IMAGE"; then
-  log "ACR is building the images independently of this Cloud Shell session"
-  show_recent_builds
-  echo "Run the same full deployment command again after the builds finish."
-  exit 0
+if [[ "$INDEXER_NEEDS_BUILD" == true ]]; then
+  build_image "$INDEXER_IMAGE" "ui/deploy/containers/indexer.Dockerfile" "publisher"
+else
+  echo "Publisher already uses commit image tag $CURRENT_IMAGE_TAG; no ACR rebuild needed."
 fi
 
 log "Deploying UI plus Stage 5/6 jobs from completed ACR images"
