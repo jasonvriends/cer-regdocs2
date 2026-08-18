@@ -221,7 +221,9 @@ if [[ "$OPERATION" == "validate" ]]; then
   done
 
   log "Validating deployment shell syntax"
-  bash -n "$SCRIPT_DIR/deploy.sh"
+  for script in "$SCRIPT_DIR/deploy.sh" "$SCRIPT_DIR/deploy-guide.sh" "$SCRIPT_DIR/deploy-core.sh"; do
+    bash -n "$script"
+  done
 
   log "Validating Terraform formatting and configuration without a backend"
   terraform -chdir="$TERRAFORM_DIR" fmt -check -recursive
@@ -502,8 +504,24 @@ ACR_LOGIN_SERVER="$(terraform_output container_registry_login_server)"
 UI_IMAGE="regdocs-ui:$CURRENT_IMAGE_TAG"
 INDEXER_IMAGE="regdocs-indexer:$CURRENT_IMAGE_TAG"
 
+# Use ACR Tasks' management-plane run history instead of `az acr repository show`.
+# The repository command can fall into registry data-plane authentication and
+# prompt for a username/password in Cloud Shell. Every image deployed by this
+# script is built with `az acr build`, so a successful run for the exact
+# deterministic repo:tag is the authoritative existence check we need.
 image_exists() {
-  az acr repository show --name "$ACR_NAME" --image "$1" --output none --only-show-errors 2>/dev/null
+  local image="$1"
+  local succeeded
+  succeeded="$(az acr task list-runs \
+    --registry "$ACR_NAME" \
+    --image "$image" \
+    --run-status Succeeded \
+    --top 1 \
+    --query 'length(@)' \
+    --output tsv \
+    --only-show-errors 2>/dev/null || echo 0)"
+  [[ "$succeeded" =~ ^[0-9]+$ ]] || succeeded=0
+  (( succeeded > 0 ))
 }
 
 build_active() {
