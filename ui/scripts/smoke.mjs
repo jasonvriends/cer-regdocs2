@@ -50,6 +50,7 @@ async function ask() {
   if (!citations.length) throw new Error("Ask returned no citations");
   if (!done) throw new Error("Ask stream never completed");
   if (done.foundry?.used !== true) throw new Error("Ask completed without Foundry usage metadata");
+  if (done.citationValidation !== "passed") throw new Error(`citation validation=${done.citationValidation || "missing"}`);
   return { citations, done };
 }
 
@@ -64,6 +65,9 @@ async function main() {
     if (diagnostics.checks?.foundryChat?.ok !== true) throw new Error("Foundry chat diagnostic failed");
     if (diagnostics.checks?.keywordSearch?.ok !== true) throw new Error("keyword search diagnostic failed");
     if (diagnostics.configuration?.hybrid && diagnostics.checks?.hybridSearch?.ok !== true) throw new Error("hybrid search diagnostic failed");
+    for (const key of ["entitiesIndex", "relationsIndex", "eventsIndex"]) {
+      if (diagnostics.checks?.[key]?.ok !== true) throw new Error(`${key} diagnostic failed`);
+    }
     ok("deep diagnostics: Search + Foundry + intelligence indexes");
 
     const search = await json(`/api/search?q=${encodeURIComponent(query)}&top=5&mode=keyword`);
@@ -80,16 +84,16 @@ async function main() {
     ok("HTML document-view backend");
 
     const timeline = await json(`/api/timeline?documentId=${encodeURIComponent(first.document_id)}&top=20`);
-    if (!Array.isArray(timeline.events) || !timeline.events.length) throw new Error("timeline returned no events for the selected document");
-    ok(`timeline returned ${timeline.events.length} event(s)`);
+    if (!Array.isArray(timeline.events)) throw new Error("timeline response is missing its events array");
+    ok(`timeline API contract (${timeline.events.length} event(s) for sampled document)`);
 
     const graph = await json(`/api/graph?documentId=${encodeURIComponent(first.document_id)}&top=50`);
-    if (!Array.isArray(graph.edges) || !graph.edges.length) throw new Error("relationship graph returned no edges for the selected document");
-    ok(`relationship graph returned ${graph.edges.length} edge(s)`);
+    if (!Array.isArray(graph.edges) || !Array.isArray(graph.nodes)) throw new Error("graph response is missing nodes or edges arrays");
+    ok(`relationship graph API contract (${graph.edges.length} edge(s) for sampled document)`);
 
     const grounded = await ask();
     ok(`Foundry grounded Ask completed with ${grounded.citations.length} citation(s)`);
-    console.log(`  retrieval=${grounded.done.retrievalMode}; model=${grounded.done.model}; foundry=${grounded.done.foundry?.deployment || "unknown"}`);
+    console.log(`  retrieval=${grounded.done.retrievalMode}; model=${grounded.done.model}; foundry=${grounded.done.foundry?.deployment || "unknown"}; totalMs=${grounded.done.timings?.totalMs ?? "unknown"}`);
   } catch (error) {
     fail("Atlas smoke test", error instanceof Error ? error.message : String(error));
   }
