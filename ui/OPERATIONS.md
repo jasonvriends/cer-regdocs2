@@ -1,10 +1,21 @@
 # REGDOCS Atlas operations
 
-This is the short operator runbook. See [`deploy/README.md`](deploy/README.md) for the full Azure deployment guide.
+This is the short operator runbook. Start any deployment session with the read-only guide:
+
+```bash
+./ui/deploy/deploy.sh
+```
+
+The project has six pipeline stages. Stage 6 is the final data-processing stage.
+
+See [`deploy/README-FIRST-DEPLOYMENT.md`](deploy/README-FIRST-DEPLOYMENT.md) for the first deployment, [`deploy/README.md`](deploy/README.md) for the detailed Azure runbook, and [`DATA-CONTRACT.md`](DATA-CONTRACT.md) for the UI data contract.
 
 ## Normal operator commands
 
 ```bash
+# Read-only next-step guide.
+./ui/deploy/deploy.sh
+
 # Preflight: no Azure calls.
 ./ui/deploy/deploy.sh --validate
 
@@ -17,8 +28,8 @@ This is the short operator runbook. See [`deploy/README.md`](deploy/README.md) f
 # Terraform/RBAC/config only; no image build or publication job.
 ./ui/deploy/deploy.sh --infra-only
 
-# Full deployment of UI + shared publisher image/jobs.
-./ui/deploy/deploy.sh
+# Explicit full deployment of UI + shared publisher image/jobs.
+./ui/deploy/deploy.sh --full
 
 # Explicit Stage 5 hybrid-index publication.
 ./ui/deploy/deploy.sh --restart-index
@@ -26,7 +37,7 @@ This is the short operator runbook. See [`deploy/README.md`](deploy/README.md) f
 # Explicit Stage 6 Microsoft Foundry extraction/publication.
 ./ui/deploy/deploy.sh --restart-intelligence
 
-# Refresh both publication layers.
+# Refresh both publication layers when normalized source data changed.
 ./ui/deploy/deploy.sh --restart-index --restart-intelligence
 
 # Read-only live status and latest logs for both jobs.
@@ -35,6 +46,8 @@ This is the short operator runbook. See [`deploy/README.md`](deploy/README.md) f
 # Read-only lookup for one user-visible server error.
 ./ui/deploy/deploy.sh --error ATLAS-0123ABCD4567EF89
 ```
+
+No-argument execution is never a full deployment. It is the guide.
 
 `--no-start` is intentionally unsupported. Use `--ui-only` or `--infra-only`, which have precise no-publication semantics.
 
@@ -50,7 +63,7 @@ source ui/deploy/config.env
 ./ui/deploy/deploy.sh --status
 ```
 
-If a deployment must continue, export a fresh SAS token and rerun the same deployment command. Do not create a new `NAME_SUFFIX`, import resources, or destroy the deployment merely because Cloud Shell disappeared.
+If a deployment must continue, export a fresh SAS token and rerun the same explicit deployment command. Do not create a new `NAME_SUFFIX`, import resources, or destroy the deployment merely because Cloud Shell disappeared.
 
 ## Stage 5 versus Stage 6
 
@@ -61,11 +74,13 @@ job-regdocs-<suffix>                Stage 5 hybrid Search chunks + embeddings
 job-regdocs-intelligence-<suffix>   Stage 6 Foundry regulatory intelligence
 ```
 
-Stage 5 handles searchable document chunks. Stage 6 handles evidence-backed entities, relations, events, claims, and obligations.
+Stage 5 handles searchable document chunks and supplies Ask, source cards, the HTML document viewer, Shelf evidence, and coverage.
 
-Stage 6 does **not** start automatically on an ordinary deployment because a corpus-wide Foundry extraction can incur meaningful model cost. Start it intentionally with `--restart-intelligence`.
+Stage 6 handles evidence-backed entities, relations, events, claims, and obligations. It is the **final data-processing stage**.
 
-The Stage 6 extraction cache is checkpointed to Blob every 15 minutes:
+Stage 6 does not start automatically on an ordinary UI/infrastructure update because corpus-wide Foundry extraction can incur meaningful model cost. Start it intentionally with `--restart-intelligence`.
+
+The Stage 6 extraction cache is checkpointed to Blob:
 
 ```text
 workspace/6_enrich/model/extraction.sqlite
@@ -75,7 +90,7 @@ A restarted job reuses completed requests whose normalized input, model, and pro
 
 ### Small Stage 6 pilot
 
-Set in `config.env`:
+For the first production-quality check, set in `config.env`:
 
 ```bash
 INTELLIGENCE_DOCUMENT_LIMIT="10"
@@ -90,7 +105,7 @@ Then:
 ./ui/deploy/deploy.sh --status
 ```
 
-Review `/diagnostics`, Findings & claims, and Commitments & obligations. Then clear the limit, apply infrastructure again, and rerun Stage 6 for the complete corpus.
+Review `/diagnostics`, Findings & claims, Commitments & obligations, and supporting source evidence. Then clear the limit, reconcile infrastructure, and rerun Stage 6 for the complete corpus.
 
 ## Check publication status and logs
 
@@ -107,6 +122,25 @@ ContainerAppConsoleLogs_CL
 ```
 
 Log Analytics ingestion can lag by a few minutes.
+
+## Verify the document viewer
+
+Open a cited/retrieved source from Ask or a saved Shelf item.
+
+The v1 viewer should:
+
+```text
+load all Search chunks for the document in chunk_index order
+group content by page
+jump to the cited page
+highlight the selected evidence
+render text and tables
+show extracted figure text
+allow Add to Shelf
+show Original in REGDOCS when source_url exists
+```
+
+The viewer is normalized HTML. It does not require a duplicate PDF in Azure.
 
 ## Prove Foundry is actually being used
 
@@ -183,4 +217,8 @@ Keep:
 EMBEDDING_BATCH_SIZE="32"
 ```
 
-The config example, Terraform default, cloud-indexer fallback, and deployment cap all enforce the production-safe 32-request batch size.
+The config example, Terraform default, cloud-indexer fallback, and deployment cap all enforce this production-safe embedding request batch size.
+
+## Project acceptance
+
+Once Stage 5 and Stage 6 both show `Succeeded`, there is no next data stage. Run protected diagnostics and complete [`../COMPLETION.md`](../COMPLETION.md). When that checklist passes, v1 is complete.
