@@ -109,9 +109,11 @@ terraform/regdocs-atlas.tfstate
 
 Do not delete that Storage account/container unless you deliberately intend to re-upload the complete Stage 4 source package and create fresh Terraform state.
 
-The deployment script distinguishes resources that are merely recorded in Terraform state from workloads that still exist in Azure. If the Atlas infrastructure resource group has been deleted while the remote state Blob remains, a full deployment will first reconcile the foundation without Container Apps workloads, queue the deterministic ACR images, and then create the UI + Stage 5 + Stage 6 workloads on a later `--full` after those builds succeed.
+The deployment script distinguishes resources that are merely recorded in Terraform state from workloads that still exist in Azure. If the Atlas infrastructure resource group has been deleted while the remote state Blob remains, `--full` first reconciles the foundation without Container Apps workloads, then builds the deterministic UI and publisher images server-side in ACR, waits for both builds to finish, and finally creates the UI + Stage 5 + Stage 6 workloads in the same invocation.
 
-ACR build/existence checks use Azure ACR Task run history. They do not require `az acr login`, a registry username, or a registry password. If a deployment ever asks for a registry password, stop rather than entering one.
+The build path does not probe the ACR repository and does not filter ACR Task history by image. Those Azure CLI paths were observed to hang or enter registry-authentication flows on a fresh registry. Atlas uses `az acr build` directly and waits for the server-side build result. It does not require `az acr login`, a registry username, or a registry password. If a deployment ever asks for a registry password, stop rather than entering one.
+
+If Cloud Shell disconnects during an ACR build, the Azure-side build may continue. Rerunning `--full` is safe; if the workloads were not yet deployed, the script may rebuild the same deterministic commit tag before continuing.
 
 ## Follow the guide
 
