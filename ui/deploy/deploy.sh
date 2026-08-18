@@ -10,7 +10,7 @@ GUIDE="$SCRIPT_DIR/deploy-guide.sh"
 # Next.js selects the correct mode for `next build`; the production container
 # sets NODE_ENV=production explicitly at runtime.
 if [[ -n "${NODE_ENV:-}" ]]; then
-  echo "NOTE: ignoring inherited NODE_ENV=${NODE_ENV@Q}; deploy validation lets Next.js select its build mode." >&2
+  echo "NOTE: ignoring inherited NODE_ENV; deploy validation lets Next.js select its build mode." >&2
   unset NODE_ENV
 fi
 
