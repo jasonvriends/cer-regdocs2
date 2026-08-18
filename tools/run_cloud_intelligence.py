@@ -187,24 +187,29 @@ def main() -> int:
         ]
         if model_limit:
             publish_command.extend(["--limit", model_limit])
+        else:
+            # A final full-corpus run must exactly reflect the current extraction.
+            # Recreate derived indexes so records removed by a newer extraction do
+            # not survive indefinitely as stale regulatory intelligence.
+            publish_command.append("--recreate-indexes")
         run_child(publish_command, terminating, child_ref)
 
-        run_child(
-            [
-                sys.executable,
-                "tools/publish_regulatory_records.py",
-                "--input-dir",
-                str(ENRICH_DIR),
-                "--endpoint",
-                search_endpoint,
-                "--claims-index",
-                setting("AZURE_SEARCH_CLAIMS_INDEX", "regdocs-claims"),
-                "--obligations-index",
-                setting("AZURE_SEARCH_OBLIGATIONS_INDEX", "regdocs-obligations"),
-            ],
-            terminating,
-            child_ref,
-        )
+        regulatory_command = [
+            sys.executable,
+            "tools/publish_regulatory_records.py",
+            "--input-dir",
+            str(ENRICH_DIR),
+            "--endpoint",
+            search_endpoint,
+            "--claims-index",
+            setting("AZURE_SEARCH_CLAIMS_INDEX", "regdocs-claims"),
+            "--obligations-index",
+            setting("AZURE_SEARCH_OBLIGATIONS_INDEX", "regdocs-obligations"),
+        ]
+        if not model_limit:
+            regulatory_command.append("--recreate-indexes")
+        run_child(regulatory_command, terminating, child_ref)
+
         upload_outputs(container, enrich_prefix)
         print("Stage 6 intelligence extraction and publication completed successfully", flush=True)
         return 0
