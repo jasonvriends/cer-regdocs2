@@ -59,6 +59,49 @@ export type AtlasEvent = {
   review_status: string;
 };
 
+export type AtlasClaim = {
+  id: string;
+  claim_type: string;
+  statement: string;
+  claimant?: string | null;
+  subject?: string | null;
+  evidence_chunk_ids?: string[];
+  evidence_page_start?: number | null;
+  evidence_page_end?: number | null;
+  document_id?: string | null;
+  filing_id?: string | null;
+  filing_number?: string | null;
+  company?: string | null;
+  project?: string | null;
+  source_url?: string | null;
+  confidence: number;
+  origin: string;
+  review_status: string;
+  extractor_version?: string | null;
+};
+
+export type AtlasObligation = {
+  id: string;
+  obligation_type: string;
+  obligated_party?: string | null;
+  action: string;
+  deadline?: string | null;
+  status?: string | null;
+  evidence_chunk_ids?: string[];
+  evidence_page_start?: number | null;
+  evidence_page_end?: number | null;
+  document_id?: string | null;
+  filing_id?: string | null;
+  filing_number?: string | null;
+  company?: string | null;
+  project?: string | null;
+  source_url?: string | null;
+  confidence: number;
+  origin: string;
+  review_status: string;
+  extractor_version?: string | null;
+};
+
 export type IntelligenceScope = {
   documentId?: string;
   filingId?: string;
@@ -151,16 +194,20 @@ function matchesScope(row: Record<string, unknown>, scope: IntelligenceScope) {
   );
 }
 
+type IntelligenceKind = "entities" | "relations" | "events" | "claims" | "obligations";
+
 async function searchIndex<T extends Record<string, unknown>>(
-  kind: "entities" | "relations" | "events",
+  kind: IntelligenceKind,
   options: { filter?: string; top: number; orderBy?: string[] },
 ) {
   const envName = `AZURE_SEARCH_${kind.toUpperCase()}_INDEX`;
-  const defaults = {
+  const defaults: Record<IntelligenceKind, string> = {
     entities: "regdocs-entities",
     relations: "regdocs-relations",
     events: "regdocs-events",
-  } as const;
+    claims: "regdocs-claims",
+    obligations: "regdocs-obligations",
+  };
   const indexName = process.env[envName]?.trim() || defaults[kind];
   const client = getClient(indexName);
   if (!client) return null;
@@ -192,6 +239,34 @@ export async function getTimeline(scope: IntelligenceScope, top = 200): Promise<
     .filter((row) => matchesScope(row, scope))
     .sort((left, right) => String(left.date_start).localeCompare(String(right.date_start)))
     .slice(0, limit) as Array<AtlasEvent & Record<string, unknown>>;
+}
+
+export async function getClaims(scope: IntelligenceScope, top = 200): Promise<AtlasClaim[]> {
+  const limit = Math.min(Math.max(top, 1), 500);
+  const filter = scopeFilter(scope);
+  const remote = await searchIndex<AtlasClaim & Record<string, unknown>>("claims", {
+    filter: filter || undefined,
+    top: limit,
+  });
+  if (remote) return remote;
+  const local = await readLocal("claims");
+  return local.filter((row) => matchesScope(row, scope)).slice(0, limit) as Array<AtlasClaim & Record<string, unknown>>;
+}
+
+export async function getObligations(scope: IntelligenceScope, top = 200): Promise<AtlasObligation[]> {
+  const limit = Math.min(Math.max(top, 1), 500);
+  const filter = scopeFilter(scope);
+  const remote = await searchIndex<AtlasObligation & Record<string, unknown>>("obligations", {
+    filter: filter || undefined,
+    top: limit,
+    orderBy: ["deadline asc"],
+  });
+  if (remote) return remote;
+  const local = await readLocal("obligations");
+  return local
+    .filter((row) => matchesScope(row, scope))
+    .sort((left, right) => String(left.deadline ?? "9999").localeCompare(String(right.deadline ?? "9999")))
+    .slice(0, limit) as Array<AtlasObligation & Record<string, unknown>>;
 }
 
 export async function getGraph(scope: IntelligenceScope, top = 400): Promise<AtlasGraph> {

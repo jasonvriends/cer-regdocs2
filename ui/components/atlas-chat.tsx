@@ -18,6 +18,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { AtlasGraph } from "@/components/atlas-graph";
+import { AtlasRegulatoryRecords } from "@/components/atlas-regulatory-records";
 import { AtlasTimeline } from "@/components/atlas-timeline";
 import { AtlasContext, type AtlasScope } from "@/components/atlas-context";
 import { AtlasLogo, AtlasSidebar, ResearchSidebarTrigger } from "@/components/atlas-sidebar";
@@ -74,7 +75,7 @@ type CorpusStatusPayload = {
   error?: string;
 };
 
-type IntelligenceView = "timeline" | "graph";
+type IntelligenceView = "timeline" | "graph" | "claims" | "obligations";
 
 const atlasBrowserStorage = {
   async getItem(key: string) { return window.localStorage.getItem(key); },
@@ -91,6 +92,13 @@ const atlasThreadListAdapter = createLocalStorageAdapter({
 function messageText(messages: Parameters<ChatModelAdapter["run"]>[0]["messages"]) {
   const message = [...messages].reverse().find((item) => item.role === "user");
   return message?.content.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim() ?? "";
+}
+
+function intelligenceTitle(view: IntelligenceView | null) {
+  if (view === "graph") return "Relationship graph";
+  if (view === "claims") return "Findings & claims";
+  if (view === "obligations") return "Commitments & obligations";
+  return "Regulatory timeline";
 }
 
 export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: boolean }) {
@@ -302,9 +310,11 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
         >
           <a className="fixed left-3 top-3 z-[100] -translate-y-20 rounded-md bg-foreground px-4 py-2 text-sm font-semibold text-background shadow-lg transition-transform focus:translate-y-0" href="#atlas-main-content">Skip to main content</a>
           <AtlasSidebar
+            onClaims={() => { setIntelligenceError(null); setIntelligenceView("claims"); }}
             onCoverage={() => { setCoverageOpen(true); void loadCoverage(); }}
             onDataset={() => setDataOpen(true)}
             onGraph={() => { setIntelligenceError(null); setIntelligenceView("graph"); }}
+            onObligations={() => { setIntelligenceError(null); setIntelligenceView("obligations"); }}
             onShelf={() => setEvidenceOpen(true)}
             onTimeline={() => { setIntelligenceError(null); setIntelligenceView("timeline"); }}
             shelfCount={basket.length}
@@ -376,16 +386,17 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
           <Dialog onOpenChange={(open) => { if (!open) setIntelligenceView(null); }} open={intelligenceView !== null}>
             <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-[min(1100px,calc(100vw-2rem))]">
               <DialogHeader className="pr-10">
-                <DialogTitle className="text-xl">{intelligenceView === "graph" ? "Relationship graph" : "Regulatory timeline"}</DialogTitle>
+                <DialogTitle className="text-xl">{intelligenceTitle(intelligenceView)}</DialogTitle>
                 <DialogDescription>
                   {intelligenceScopeLabel ? `Active scope: ${intelligenceScopeLabel}` : "Use an active filter, an open source, or a saved shelf source to set the research scope."}
                 </DialogDescription>
               </DialogHeader>
               {!intelligenceScopeLabel ? <div><Button onClick={() => { setIntelligenceView(null); setDraftFilters(filters); setFiltersOpen(true); }} size="sm" variant="outline">Set a research filter</Button></div> : null}
               {intelligenceError ? <div className="rounded-lg border border-destructive/25 bg-destructive/5 p-3 text-sm text-destructive">{intelligenceError}</div> : null}
-              {intelligenceView === "graph"
-                ? <AtlasGraph onOpenEvidence={(chunkId) => void openIntelligenceEvidence(chunkId)} scope={intelligenceScope} />
-                : <AtlasTimeline onOpenEvidence={(chunkId) => void openIntelligenceEvidence(chunkId)} scope={intelligenceScope} />}
+              {intelligenceView === "graph" ? <AtlasGraph onOpenEvidence={(chunkId) => void openIntelligenceEvidence(chunkId)} scope={intelligenceScope} /> : null}
+              {intelligenceView === "timeline" ? <AtlasTimeline onOpenEvidence={(chunkId) => void openIntelligenceEvidence(chunkId)} scope={intelligenceScope} /> : null}
+              {intelligenceView === "claims" ? <AtlasRegulatoryRecords mode="claims" onOpenEvidence={(chunkId) => void openIntelligenceEvidence(chunkId)} scope={intelligenceScope} /> : null}
+              {intelligenceView === "obligations" ? <AtlasRegulatoryRecords mode="obligations" onOpenEvidence={(chunkId) => void openIntelligenceEvidence(chunkId)} scope={intelligenceScope} /> : null}
             </DialogContent>
           </Dialog>
 

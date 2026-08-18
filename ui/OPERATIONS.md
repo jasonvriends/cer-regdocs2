@@ -1,44 +1,48 @@
 # REGDOCS Atlas operations
 
-This file is the short operator runbook. For the full deployment guide, see [`README.md`](README.md) and [`deploy/README.md`](deploy/README.md).
+This is the short operator runbook. See [`deploy/README.md`](deploy/README.md) for the full Azure deployment guide.
 
-## Quick command reference
+## Normal operator commands
 
 ```bash
-# Normal UI/API update. Applies Terraform changes too, but never starts indexing.
+# Preflight: no Azure calls.
+./ui/deploy/deploy.sh --validate
+
+# Preview Terraform against the durable remote state.
+./ui/deploy/deploy.sh --plan
+
+# UI/API update only; no Stage 5 or Stage 6 execution.
 ./ui/deploy/deploy.sh --ui-only
 
-# Terraform/RBAC/config only. No image builds and no indexing.
+# Terraform/RBAC/config only; no image build or publication job.
 ./ui/deploy/deploy.sh --infra-only
 
-# Full UI + indexer deployment.
+# Full deployment of UI + shared publisher image/jobs.
 ./ui/deploy/deploy.sh
 
-# Full deployment and explicitly start a fresh index publication.
+# Explicit Stage 5 hybrid-index publication.
 ./ui/deploy/deploy.sh --restart-index
 
-# Read-only deployment/indexing status plus latest indexer Log Analytics output.
+# Explicit Stage 6 Microsoft Foundry extraction/publication.
+./ui/deploy/deploy.sh --restart-intelligence
+
+# Refresh both publication layers.
+./ui/deploy/deploy.sh --restart-index --restart-intelligence
+
+# Read-only live status and latest logs for both jobs.
 ./ui/deploy/deploy.sh --status
 
-# Read-only server error lookup in Log Analytics.
+# Read-only lookup for one user-visible server error.
 ./ui/deploy/deploy.sh --error ATLAS-0123ABCD4567EF89
 ```
 
-`--no-start` is intentionally not supported. Use `--ui-only` or `--infra-only`, which have precise no-indexing semantics.
+`--no-start` is intentionally unsupported. Use `--ui-only` or `--infra-only`, which have precise no-publication semantics.
 
-## Cloud Shell can die at any time
+## Cloud Shell is disposable
 
-Treat Azure Cloud Shell as disposable. A deployment must never depend on a long-running local shell process or local Terraform state.
+Terraform state is stored in Blob, ACR builds run in Azure, and Container Apps job executions continue in Azure if Cloud Shell disconnects.
 
-The durable pieces live in Azure:
-
-- Terraform state is stored in the configured Blob container;
-- ACR builds run server-side and continue after Cloud Shell disconnects;
-- Container Apps job executions run server-side and continue after Cloud Shell disconnects;
-- Log Analytics keeps the indexer/application output;
-- deployed image tags can be read back from Azure.
-
-If Cloud Shell closes during a deployment, reopen it and first inspect Azure without a SAS token:
+After reconnecting:
 
 ```bash
 cd ~/cer-regdocs2
@@ -46,135 +50,114 @@ source ui/deploy/config.env
 ./ui/deploy/deploy.sh --status
 ```
 
-Then, if the deployment still needs to finish, export a fresh SAS token and rerun the **same deployment mode you originally used**:
+If a deployment must continue, export a fresh SAS token and rerun the same deployment command. Do not create a new `NAME_SUFFIX`, import resources, or destroy the deployment merely because Cloud Shell disappeared.
 
-```bash
-read -rsp "Paste the container SAS token: " AZURE_STORAGE_SAS_TOKEN
-printf '\n'
-export AZURE_STORAGE_SAS_TOKEN="${AZURE_STORAGE_SAS_TOKEN#\?}"
+## Stage 5 versus Stage 6
 
-# Example: resume a UI-only release.
-./ui/deploy/deploy.sh --ui-only
+Atlas has two independent publication jobs using the same immutable publisher image:
+
+```text
+job-regdocs-<suffix>                Stage 5 hybrid Search chunks + embeddings
+job-regdocs-intelligence-<suffix>   Stage 6 Foundry regulatory intelligence
 ```
 
-For a full deployment, rerun:
+Stage 5 handles searchable document chunks. Stage 6 handles evidence-backed entities, relations, events, claims, and obligations.
 
-```bash
-./ui/deploy/deploy.sh
+Stage 6 does **not** start automatically on an ordinary deployment because a corpus-wide Foundry extraction can incur meaningful model cost. Start it intentionally with `--restart-intelligence`.
+
+The Stage 6 extraction cache is checkpointed to Blob every 15 minutes:
+
+```text
+workspace/6_enrich/model/extraction.sqlite
 ```
 
-For an explicit corpus republish, rerun:
+A restarted job reuses completed requests whose normalized input, model, and prompt version have not changed.
+
+### Small Stage 6 pilot
+
+Set in `config.env`:
 
 ```bash
-./ui/deploy/deploy.sh --restart-index
+INTELLIGENCE_DOCUMENT_LIMIT="10"
+export TF_VAR_intelligence_document_limit="$INTELLIGENCE_DOCUMENT_LIMIT"
 ```
 
-The commands are intentionally idempotent: completed Azure resources are reused, completed ACR images are reused, a running indexing execution is not duplicated, and remote Terraform state is reattached on every deployment invocation.
-
-Do **not** run `terraform destroy`, create a new `NAME_SUFFIX`, or import resources merely because Cloud Shell disappeared.
-
-### If Terraform itself was interrupted
-
-A hard disconnect can stop a local `terraform apply`, but it does not delete the remote state or the Azure resources already created. Rerun the same deployment command and Terraform reconciles the remaining differences.
-
-If Terraform reports that the remote state is locked, first make sure there is no other Cloud Shell or Terraform process still applying the same state. Only when you are certain the lock is stale should you use Terraform's `force-unlock` command with the lock ID printed by Terraform:
+Then:
 
 ```bash
-terraform -chdir=ui/deploy/terraform force-unlock <LOCK_ID>
+./ui/deploy/deploy.sh --infra-only
+./ui/deploy/deploy.sh --restart-intelligence
+./ui/deploy/deploy.sh --status
 ```
 
-Never automate or blindly force-unlock a state that another deployment may still be using.
+Review `/diagnostics`, Findings & claims, and Commitments & obligations. Then clear the limit, apply infrastructure again, and rerun Stage 6 for the complete corpus.
 
-### Do not change commits just to resume
-
-If Cloud Shell died while ACR was building a specific Git commit, prefer finishing that deployment before pulling newer commits. The image tag is the Git SHA. `--status` tells you what is currently deployed, and rerunning the same deployment mode reuses an already completed image for the current commit.
-
-## Check indexing status
-
-Run:
+## Check publication status and logs
 
 ```bash
 ./ui/deploy/deploy.sh --status
 ```
 
-This requires Azure CLI access but **does not require a Storage SAS token**. It shows:
+No Storage SAS is required. It shows the current Atlas URL/images, recent Stage 5 executions/logs, and recent Stage 6 executions/logs.
 
-- the current Atlas URL;
-- deployed UI image;
-- deployed indexer image;
-- recent Container Apps job executions and their status;
-- recent console output for the latest indexing execution from Log Analytics.
-
-The indexer logs come from `ContainerAppConsoleLogs_CL` and are scoped to the latest Container Apps job execution. Log Analytics ingestion can lag by a few minutes.
-
-For a direct Azure CLI query, first get the workspace customer ID:
-
-```bash
-WORKSPACE_ID="$(az monitor log-analytics workspace show \
-  --resource-group "$RESOURCE_GROUP" \
-  --workspace-name "log-regdocs-${NAME_SUFFIX}" \
-  --query customerId \
-  --output tsv)"
-```
-
-Then get the latest execution name:
-
-```bash
-JOB_NAME="job-regdocs-${NAME_SUFFIX}"
-LATEST_EXECUTION="$(az containerapp job execution list \
-  --name "$JOB_NAME" \
-  --resource-group "$RESOURCE_GROUP" \
-  --query 'sort_by(@, &properties.startTime)[-1].name' \
-  --output tsv)"
-```
-
-Then query its logs:
-
-```bash
-az monitor log-analytics query \
-  --workspace "$WORKSPACE_ID" \
-  --analytics-query "ContainerAppConsoleLogs_CL | where TimeGenerated > ago(48h) | where ContainerGroupName_s startswith '$LATEST_EXECUTION' | project Time=TimeGenerated, Message=Log_s | order by Time asc | take 200" \
-  --output table
-```
-
-## Trace a user-visible server error
-
-Atlas server failures return a short reference such as:
+Console output comes from Log Analytics table:
 
 ```text
-ATLAS-0123ABCD4567EF89
+ContainerAppConsoleLogs_CL
 ```
 
-The same reference is written as a structured `atlas.error` event to the Container Apps console log and flows to Log Analytics.
+Log Analytics ingestion can lag by a few minutes.
 
-The fastest command-line lookup is:
+## Prove Foundry is actually being used
 
-```bash
-./ui/deploy/deploy.sh --error ATLAS-0123ABCD4567EF89
-```
-
-This is read-only and does not require the Storage SAS token.
-
-### Operator lookup page
-
-You can also open:
+Open:
 
 ```text
-https://<atlas-host>/diagnostics/errors?errorId=ATLAS-0123ABCD4567EF89
+https://<atlas-host>/diagnostics
 ```
 
-The page asks for the diagnostics operator token. Retrieve it from the same remote Terraform state used by `deploy.sh`:
+Retrieve the operator token:
 
 ```bash
 terraform -chdir=ui/deploy/terraform output -raw diagnostics_operator_token
 printf '\n'
 ```
 
-The token is marked sensitive. The lookup API uses the UI managed identity with `Log Analytics Reader`; Azure credentials are not sent to the browser.
+Enter it on `/diagnostics` and run the live checks. They make real calls to Search and Microsoft Foundry and verify the five intelligence indexes:
 
-Validation errors, normal 404s, no-result responses, and rate limits are not logged as application faults and do not receive `ATLAS-...` references.
+```text
+regdocs-entities
+regdocs-relations
+regdocs-events
+regdocs-claims
+regdocs-obligations
+```
 
-### Direct KQL error query
+Successful Ask answers also expose an expandable run footer showing Foundry deployment, retrieval mode/fallback, semantic use, evidence/citation counts, retries, timings, and current corpus coverage.
+
+## Trace a user-visible server error
+
+A real server failure includes a reference such as:
+
+```text
+ATLAS-0123ABCD4567EF89
+```
+
+Fastest lookup:
+
+```bash
+./ui/deploy/deploy.sh --error ATLAS-0123ABCD4567EF89
+```
+
+Web lookup:
+
+```text
+https://<atlas-host>/diagnostics/errors?errorId=ATLAS-0123ABCD4567EF89
+```
+
+The web lookup requires the diagnostics operator token.
+
+Direct KQL:
 
 ```kusto
 ContainerAppConsoleLogs_CL
@@ -184,32 +167,20 @@ ContainerAppConsoleLogs_CL
 | order by TimeGenerated desc
 ```
 
-Ask question text is intentionally not added to structured error or Ask telemetry events.
+Normal validation errors, no-result responses, 404s, and rate limits are not application faults and do not receive `ATLAS-...` references. Ask question text is not included in structured error/Ask telemetry logs.
 
-## Live service diagnostics
+## Stable naming and delete protection
 
-Open:
+`NAME_SUFFIX` is a stable installation ID. Reuse it with the same remote Terraform state.
 
-```text
-https://<atlas-host>/diagnostics
-```
+Terraform `prevent_destroy` protects the globally named ACR, Azure AI Search, and Foundry resources from accidental deletion/replacement. Do not work around that protection by inventing a new suffix.
 
-Choose **Run live checks** to verify Azure AI Search, hybrid/semantic retrieval, the HTML document-view backend, Microsoft Foundry grounded inference, and the Stage 6 intelligence indexes.
+## Index embedding batch size
 
-## Stable deployment identity and delete protection
-
-`NAME_SUFFIX` is a stable installation identifier, not a release number. Pick it once and keep using it with the same remote Terraform state.
-
-Terraform has `prevent_destroy` protection on the globally named ACR, Azure AI Search, and Microsoft Foundry resources. An accidental `terraform destroy` or replacement plan that would remove one of those resources fails instead of silently deleting it.
-
-An intentional teardown therefore requires a deliberate code change to remove the relevant `prevent_destroy` lifecycle before deletion. Do not work around a failed destroy by inventing a new `NAME_SUFFIX`.
-
-## Indexing batch size
-
-The production embedding batch size is:
+Keep:
 
 ```text
 EMBEDDING_BATCH_SIZE="32"
 ```
 
-The Terraform default and cloud-indexer fallback are also 32. Larger batches should not be reintroduced without testing because they previously caused indexing failures.
+The config example, Terraform default, cloud-indexer fallback, and deployment cap all enforce the production-safe 32-request batch size.

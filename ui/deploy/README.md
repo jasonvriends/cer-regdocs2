@@ -1,65 +1,61 @@
-# Resumable Azure deployment from Cloud Shell
+# REGDOCS Atlas Azure deployment
 
-This deployment is designed for disposable Azure Cloud Shell sessions. Cloud Shell is only the control terminal: Terraform state is remote, Azure Container Registry builds images in Azure, and the Container Apps indexing job continues after Cloud Shell disconnects.
+REGDOCS Atlas runs on Azure Container Apps with Azure AI Search, Microsoft Foundry, Azure Container Registry, Log Analytics, managed identities, and Terraform. Azure Cloud Shell is only the control terminal; long-running builds and jobs continue in Azure after Cloud Shell disconnects.
 
-The production stack contains Azure AI Search, Microsoft Foundry, Azure Container Registry, Azure Container Apps, Log Analytics, managed identities, and RBAC. The existing corpus Storage account and Blob container remain outside Terraform ownership.
+The existing corpus Storage account is referenced for Blob inputs and Terraform state but is not owned or deleted by this Terraform deployment.
 
----
-
-# Command syntax
+## Command reference
 
 ```bash
-# Local preflight. No Azure calls and no SAS required.
+# Validate code and Terraform locally. No Azure calls; no SAS required.
 ./ui/deploy/deploy.sh --validate
 
-# Terraform plan against the existing remote state. No apply/build/index run.
+# Preview Terraform changes against remote state. Nothing is applied.
 ./ui/deploy/deploy.sh --plan
 
-# UI/API release. Applies Terraform changes, builds/deploys only the UI,
-# preserves the indexer image, and never starts indexing.
+# UI/API update only. Applies Terraform/RBAC/env changes, builds only the UI,
+# preserves the publisher image, and starts no Stage 5/Stage 6 job.
 ./ui/deploy/deploy.sh --ui-only
 
-# Terraform/RBAC/config only. No image builds and no indexing.
+# Terraform/RBAC/config only. No image builds and no jobs.
 ./ui/deploy/deploy.sh --infra-only
 
-# Full deployment. Builds/deploys UI + indexer and starts indexing when needed.
+# Full deployment. Builds/deploys UI + shared publisher image. Stage 5 starts
+# when its publisher image changed; Stage 6 does not start implicitly.
 ./ui/deploy/deploy.sh
 
-# Full deployment plus a forced new indexing execution.
+# Explicit Stage 5 hybrid-index publication.
 ./ui/deploy/deploy.sh --restart-index
 
-# Read-only current URL/images/indexing executions plus latest indexer logs.
+# Explicit Stage 6 Microsoft Foundry extraction + intelligence publication.
+./ui/deploy/deploy.sh --restart-intelligence
+
+# Refresh both publication layers intentionally.
+./ui/deploy/deploy.sh --restart-index --restart-intelligence
+
+# Read-only URL/images plus Stage 5/Stage 6 execution history and recent logs.
 ./ui/deploy/deploy.sh --status
 
-# Read-only Log Analytics lookup for one user-visible server error.
+# Read-only lookup for a user-visible Atlas server error.
 ./ui/deploy/deploy.sh --error ATLAS-0123ABCD4567EF89
 ```
 
-`--full` is accepted as an explicit alias for the default full deployment.
+`--full` is accepted as an explicit alias for the default full deployment. `--no-start` was removed because its behavior was ambiguous.
 
-`--no-start` has been removed. It was ambiguous because a changed indexer image could still trigger indexing. Use `--ui-only` or `--infra-only` instead.
-
-| Goal/change | Command |
+| Change | Command |
 |---|---|
-| Validate code/Terraform before Azure | `./ui/deploy/deploy.sh --validate` |
-| Preview Terraform changes | `./ui/deploy/deploy.sh --plan` |
-| Next.js UI/API | `./ui/deploy/deploy.sh --ui-only` |
-| UI + Terraform/RBAC/env | `./ui/deploy/deploy.sh --ui-only` |
-| Terraform/RBAC/env only | `./ui/deploy/deploy.sh --infra-only` |
-| Search/Foundry/indexer infrastructure | `./ui/deploy/deploy.sh` |
-| Indexer code | `./ui/deploy/deploy.sh` |
-| Republish normalized corpus | `./ui/deploy/deploy.sh --restart-index` |
-| First deployment | `./ui/deploy/deploy.sh` |
-| Inspect deployment/indexing | `./ui/deploy/deploy.sh --status` |
-| Trace server error | `./ui/deploy/deploy.sh --error ATLAS-...` |
+| UI/API only | `--ui-only` |
+| UI plus Terraform/RBAC/env | `--ui-only` |
+| Terraform/RBAC/env only | `--infra-only` |
+| Publisher/indexer code | full deployment |
+| Normalized corpus needs Stage 5 republish | `--restart-index` |
+| Stage 6 model intelligence needs refresh | `--restart-intelligence` |
+| Both publication layers need refresh | both restart switches |
+| Inspect current system | `--status` |
 
-The UI and indexer have separate Terraform image tags. `--ui-only` changes only the UI tag and cannot accidentally turn a UI commit into an indexer update.
+## Preflight without GitHub Actions
 
----
-
-# Preflight before deployment
-
-Run this first after pulling a change:
+This repository intentionally has no GitHub Actions workflow. Run this before deploying:
 
 ```bash
 ./ui/deploy/deploy.sh --validate
@@ -78,9 +74,9 @@ npm run typecheck
 npm run build
 ```
 
-`--validate` does not read Terraform remote state and makes no Azure API calls. It does not need `config.env` or a SAS token.
+No Azure resource is read or changed by `--validate`.
 
-After local validation, preview infrastructure changes:
+For Terraform changes, follow with:
 
 ```bash
 source ui/deploy/config.env
@@ -91,66 +87,9 @@ export AZURE_STORAGE_SAS_TOKEN="${AZURE_STORAGE_SAS_TOKEN#\?}"
 ./ui/deploy/deploy.sh --plan
 ```
 
-`--plan` initializes against the existing remote Terraform state and runs `terraform plan` using the currently deployed UI/indexer image tags. It does not apply Terraform, build images, or start indexing.
+`--plan` connects to the existing remote state and shows what Terraform would change. It does not apply, build images, or start jobs.
 
----
-
-# Remote Terraform state and stable resource names
-
-The default Terraform state key is:
-
-```text
-terraform/regdocs-atlas.tfstate
-```
-
-in the existing Blob container configured by `STORAGE_ACCOUNT`, `BLOB_CONTAINER`, and `STATE_BLOB`.
-
-Every deployment mode runs `terraform init -reconfigure` against that Blob. Losing Cloud Shell local files does **not** mean Terraform state is lost.
-
-`NAME_SUFFIX` is a stable installation identifier. Pick it once and keep using it with the same remote state. It is not a release number and should not change for normal updates.
-
-## Verify state before importing anything
-
-```bash
-cd ~/cer-regdocs2
-source ui/deploy/config.env
-
-read -rsp "Paste SAS: " AZURE_STORAGE_SAS_TOKEN
-printf '\n'
-export AZURE_STORAGE_SAS_TOKEN="${AZURE_STORAGE_SAS_TOKEN#\?}"
-
-az storage blob show \
-  --account-name "$STORAGE_ACCOUNT" \
-  --container-name "$BLOB_CONTAINER" \
-  --name "${STATE_BLOB:-terraform/regdocs-atlas.tfstate}" \
-  --sas-token "$AZURE_STORAGE_SAS_TOKEN" \
-  --query '{name:name,size:properties.contentLength,lastModified:properties.lastModified}' \
-  -o table
-```
-
-If the Blob exists, reuse it. **Do not import the Azure resources.**
-
-If the state Blob is missing but Azure resources still exist, stop before `terraform apply`; rebuild the state deliberately from the existing Azure resource IDs.
-
-## Accidental-delete protection
-
-Terraform uses `lifecycle.prevent_destroy` on:
-
-```text
-Azure Container Registry
-Azure AI Search
-Microsoft Foundry account
-```
-
-A Terraform plan that would delete or replace one of those globally named resources fails instead.
-
-This is intentional. Foundry deletions are soft-deleted by Azure and the same name can be unavailable until the resource is recovered/purged or the retention window passes.
-
-For an intentional teardown, first make a deliberate code change removing the relevant `prevent_destroy` lifecycle. Do not work around the protection by choosing a new `NAME_SUFFIX`.
-
----
-
-# Cloud Shell setup
+## Cloud Shell setup
 
 ```bash
 git clone <repository-url> cer-regdocs2
@@ -159,7 +98,7 @@ cp ui/deploy/config.env.example ui/deploy/config.env
 code ui/deploy/config.env
 ```
 
-At minimum set:
+At minimum configure:
 
 ```text
 SUBSCRIPTION_ID
@@ -170,152 +109,192 @@ BLOB_CONTAINER
 CONFIRM_BILLABLE_DEPLOYMENT=yes
 ```
 
-The safe indexing value is:
+Keep this value at 32 unless a tested change proves otherwise:
 
 ```text
 EMBEDDING_BATCH_SIZE="32"
 ```
 
-Terraform also defaults to 32, and the cloud indexer falls back to 32 if the environment variable is absent. `deploy.sh` caps an older local value above 32 down to 32.
+The script also caps an older local value above 32 down to 32 before Terraform receives it.
 
-Optional UI ingress restriction:
-
-```bash
-UI_ALLOWED_IP_CIDRS='["203.0.113.10/32","198.51.100.0/24"]'
-```
-
-Before a deployment, update the checkout and export a private container SAS with Read, Create, Write, and List permission:
+Before `--plan` or any deployment mode, export a private Blob container SAS with Read, Create, Write, and List permission:
 
 ```bash
-cd ~/cer-regdocs2
-git checkout master
-git pull origin master
 source ui/deploy/config.env
-
 read -rsp "Paste the container SAS token: " AZURE_STORAGE_SAS_TOKEN
 printf '\n'
 export AZURE_STORAGE_SAS_TOKEN="${AZURE_STORAGE_SAS_TOKEN#\?}"
 ```
 
-The SAS is used for the remote Terraform backend. Full deployments also use it to verify normalized index inputs. Keep it out of Git and `config.env`.
+Do not save the SAS token in Git or `config.env`.
 
-`--validate`, `--status`, and `--error` do not require the SAS token. `--plan` needs it only for the remote Terraform backend.
+## Terraform state is remote
 
----
+The normal state key is:
 
-# Update only the UI
+```text
+terraform/regdocs-atlas.tfstate
+```
+
+in the configured existing Blob container. Every Terraform-backed command runs `terraform init -reconfigure` against that Blob.
+
+A fresh Cloud Shell therefore does **not** require Terraform imports if the state Blob still exists.
+
+Verify it before considering imports:
+
+```bash
+az storage blob show \
+  --account-name "$STORAGE_ACCOUNT" \
+  --container-name "$BLOB_CONTAINER" \
+  --name "${STATE_BLOB:-terraform/regdocs-atlas.tfstate}" \
+  --sas-token "$AZURE_STORAGE_SAS_TOKEN" \
+  --query '{name:name,size:properties.contentLength,lastModified:properties.lastModified}' \
+  -o table
+```
+
+If the Blob exists, reuse it. If the state Blob is missing while the Azure resources still exist, stop before `terraform apply`; that is a deliberate state-recovery/import operation.
+
+`NAME_SUFFIX` is a stable installation ID, not a release number. Keep using the same suffix with the same remote state.
+
+Terraform also uses `lifecycle.prevent_destroy` on the globally named ACR, Search, and Foundry resources. A plan that would delete or replace one of them fails instead of silently destroying it.
+
+## UI-only updates
+
+For an ordinary UI/API change:
 
 ```bash
 ./ui/deploy/deploy.sh --ui-only
 ```
 
-This mode:
+This reconnects to remote state, applies Terraform/RBAC/environment changes, builds only `regdocs-ui:<git-sha>`, and deploys it while preserving the existing shared publisher image. It does not start Stage 5 or Stage 6.
 
-1. reconnects to remote Terraform state;
-2. reconciles Terraform/RBAC/environment variables;
-3. reads the currently deployed indexer image tag;
-4. builds only `regdocs-ui:<git-sha>`;
-5. deploys that UI image through Terraform;
-6. preserves the indexer image tag;
-7. never builds or starts the indexing job.
+If the ACR build is still running, the command exits safely. Run the same command again when the build is complete.
 
-If ACR is still building the UI image, the script exits safely. Run the same command again after the build completes.
+## Full deployment
 
----
-
-# Update only infrastructure/config
-
-```bash
-./ui/deploy/deploy.sh --infra-only
-```
-
-This reconciles Terraform/RBAC/configuration while preserving the deployed UI and indexer images. It builds no images and starts no indexing execution.
-
----
-
-# Full deployment
+For first deployment or publisher/infrastructure changes:
 
 ```bash
 ./ui/deploy/deploy.sh
 ```
 
-The full mode:
+The full path builds:
 
-1. verifies normalized Blob inputs;
-2. reconnects to remote Terraform state;
-3. reconciles Azure infrastructure;
-4. builds missing UI and indexer images using the current Git SHA;
-5. deploys both images;
-6. avoids duplicate indexing while an execution is active;
-7. starts a new indexing execution when the deployed indexer image changed.
+```text
+regdocs-ui:<git-sha>
+regdocs-indexer:<git-sha>
+```
 
-If ACR builds are queued, the script may exit intentionally. Run the same command again after the builds finish.
+The `regdocs-indexer` image is shared by two independent Container Apps jobs:
 
-Cloud Shell may be closed while ACR builds or the Container Apps indexing job continues.
+```text
+job-regdocs-<suffix>                Stage 5 hybrid search publication
+job-regdocs-intelligence-<suffix>   Stage 6 Foundry intelligence publication
+```
 
-## Explicitly republish normalized data
+The jobs have separate execution histories. A Stage 6 failure therefore does not make a successful Stage 5 publication look failed.
+
+## Stage 5 indexing
+
+Force a new hybrid-index publication when normalized corpus inputs changed:
 
 ```bash
 ./ui/deploy/deploy.sh --restart-index
 ```
 
-Use this when the normalized corpus changed and you intentionally want another publication even if the indexer code did not change.
+The Stage 5 job downloads normalized chunks/provenance, restores the Blob-backed embedding cache, generates missing Foundry embeddings, and publishes Azure AI Search chunks.
 
-Do not use it for an ordinary UI release.
+The embedding cache is periodically checkpointed to:
 
----
+```text
+workspace/5_index/embedding-cache.sqlite
+```
 
-# Check indexing status through Log Analytics
+## Stage 6 Microsoft Foundry intelligence
 
-Run:
+Start the model intelligence job explicitly:
+
+```bash
+./ui/deploy/deploy.sh --restart-intelligence
+```
+
+This is deliberately explicit because it can make many Foundry model calls.
+
+The job:
+
+1. downloads `workspace/4_normalize/documents.jsonl` and `chunks.jsonl`;
+2. restores the durable Stage 6 extraction cache if present;
+3. runs evidence-constrained Microsoft Foundry extraction;
+4. validates that every model record cites real input chunk IDs;
+5. merges model artifacts with deterministic Stage 6 metadata;
+6. publishes entities, relations, events, claims, and obligations;
+7. uploads Stage 6 outputs and its extraction cache back to Blob.
+
+Published Search indexes are:
+
+```text
+regdocs-entities
+regdocs-relations
+regdocs-events
+regdocs-claims
+regdocs-obligations
+```
+
+The model extraction cache is checkpointed every 15 minutes to:
+
+```text
+workspace/6_enrich/model/extraction.sqlite
+```
+
+If the job times out or restarts, completed requests are reused.
+
+### Run a small Stage 6 pilot first
+
+In `config.env`:
+
+```bash
+INTELLIGENCE_DOCUMENT_LIMIT="10"
+export TF_VAR_intelligence_document_limit="$INTELLIGENCE_DOCUMENT_LIMIT"
+```
+
+Then:
+
+```bash
+./ui/deploy/deploy.sh --infra-only
+./ui/deploy/deploy.sh --restart-intelligence
+./ui/deploy/deploy.sh --status
+```
+
+After reviewing the extracted claims/obligations and diagnostics, clear the limit:
+
+```bash
+INTELLIGENCE_DOCUMENT_LIMIT=""
+export TF_VAR_intelligence_document_limit="$INTELLIGENCE_DOCUMENT_LIMIT"
+```
+
+Apply and run Stage 6 again. The first pilot's cached requests remain reusable.
+
+## Check Stage 5 and Stage 6 status
 
 ```bash
 ./ui/deploy/deploy.sh --status
 ```
 
-This is read-only and shows:
+This is read-only and requires no SAS. It prints:
 
 ```text
-current UI URL
-current UI image
-current indexer image
-recent Container Apps job executions
-latest execution status
-recent Log Analytics output for the latest execution
+UI URL and image
+Stage 5 publisher image
+Stage 6 publisher image
+recent Stage 5 executions
+recent Log Analytics output for the latest Stage 5 execution
+recent Stage 6 executions
+recent Log Analytics output for the latest Stage 6 execution
 ```
 
-The Log Analytics query uses `ContainerAppConsoleLogs_CL` and scopes logs to the latest job execution through `ContainerGroupName_s`.
+Container Apps console logs are queried from `ContainerAppConsoleLogs_CL`. Log Analytics ingestion can lag by a few minutes.
 
-If a new execution has no logs yet, Log Analytics ingestion may still be catching up. Run `--status` again after a few minutes.
-
-## Direct CLI query
-
-```bash
-source ui/deploy/config.env
-az account set --subscription "$SUBSCRIPTION_ID"
-
-WORKSPACE_ID="$(az monitor log-analytics workspace show \
-  --resource-group "$RESOURCE_GROUP" \
-  --workspace-name "log-regdocs-${NAME_SUFFIX}" \
-  --query customerId \
-  --output tsv)"
-
-JOB_NAME="job-regdocs-${NAME_SUFFIX}"
-LATEST_EXECUTION="$(az containerapp job execution list \
-  --name "$JOB_NAME" \
-  --resource-group "$RESOURCE_GROUP" \
-  --query 'sort_by(@, &properties.startTime)[-1].name' \
-  --output tsv)"
-
-az monitor log-analytics query \
-  --workspace "$WORKSPACE_ID" \
-  --analytics-query "ContainerAppConsoleLogs_CL | where TimeGenerated > ago(48h) | where ContainerGroupName_s startswith '$LATEST_EXECUTION' | project Time=TimeGenerated, Message=Log_s | order by Time asc | take 200" \
-  --output table
-```
-
----
-
-# Diagnostics and Foundry verification
+## Diagnostics and proof that Foundry is being used
 
 Open:
 
@@ -323,51 +302,56 @@ Open:
 https://<atlas-host>/diagnostics
 ```
 
-The initial configuration view is inexpensive. **Live checks require the diagnostics operator token** because they make real billable/service calls and can reveal operational error details.
+The shallow configuration page is inexpensive. Live checks require the diagnostics operator token because they make real Search/Foundry calls and expose operational failure details.
 
-Retrieve the token from Terraform state:
+Get the token:
 
 ```bash
 terraform -chdir=ui/deploy/terraform output -raw diagnostics_operator_token
 printf '\n'
 ```
 
-Enter that token on `/diagnostics`, then choose **Run live checks**. The live checks exercise Search keyword retrieval, hybrid/vector retrieval, optional semantic ranking, the HTML document reader, Microsoft Foundry grounded inference, live corpus metadata, and the Stage 6 entities/relations/events indexes.
+Enter it on `/diagnostics` and choose **Run live checks**.
 
-This is the quickest way to prove the deployed app is actually reaching Foundry rather than merely having Foundry environment variables configured.
+The live diagnostics verify:
 
-Successful Ask answers also expose a small expandable run footer showing the Foundry deployment, retrieval mode/fallback, semantic use, evidence/citation counts, retry count, timings, and live corpus coverage.
+```text
+live corpus metadata
+keyword Search
+hybrid/vector Search
+semantic ranking when configured
+HTML document retrieval
+real Microsoft Foundry grounded inference
+entities index
+relations index
+events index
+claims index
+obligations index
+```
 
----
+A successful Ask answer also includes an expandable line showing the Foundry deployment, retrieval mode/fallback, semantic use, retrieved evidence count, cited evidence count, retries, timings, and current corpus coverage.
 
-# User errors
+## User-visible errors
 
-Server faults shown to users include a reference such as:
+A real server failure is returned with a reference such as:
 
 ```text
 Reference: ATLAS-0123ABCD4567EF89
 ```
 
-The same ID is written to Container Apps console output and Log Analytics.
-
-Fast CLI lookup:
+Look it up directly:
 
 ```bash
 ./ui/deploy/deploy.sh --error ATLAS-0123ABCD4567EF89
 ```
 
-Operator web lookup:
+Or use:
 
 ```text
-/diagnostics/errors?errorId=ATLAS-0123ABCD4567EF89
+https://<atlas-host>/diagnostics/errors?errorId=ATLAS-0123ABCD4567EF89
 ```
 
-Retrieve the operator token after Terraform is initialized against production state:
-
-```bash
-terraform -chdir=ui/deploy/terraform output -raw diagnostics_operator_token
-printf '\n'
-```
+The web lookup requires the same diagnostics operator token.
 
 Direct KQL:
 
@@ -379,67 +363,18 @@ ContainerAppConsoleLogs_CL
 | order by TimeGenerated desc
 ```
 
-See [`../OPERATIONS.md`](../OPERATIONS.md) for the short operator workflow.
+## Public URL
 
----
-
-# Public URL
-
-The workload runs on Azure Container Apps. Its generated Azure hostname has the form:
+Azure Container Apps generates a hostname similar to:
 
 ```text
 https://app-regdocs-<suffix>.<environment-id>.<region>.azurecontainerapps.io
 ```
 
-Use:
+Print the current one with:
 
 ```bash
 ./ui/deploy/deploy.sh --status
 ```
 
-to print the actual current URL.
-
-The Azure-provided Container Apps hostname cannot be shortened to an App Service-style `regdocsatlas.azurewebsites.net`. If you want a simple stable hostname such as `regdocsatlas.example.com`, bind a custom domain you own to the Container App. The current workload name is intentionally kept stable because renaming the existing Container App would replace it.
-
----
-
-# Manual verification without GitHub Actions
-
-There are no GitHub Actions in this repository. The normal pre-merge/pre-deploy check is now one command:
-
-```bash
-./ui/deploy/deploy.sh --validate
-```
-
-For infrastructure changes, follow it with:
-
-```bash
-./ui/deploy/deploy.sh --plan
-```
-
-Review the plan before running any deployment mode.
-
----
-
-# Data ownership and operational notes
-
-Terraform manages the REGDOCS Atlas resource group and application/search/AI infrastructure. The existing Storage account is referenced for input/state but is not imported into Terraform ownership.
-
-The indexing job reads:
-
-```text
-workspace/4_normalize/chunks.jsonl
-workspace/4_normalize/provenance.jsonl
-workspace/5_index/embedding-cache.sqlite    optional/resumable cache
-```
-
-Operational reminders:
-
-- `NAME_SUFFIX` should remain stable across normal updates.
-- Standard Azure AI Search is the main fixed monthly cost.
-- The UI Container App can scale to zero when idle.
-- The indexing job costs only while executions run.
-- ACR, Log Analytics, and Foundry add usage-dependent charges.
-- Keep `config.env`, SAS tokens, Terraform state, and the diagnostics operator token private.
-- A SAS or managed identity does not bypass Storage firewall/network restrictions.
-- Terraform delete protection intentionally blocks accidental deletion of the globally named ACR, Search, and Foundry resources.
+For a genuinely short stable hostname such as `regdocsatlas.example.com`, bind a custom domain you own to the Container App. `azurewebsites.net` is an App Service hostname and is not the generated hostname format for Container Apps.
