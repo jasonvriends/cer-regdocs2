@@ -168,7 +168,7 @@ check_data() {
   fi
 
   echo
-  echo "Source package is complete for the deployed system."
+  echo "Source package is complete for REGDOCS Atlas v1."
   echo "  Stage 5 can build Search + Ask + HTML document viewing."
   echo "  Stage 6 can derive/publish findings, claims, events, relationships, commitments and obligations."
   return 0
@@ -186,31 +186,34 @@ latest_job_status() {
 
 show_guide() {
   cat <<'EOF'
-REGDOCS Atlas — guided deployment
-=================================
+REGDOCS Atlas v1 — guided deployment
+====================================
 This command is READ ONLY. Running deploy.sh with no arguments never deploys.
 
-The complete first-deployment flow is:
+REGDOCS Atlas has six pipeline stages only. Stage 6 is the final data stage.
+The numbered items below are deployment steps, not additional pipeline stages.
 
-  PHASE 1  Personal computer: finish Stage 4 normalize
-  PHASE 2  Azure: create one Storage account + Blob container + container SAS
-  PHASE 3  Personal computer: upload the complete Stage 4 normalized package
-  PHASE 4  Cloud Shell: verify Blob data and Terraform state
-  PHASE 5  Cloud Shell: deploy Azure infrastructure/workloads
-  PHASE 6  Azure job: publish Stage 5 Search (enables Ask + HTML viewer)
-  PHASE 7  Azure job: run Stage 6 enrichment/intelligence
-  PHASE 8  Verify /diagnostics and the research UI
+Complete the project in this order:
+
+  STEP 1  Personal computer: finish Stage 4 normalize
+  STEP 2  Azure: create/use one Storage account + Blob container + container SAS
+  STEP 3  Personal computer: upload the complete five-file Stage 4 package
+  STEP 4  Cloud Shell: verify Blob data and durable Terraform state
+  STEP 5  Validate code, review Terraform plan, deploy Azure workloads
+  STEP 6  Run Stage 5 Search publication (Ask + HTML document viewer)
+  STEP 7  Run Stage 6 regulatory intelligence (FINAL DATA STAGE)
+  STEP 8  Verify diagnostics + UI and declare v1 complete
 EOF
 
   if [[ ! -f "$CONFIG_FILE" ]]; then
     cat <<EOF
 
 CURRENT BLOCKER: config.env does not exist.
-Next:
+NEXT:
   cp ui/deploy/config.env.example ui/deploy/config.env
   edit ui/deploy/config.env
 
-You need to supply at least:
+Configure at least:
   SUBSCRIPTION_ID
   NAME_SUFFIX
   STORAGE_ACCOUNT
@@ -218,6 +221,7 @@ You need to supply at least:
   BLOB_CONTAINER
   CONFIRM_BILLABLE_DEPLOYMENT=yes
 
+NAME_SUFFIX is your stable installation ID. Reuse it for normal updates.
 The Storage account and Blob container must already exist because Terraform state
 also lives in that container.
 EOF
@@ -252,12 +256,13 @@ EOF
 CURRENT BLOCKER: AZURE_STORAGE_SAS_TOKEN is not set in this shell.
 The SAS is intentionally NOT stored in config.env.
 
-If the normalized files are not uploaded yet, use --upload-help on your personal
-computer. In Cloud Shell, paste a fresh container SAS before state/data checks:
+If normalized files are not uploaded yet, use --upload-help on your personal
+computer. In Cloud Shell paste a fresh container SAS before state/data checks:
 
   read -rsp "Paste container SAS: " AZURE_STORAGE_SAS_TOKEN; echo
   export AZURE_STORAGE_SAS_TOKEN="${AZURE_STORAGE_SAS_TOKEN#\?}"
   ./ui/deploy/deploy.sh --check-data
+  ./ui/deploy/deploy.sh
 EOF
     return 0
   fi
@@ -269,7 +274,7 @@ EOF
   fi
 
   echo
-  echo "PHASE 4 — Blob readiness"
+  echo "STEP 4 — Blob/data readiness"
   if check_data; then
     :
   else
@@ -282,7 +287,8 @@ EOF
     echo "Terraform state: FOUND  $STATE_BLOB ($state_size bytes)"
   else
     echo "Terraform state: NOT FOUND  $STATE_BLOB"
-    echo "This is normal for a first deployment. Do not import anything when no prior Atlas resources exist."
+    echo "This is normal for a first deployment when no prior Atlas resources exist."
+    echo "Do not import anything merely because this is a new Cloud Shell session."
   fi
 
   if ! az account show --output none 2>/dev/null; then
@@ -301,22 +307,25 @@ EOF
   stage6_exists="$(az containerapp job show --name "$stage6" --resource-group "$RESOURCE_GROUP" --query name -o tsv --only-show-errors 2>/dev/null || true)"
 
   echo
-  echo "PHASE 5 — Azure deployment readiness"
+  echo "STEP 5 — Azure deployment readiness"
   [[ -n "$app_exists" ]] && echo "UI Container App: FOUND" || echo "UI Container App: NOT DEPLOYED"
   [[ -n "$stage5_exists" ]] && echo "Stage 5 job:      FOUND" || echo "Stage 5 job:      NOT DEPLOYED"
   [[ -n "$stage6_exists" ]] && echo "Stage 6 job:      FOUND" || echo "Stage 6 job:      NOT DEPLOYED"
 
   if [[ -z "$app_exists" || -z "$stage5_exists" || -z "$stage6_exists" ]]; then
+    echo
+    echo "BEFORE THE NEXT APPLY:"
+    echo "  ./ui/deploy/deploy.sh --validate"
+    echo "  ./ui/deploy/deploy.sh --plan"
+    echo
     if [[ -z "$state_size" ]]; then
-      echo
-      echo "NEXT (first deployment foundation):"
+      echo "NEXT APPLY (first deployment foundation):"
       echo "  ./ui/deploy/deploy.sh --infra-only"
-      echo "Then run this guide again. When the foundation exists, it will tell you to run --full."
+      echo "Then rerun ./ui/deploy/deploy.sh for the next instruction."
     else
-      echo
-      echo "NEXT (deploy/update workloads):"
+      echo "NEXT APPLY (deploy/update workloads):"
       echo "  ./ui/deploy/deploy.sh --full"
-      echo "ACR builds run in Azure; if the command exits while builds continue, rerun --full afterward."
+      echo "ACR builds run in Azure. If builds are still running when the command exits, rerun --full afterward."
     fi
     return 0
   fi
@@ -324,7 +333,7 @@ EOF
   stage5_status="$(latest_job_status "$stage5")"
   stage6_status="$(latest_job_status "$stage6")"
   echo
-  echo "PHASE 6 — Stage 5 Search publication"
+  echo "STEP 6 — Stage 5 Search publication"
   echo "Latest Stage 5 status: ${stage5_status:-never run}"
   if [[ "$stage5_status" == "Running" || "$stage5_status" == "Processing" ]]; then
     echo "NEXT: Stage 5 is running. Use ./ui/deploy/deploy.sh --status."
@@ -337,7 +346,7 @@ EOF
   fi
 
   echo
-  echo "PHASE 7 — Stage 6 regulatory intelligence"
+  echo "STEP 7 — Stage 6 regulatory intelligence (FINAL DATA STAGE)"
   echo "Latest Stage 6 status: ${stage6_status:-never run}"
   if [[ "$stage6_status" == "Running" || "$stage6_status" == "Processing" ]]; then
     echo "NEXT: Stage 6 is running. Use ./ui/deploy/deploy.sh --status."
@@ -353,14 +362,28 @@ EOF
 
   cat <<EOF
 
-PHASE 8 — Ready to verify
+STEP 8 — PROJECT READY FOR FINAL ACCEPTANCE
 Stage 5: SUCCEEDED
 Stage 6: SUCCEEDED
+
+There is no further pipeline stage.
 
 NEXT:
   ./ui/deploy/deploy.sh --status
   open https://$app.../diagnostics using the actual URL printed by --status
   run protected live diagnostics
+  complete COMPLETION.md against the deployed UI
+
+The v1 UI should provide:
+  grounded Ask + citations
+  filters and live coverage
+  HTML document viewing + page jump + Original in REGDOCS
+  Shelf + Shelf-only Ask + CSV export
+  regulatory timeline
+  relationship graph
+  Findings & claims
+  Commitments & obligations
+  ATLAS error tracing
 
 Normal later UI releases use:
   ./ui/deploy/deploy.sh --ui-only
