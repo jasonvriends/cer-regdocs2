@@ -38,6 +38,10 @@ resource "azurerm_container_registry" "main" {
   sku                 = "Basic"
   admin_enabled       = false
   tags                = var.tags
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "azurerm_log_analytics_workspace" "main" {
@@ -86,6 +90,10 @@ resource "azurerm_search_service" "main" {
     type = "SystemAssigned"
   }
 
+  lifecycle {
+    prevent_destroy = true
+  }
+
   tags = var.tags
 }
 
@@ -101,6 +109,10 @@ resource "azurerm_cognitive_account" "foundry" {
 
   identity {
     type = "SystemAssigned"
+  }
+
+  lifecycle {
+    prevent_destroy = true
   }
 
   tags = var.tags
