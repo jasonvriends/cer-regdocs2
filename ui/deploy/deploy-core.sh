@@ -221,7 +221,9 @@ if [[ "$OPERATION" == "validate" ]]; then
   done
 
   log "Validating deployment shell syntax"
-  bash -n "$SCRIPT_DIR/deploy.sh"
+  for script in "$SCRIPT_DIR/deploy.sh" "$SCRIPT_DIR/deploy-guide.sh" "$SCRIPT_DIR/deploy-core.sh"; do
+    bash -n "$script"
+  done
 
   log "Validating Terraform formatting and configuration without a backend"
   terraform -chdir="$TERRAFORM_DIR" fmt -check -recursive
@@ -437,26 +439,42 @@ LEGACY_IMAGE_TAG="$(terraform_output deployed_image_tag)"
 PREVIOUS_UI_IMAGE_TAG="$(terraform_output deployed_ui_image_tag)"
 PREVIOUS_INDEXER_IMAGE_TAG="$(terraform_output deployed_indexer_image_tag)"
 
-if [[ "$UI_IN_STATE" == true ]]; then
-  ACTUAL_UI_IMAGE="$(az containerapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" --query 'properties.template.containers[0].image' --output tsv --only-show-errors 2>/dev/null || true)"
+# State can outlive resources when an operator intentionally deletes the Atlas
+# infrastructure resource group. Distinguish "tracked in state" from "actually
+# exists in Azure" so a clean rebuild creates the foundation and ACR images
+# before it asks Terraform to recreate Container Apps workloads.
+ACTUAL_UI_IMAGE="$(az containerapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" --query 'properties.template.containers[0].image' --output tsv --only-show-errors 2>/dev/null || true)"
+ACTUAL_INDEXER_IMAGE="$(az containerapp job show --name "$JOB_NAME" --resource-group "$RESOURCE_GROUP" --query 'properties.template.containers[0].image' --output tsv --only-show-errors 2>/dev/null || true)"
+UI_EXISTS=false
+INDEXER_EXISTS=false
+
+if [[ -n "$ACTUAL_UI_IMAGE" ]]; then
+  UI_EXISTS=true
   ACTUAL_UI_TAG="$(image_tag_from_reference "$ACTUAL_UI_IMAGE")"
   [[ -n "$ACTUAL_UI_TAG" ]] && PREVIOUS_UI_IMAGE_TAG="$ACTUAL_UI_TAG"
 fi
 
-if [[ "$INDEXER_IN_STATE" == true ]]; then
-  ACTUAL_INDEXER_IMAGE="$(az containerapp job show --name "$JOB_NAME" --resource-group "$RESOURCE_GROUP" --query 'properties.template.containers[0].image' --output tsv --only-show-errors 2>/dev/null || true)"
+if [[ -n "$ACTUAL_INDEXER_IMAGE" ]]; then
+  INDEXER_EXISTS=true
   ACTUAL_INDEXER_TAG="$(image_tag_from_reference "$ACTUAL_INDEXER_IMAGE")"
   [[ -n "$ACTUAL_INDEXER_TAG" ]] && PREVIOUS_INDEXER_IMAGE_TAG="$ACTUAL_INDEXER_TAG"
+fi
+
+if [[ "$UI_EXISTS" == true && "$UI_IN_STATE" != true ]]; then
+  fail "$APP_NAME exists in Azure but is absent from Terraform state. Reconcile/import state before deploying."
+fi
+if [[ "$INDEXER_EXISTS" == true && "$INDEXER_IN_STATE" != true ]]; then
+  fail "$JOB_NAME exists in Azure but is absent from Terraform state. Reconcile/import state before deploying."
 fi
 
 [[ -n "$PREVIOUS_UI_IMAGE_TAG" ]] || PREVIOUS_UI_IMAGE_TAG="$LEGACY_IMAGE_TAG"
 [[ -n "$PREVIOUS_INDEXER_IMAGE_TAG" ]] || PREVIOUS_INDEXER_IMAGE_TAG="$LEGACY_IMAGE_TAG"
 
-if [[ "$MODE" == "ui-only" && ( "$UI_IN_STATE" != true || "$INDEXER_IN_STATE" != true ) ]]; then
+if [[ "$MODE" == "ui-only" && ( "$UI_EXISTS" != true || "$INDEXER_EXISTS" != true ) ]]; then
   fail "--ui-only requires an existing deployed UI and publisher image. Use a full deployment first."
 fi
 
-if [[ "$UI_IN_STATE" == true || "$INDEXER_IN_STATE" == true ]]; then
+if [[ "$UI_EXISTS" == true || "$INDEXER_EXISTS" == true ]]; then
   [[ -n "$PREVIOUS_UI_IMAGE_TAG" ]] || fail "Could not determine the currently deployed UI image tag."
   [[ -n "$PREVIOUS_INDEXER_IMAGE_TAG" ]] || fail "Could not determine the currently deployed publisher image tag."
   FOUNDATION_DEPLOY_WORKLOADS=true
@@ -502,8 +520,24 @@ ACR_LOGIN_SERVER="$(terraform_output container_registry_login_server)"
 UI_IMAGE="regdocs-ui:$CURRENT_IMAGE_TAG"
 INDEXER_IMAGE="regdocs-indexer:$CURRENT_IMAGE_TAG"
 
+# Use ACR Tasks' management-plane run history instead of `az acr repository show`.
+# The repository command can fall into registry data-plane authentication and
+# prompt for a username/password in Cloud Shell. Every image deployed by this
+# script is built with `az acr build`, so a successful run for the exact
+# deterministic repo:tag is the authoritative existence check we need.
 image_exists() {
-  az acr repository show --name "$ACR_NAME" --image "$1" --output none --only-show-errors 2>/dev/null
+  local image="$1"
+  local succeeded
+  succeeded="$(az acr task list-runs \
+    --registry "$ACR_NAME" \
+    --image "$image" \
+    --run-status Succeeded \
+    --top 1 \
+    --query 'length(@)' \
+    --output tsv \
+    --only-show-errors 2>/dev/null || echo 0)"
+  [[ "$succeeded" =~ ^[0-9]+$ ]] || succeeded=0
+  (( succeeded > 0 ))
 }
 
 build_active() {
@@ -535,7 +569,7 @@ queue_build() {
 }
 
 show_recent_builds() {
-  az acr task list-runs --registry "$ACR_NAME" --top 5 --query '[].{Image:outputImages[0],Status:status,Started:startTime}' --output table --only-show-errors || true
+  az acr task list-runs --registry "$ACR_NAME" --top 5 --query '[].{Run:runId,Status:status,Started:startTime}' --output table --only-show-errors || true
 }
 
 if [[ "$MODE" == "ui-only" ]]; then

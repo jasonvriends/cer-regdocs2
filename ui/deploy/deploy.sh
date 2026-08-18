@@ -4,6 +4,16 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 GUIDE="$SCRIPT_DIR/deploy-guide.sh"
 
+# Do not let an interactive shell choose the React/Next build mode. In Azure
+# Cloud Shell an inherited NODE_ENV=development caused `next build` to compile
+# and typecheck successfully, then fail while prerendering /_global-error.
+# Next.js selects the correct mode for `next build`; the production container
+# sets NODE_ENV=production explicitly at runtime.
+if [[ -n "${NODE_ENV:-}" ]]; then
+  echo "NOTE: ignoring inherited NODE_ENV; deploy validation lets Next.js select its build mode." >&2
+  unset NODE_ENV
+fi
+
 usage() {
   cat <<'EOF'
 REGDOCS Atlas deployment
