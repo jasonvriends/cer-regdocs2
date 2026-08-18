@@ -170,9 +170,17 @@ STATE_BLOB="${STATE_BLOB:-terraform/regdocs-atlas.tfstate}"
 NORMALIZED_BLOB_PREFIX="${NORMALIZED_BLOB_PREFIX:-workspace/4_normalize}"
 EMBEDDING_CACHE_BLOB="${EMBEDDING_CACHE_BLOB:-workspace/5_index/embedding-cache.sqlite}"
 STORAGE_SUBSCRIPTION_ID="${STORAGE_SUBSCRIPTION_ID:-$SUBSCRIPTION_ID}"
+EMBEDDING_BATCH_SIZE="${EMBEDDING_BATCH_SIZE:-32}"
 APP_NAME="app-regdocs-${NAME_SUFFIX:-}"
 JOB_NAME="job-regdocs-${NAME_SUFFIX:-}"
 LOG_WORKSPACE_NAME="log-regdocs-${NAME_SUFFIX:-}"
+
+[[ "$EMBEDDING_BATCH_SIZE" =~ ^[0-9]+$ ]] || fail "EMBEDDING_BATCH_SIZE must be a whole number."
+(( EMBEDDING_BATCH_SIZE >= 1 )) || fail "EMBEDDING_BATCH_SIZE must be at least 1."
+if (( EMBEDDING_BATCH_SIZE > 32 )); then
+  echo "WARNING: EMBEDDING_BATCH_SIZE=$EMBEDDING_BATCH_SIZE is above the production-safe maximum; using 32 instead." >&2
+  EMBEDDING_BATCH_SIZE=32
+fi
 
 # Read-only status/error operations deliberately do not require Terraform state
 # access or a Storage SAS token.
