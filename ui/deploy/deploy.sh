@@ -4,6 +4,19 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 GUIDE="$SCRIPT_DIR/deploy-guide.sh"
 
+# Next.js expects NODE_ENV to be exactly production, development, or test and
+# sets the appropriate value for its own commands. Azure Cloud Shell or a user
+# profile can leak a custom value into this process; remove only non-standard
+# values so `--validate` cannot fail because of unrelated shell configuration.
+case "${NODE_ENV:-}" in
+  ""|production|development|test)
+    ;;
+  *)
+    echo "NOTE: ignoring non-standard inherited NODE_ENV=${NODE_ENV@Q}; Next.js will select the correct mode." >&2
+    unset NODE_ENV
+    ;;
+esac
+
 usage() {
   cat <<'EOF'
 REGDOCS Atlas deployment
