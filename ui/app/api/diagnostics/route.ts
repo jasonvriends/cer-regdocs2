@@ -75,22 +75,45 @@ function searchCredential() {
   return key ? new AzureKeyCredential(key) : new DefaultAzureCredential();
 }
 
-async function probeIndex(indexName: string): Promise<Check> {
+function missingFields(record: Record<string, unknown> | null, requiredFields: string[]) {
+  if (!record) return [...requiredFields];
+  return requiredFields.filter((field) => !Object.prototype.hasOwnProperty.call(record, field));
+}
+
+async function probeIndex(indexName: string, requiredFields: string[]): Promise<Check> {
   const endpoint = process.env.AZURE_SEARCH_ENDPOINT?.trim();
   if (!endpoint) return { ok: false, error: "AZURE_SEARCH_ENDPOINT is not configured" };
   const result = await timed(async () => {
     const client = new SearchClient<Record<string, unknown>>(endpoint, indexName, searchCredential());
-    const response = await client.search("*", { top: 1, includeTotalCount: true });
-    for await (const _ of response.results) break;
-    return response.count ?? 0;
+    const response = await client.search("*", {
+      top: 1,
+      includeTotalCount: true,
+      select: requiredFields,
+    });
+    let sample: Record<string, unknown> | null = null;
+    for await (const item of response.results) {
+      sample = item.document;
+      break;
+    }
+    return { count: response.count ?? 0, sample };
   });
   if (result.value === null) return result.check;
+
+  const missing = missingFields(result.value.sample, requiredFields);
+  const populated = result.value.count > 0;
+  const ok = populated && missing.length === 0;
   return {
     ...result.check,
-    ok: result.value > 0,
-    count: result.value,
-    detail: indexName,
-    ...(result.value > 0 ? {} : { error: `${indexName} is reachable but contains no records` }),
+    ok,
+    count: result.value.count,
+    detail: `${indexName} · fields ${requiredFields.join(", ")}`,
+    ...(ok
+      ? {}
+      : {
+          error: !populated
+            ? `${indexName} is reachable but contains no records`
+            : `${indexName} is missing required v1 field(s): ${missing.join(", ")}`,
+        }),
   };
 }
 
@@ -138,6 +161,18 @@ async function runDeep(): Promise<DiagnosticsPayload> {
 
   let evidence = keyword.value?.results[0] ?? null;
 
+  if (evidence) {
+    const requiredChunkFields = ["chunk_id", "document_id", "chunk_index", "chunk_type", "content", "page_start", "page_end"];
+    const missing = missingFields(evidence as unknown as Record<string, unknown>, requiredChunkFields);
+    checks.corpusChunkContract = {
+      ok: missing.length === 0,
+      detail: `Stage 5 v1 fields · ${requiredChunkFields.join(", ")}`,
+      ...(missing.length ? { error: `Search result is missing required document-view field(s): ${missing.join(", ")}` } : {}),
+    };
+  } else {
+    checks.corpusChunkContract = { ok: false, error: "No Search result was available to validate the v1 chunk contract" };
+  }
+
   if (config.hybrid) {
     const hybrid = await timed(() => searchRegdocs({ query, top: 1, mode: "hybrid", sort: "relevance" }));
     checks.hybridSearch = hybrid.value
@@ -161,18 +196,40 @@ async function runDeep(): Promise<DiagnosticsPayload> {
   if (evidence) {
     const document = await timed(() => getDocumentView({
       documentId: evidence!.document_id,
-      top: 1,
+      top: 2,
       page: evidence!.page_start ?? undefined,
     }));
-    checks.documentView = document.value
-      ? {
-          ...document.check,
-          ok: document.value.results.length > 0,
-          count: document.value.results.length,
-          detail: evidence.document_id,
-          ...(document.value.results.length ? {} : { error: "Document view returned no indexed chunks" }),
-        }
-      : document.check;
+    if (document.value) {
+      const rows = document.value.results;
+      const first = rows[0] as unknown as Record<string, unknown> | undefined;
+      const requiredViewerFields = ["chunk_id", "document_id", "chunk_index", "chunk_type", "content", "page_start", "page_end"];
+      const missing = missingFields(first ?? null, requiredViewerFields);
+      const wrongDocument = rows.some((row) => row.document_id !== evidence!.document_id);
+      const indexes = rows
+        .map((row) => row.chunk_index)
+        .filter((value): value is number => typeof value === "number");
+      const ordered = indexes.every((value, index) => index === 0 || value >= indexes[index - 1]);
+      const ok = rows.length > 0 && missing.length === 0 && !wrongDocument && ordered;
+      checks.documentView = {
+        ...document.check,
+        ok,
+        count: rows.length,
+        detail: `${evidence.document_id} · normalized HTML contract`,
+        ...(ok
+          ? {}
+          : {
+              error: rows.length === 0
+                ? "Document view returned no indexed chunks"
+                : missing.length
+                  ? `Document view is missing required field(s): ${missing.join(", ")}`
+                  : wrongDocument
+                    ? "Document view returned chunks from another document"
+                    : "Document view chunks are not in chunk_index order",
+            }),
+      };
+    } else {
+      checks.documentView = document.check;
+    }
   } else {
     checks.documentView = { ok: false, error: "No search result was available to test document retrieval" };
   }
@@ -190,11 +247,26 @@ async function runDeep(): Promise<DiagnosticsPayload> {
       }
     : foundry.check;
 
-  checks.entitiesIndex = await probeIndex(process.env.AZURE_SEARCH_ENTITIES_INDEX?.trim() || "regdocs-entities");
-  checks.relationsIndex = await probeIndex(process.env.AZURE_SEARCH_RELATIONS_INDEX?.trim() || "regdocs-relations");
-  checks.eventsIndex = await probeIndex(process.env.AZURE_SEARCH_EVENTS_INDEX?.trim() || "regdocs-events");
-  checks.claimsIndex = await probeIndex(process.env.AZURE_SEARCH_CLAIMS_INDEX?.trim() || "regdocs-claims");
-  checks.obligationsIndex = await probeIndex(process.env.AZURE_SEARCH_OBLIGATIONS_INDEX?.trim() || "regdocs-obligations");
+  checks.entitiesIndex = await probeIndex(
+    process.env.AZURE_SEARCH_ENTITIES_INDEX?.trim() || "regdocs-entities",
+    ["id", "entity_type", "name", "origin", "schema_version"],
+  );
+  checks.relationsIndex = await probeIndex(
+    process.env.AZURE_SEARCH_RELATIONS_INDEX?.trim() || "regdocs-relations",
+    ["id", "source_id", "target_id", "relationship_type", "confidence", "origin", "review_status"],
+  );
+  checks.eventsIndex = await probeIndex(
+    process.env.AZURE_SEARCH_EVENTS_INDEX?.trim() || "regdocs-events",
+    ["id", "event_type", "title", "summary", "date_start", "date_precision", "date_basis", "confidence", "origin", "review_status"],
+  );
+  checks.claimsIndex = await probeIndex(
+    process.env.AZURE_SEARCH_CLAIMS_INDEX?.trim() || "regdocs-claims",
+    ["id", "claim_type", "statement", "evidence_chunk_ids", "confidence", "origin", "review_status"],
+  );
+  checks.obligationsIndex = await probeIndex(
+    process.env.AZURE_SEARCH_OBLIGATIONS_INDEX?.trim() || "regdocs-obligations",
+    ["id", "obligation_type", "action", "evidence_chunk_ids", "confidence", "origin", "review_status"],
+  );
 
   const required = Object.values(checks).filter((check) => !check.skipped);
   return {
