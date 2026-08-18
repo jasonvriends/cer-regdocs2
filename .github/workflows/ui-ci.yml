@@ -1,0 +1,52 @@
+name: UI verification
+
+on:
+  pull_request:
+    paths:
+      - "ui/**"
+      - ".github/workflows/ui-ci.yml"
+  push:
+    branches: [master]
+    paths:
+      - "ui/**"
+      - ".github/workflows/ui-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
+  deployed-smoke:
+    runs-on: ubuntu-latest
+    needs: build
+    env:
+      ATLAS_BASE_URL: ${{ secrets.ATLAS_SMOKE_BASE_URL }}
+      ATLAS_SMOKE_QUERY: ${{ vars.ATLAS_SMOKE_QUERY }}
+      ATLAS_SMOKE_QUESTION: ${{ vars.ATLAS_SMOKE_QUESTION }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run deployed smoke tests when configured
+        if: env.ATLAS_BASE_URL != ''
+        working-directory: ui
+        run: npm run test:smoke
+      - name: Explain skipped deployed smoke test
+        if: env.ATLAS_BASE_URL == ''
+        run: echo "Set the ATLAS_SMOKE_BASE_URL repository secret to enable deployed integration tests."
