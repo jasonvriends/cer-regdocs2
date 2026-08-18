@@ -179,8 +179,14 @@ variable "chat_capacity" {
   default = 10
 }
 
-variable "image_tag" {
-  description = "Immutable source revision tag built by ACR Tasks."
+variable "ui_image_tag" {
+  description = "Immutable source revision tag for the REGDOCS Atlas UI image."
+  type        = string
+  default     = "bootstrap"
+}
+
+variable "indexer_image_tag" {
+  description = "Immutable source revision tag for the REGDOCS Atlas indexer image."
   type        = string
   default     = "bootstrap"
 }
