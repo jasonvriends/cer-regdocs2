@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Activity, CheckCircle2, LoaderCircle, XCircle } from "lucide-react";
+import { Activity, CheckCircle2, LoaderCircle, ShieldCheck, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 
- type Check = {
+type Check = {
   ok: boolean;
   ms?: number;
   skipped?: boolean;
@@ -25,6 +26,7 @@ type Diagnostics = {
     semantic: boolean;
     foundry: boolean;
     foundryModel: string | null;
+    operatorDiagnostics: boolean;
   };
   checks?: Record<string, Check>;
 };
@@ -42,6 +44,7 @@ function title(key: string) {
 
 export default function DiagnosticsPage() {
   const [data, setData] = useState<Diagnostics | null>(null);
+  const [token, setToken] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -49,10 +52,13 @@ export default function DiagnosticsPage() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`/api/diagnostics${deep ? "?deep=1" : ""}`, { cache: "no-store" });
+      const response = await fetch(`/api/diagnostics${deep ? "?deep=1" : ""}`, {
+        cache: "no-store",
+        ...(deep ? { headers: { Authorization: `Bearer ${token}` } } : {}),
+      });
       const payload = await response.json() as Diagnostics & { error?: string };
-      setData(payload);
       if (!response.ok && !payload.checks) throw new Error(payload.error || `Diagnostics returned ${response.status}`);
+      setData(payload);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Diagnostics failed");
     } finally {
@@ -70,25 +76,42 @@ export default function DiagnosticsPage() {
             <div className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">REGDOCS Atlas</div>
             <h1 className="mt-2 text-3xl font-semibold tracking-tight">System diagnostics</h1>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-              Shallow checks confirm configuration. Live checks make real requests to Azure AI Search, Microsoft Foundry, the document reader, and the intelligence indexes.
+              Shallow checks confirm configuration. Operator-authorized live checks make real requests to Azure AI Search, Microsoft Foundry, the document reader, and the intelligence indexes.
             </p>
           </div>
-          <Button disabled={loading} onClick={() => void load(true)}>
-            {loading ? <LoaderCircle className="size-4 animate-spin" /> : <Activity className="size-4" />}
-            Run live checks
-          </Button>
         </div>
+
+        <Card className="mt-6 gap-3 py-5">
+          <CardHeader className="px-5 py-0">
+            <CardTitle className="flex items-center gap-2 text-base"><ShieldCheck className="size-4" />Operator live checks</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3 px-5 py-0 sm:flex-row">
+            <Input
+              aria-label="Diagnostics operator token"
+              className="sm:max-w-md"
+              onChange={(event) => setToken(event.target.value)}
+              placeholder="Operator token"
+              type="password"
+              value={token}
+            />
+            <Button disabled={loading || !token || data?.configuration.operatorDiagnostics === false} onClick={() => void load(true)}>
+              {loading ? <LoaderCircle className="size-4 animate-spin" /> : <Activity className="size-4" />}
+              Run live checks
+            </Button>
+          </CardContent>
+        </Card>
 
         {error ? <div className="mt-6 rounded-xl border border-destructive/25 bg-destructive/5 p-4 text-sm text-destructive">{error}</div> : null}
 
         {data ? (
           <>
-            <div className="mt-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="mt-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
               {[
                 ["Azure AI Search", data.configuration.search],
                 ["Hybrid vectors", data.configuration.hybrid],
                 ["Semantic ranking", data.configuration.semantic],
                 ["Microsoft Foundry", data.configuration.foundry],
+                ["Operator diagnostics", data.configuration.operatorDiagnostics],
               ].map(([label, configured]) => (
                 <Card className="gap-2 py-4" key={String(label)}>
                   <CardHeader className="px-4 py-0"><CardTitle className="text-sm">{label}</CardTitle></CardHeader>
