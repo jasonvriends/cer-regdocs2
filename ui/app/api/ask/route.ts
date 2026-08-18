@@ -12,6 +12,7 @@ import {
   type AtlasSearchRequest,
   type AtlasSearchResult,
 } from "@/lib/azure-search";
+import { reportServerError, withErrorReference } from "@/lib/observability";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -314,9 +315,14 @@ export async function POST(request: Request) {
           } catch (error) {
             const foundryMs = msSince(foundryStarted);
             const failure = userFacingStreamFailure(error);
-            console.error("REGDOCS grounded answer stream failed", error);
+            const errorId = reportServerError("api.ask.stream", error, {
+              ...common,
+              foundryDeployment: configuredFoundryModel,
+              retryCount,
+            });
             askTelemetry({
               status: failure.code,
+              errorId,
               ...common,
               foundryUsed: true,
               foundryDeployment: configuredFoundryModel,
@@ -329,6 +335,8 @@ export async function POST(request: Request) {
             controller.enqueue(encoder.encode(ndjson({
               type: "error",
               ...failure,
+              error: withErrorReference(failure.error, errorId),
+              errorId,
               foundry: { used: true, deployment: configuredFoundryModel },
               retryCount,
               timings: { retrievalMs, foundryMs, totalMs: msSince(requestStarted) },
@@ -382,16 +390,23 @@ export async function POST(request: Request) {
       timings: { retrievalMs, foundryMs, totalMs },
     });
   } catch (error) {
-    console.error("REGDOCS grounded answer failed", error);
     const message = error instanceof Error ? error.message : "Grounded answer failed";
     const configurationError = message.includes("not configured");
+    const errorId = reportServerError("api.ask", error, {
+      scope: workspaceChunkIds.length ? "workspace" : "corpus",
+      totalMs: msSince(requestStarted),
+    });
     askTelemetry({
       status: configurationError ? "configuration_error" : "failed",
+      errorId,
       foundryUsed: false,
       totalMs: msSince(requestStarted),
     });
+    const userMessage = configurationError
+      ? "Microsoft Foundry or Azure AI Search is not configured."
+      : "The grounded answer could not be generated.";
     return Response.json(
-      { error: configurationError ? "Microsoft Foundry or Azure AI Search is not configured." : "The grounded answer could not be generated." },
+      { error: withErrorReference(userMessage, errorId), errorId },
       { status: configurationError ? 503 : 502 },
     );
   }
