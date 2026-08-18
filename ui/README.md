@@ -23,7 +23,8 @@ Azure Container App: app-regdocs-<suffix>
   |      - chat deployment
   |
   +--> Log Analytics
-         - Container App console logs
+         - UI/API console logs
+         - indexer job console logs
          - structured atlas.error events
          - Ask telemetry
 ```
@@ -49,7 +50,57 @@ The current workbench includes:
 - user-visible `ATLAS-...` references for server faults;
 - protected Log Analytics error lookup at `/diagnostics/errors`.
 
-See [`PRODUCT.md`](PRODUCT.md) for the product/capability contract and [`OPERATIONS.md`](OPERATIONS.md) for the focused operator runbook.
+See [`PRODUCT.md`](PRODUCT.md) for the product/capability contract and [`OPERATIONS.md`](OPERATIONS.md) for the short operator runbook.
+
+---
+
+# Operator quick reference
+
+These are the normal deployment and support commands:
+
+```bash
+# Normal UI/API update. Applies Terraform changes but never starts indexing.
+./ui/deploy/deploy.sh --ui-only
+
+# Terraform/RBAC/config only. No image build and no indexing.
+./ui/deploy/deploy.sh --infra-only
+
+# Full UI + indexer deployment.
+./ui/deploy/deploy.sh
+
+# Full deployment and explicitly start a fresh index publication.
+./ui/deploy/deploy.sh --restart-index
+
+# Read-only deployment/indexing status plus latest indexer Log Analytics output.
+./ui/deploy/deploy.sh --status
+
+# Read-only lookup for a user-visible server error.
+./ui/deploy/deploy.sh --error ATLAS-0123ABCD4567EF89
+```
+
+`--full` is accepted as an explicit alias for the default full mode:
+
+```bash
+./ui/deploy/deploy.sh --full
+```
+
+`--no-start` has been removed. It was ambiguous because an indexer image change could still trigger an indexing run. Use `--ui-only` or `--infra-only`, which have precise no-indexing behavior.
+
+## Which deployment command should I use?
+
+| Change | Command |
+|---|---|
+| Next.js UI or API code | `./ui/deploy/deploy.sh --ui-only` |
+| UI code plus Terraform/RBAC/env changes | `./ui/deploy/deploy.sh --ui-only` |
+| Terraform/RBAC/env only | `./ui/deploy/deploy.sh --infra-only` |
+| Search/Foundry infrastructure plus workloads | `./ui/deploy/deploy.sh` |
+| Indexer code changed | `./ui/deploy/deploy.sh` |
+| Normalized corpus changed and must be republished | `./ui/deploy/deploy.sh --restart-index` |
+| First deployment | `./ui/deploy/deploy.sh` |
+| Check current deployment/indexer status | `./ui/deploy/deploy.sh --status` |
+| Investigate a user error | `./ui/deploy/deploy.sh --error ATLAS-...` |
+
+The UI and indexer have separate Terraform image tags. A UI-only deployment advances only the UI tag, so a UI commit cannot accidentally look like an indexer change.
 
 ---
 
@@ -78,7 +129,7 @@ Foundry, Search, and Log Analytics calls use `DefaultAzureCredential` in Azure. 
 
 ---
 
-# Local development
+# Local validation
 
 Prerequisites:
 
@@ -93,68 +144,29 @@ cp .env.local.example .env.local
 npm run dev
 ```
 
-Before publishing UI code:
+Before publishing UI code, run the checks yourself:
 
 ```bash
 cd ui
 npm ci
 npm run typecheck
 npm run build
+
+cd deploy/terraform
+terraform fmt -check
+terraform init -backend=false -input=false
+terraform validate
+
+cd ../../..
+bash -n ui/deploy/deploy.sh
+./ui/deploy/deploy.sh --help
 ```
 
-GitHub Actions runs typecheck/build and validates Terraform configuration. It does not run a deployed smoke test.
+This repository intentionally does **not** use GitHub Actions for deployment or verification.
 
 ---
 
-# Production deployment from Azure Cloud Shell
-
-The deployment lives under [`ui/deploy/`](deploy/). It uses Terraform, Azure Blob remote state, ACR, Container Apps, Azure AI Search, Microsoft Foundry, and Log Analytics.
-
-## Deployment command syntax
-
-There are four normal commands:
-
-```bash
-# UI/API release. Reconciles Terraform, builds only regdocs-ui,
-# preserves the indexer image, and never starts indexing.
-./ui/deploy/deploy.sh --ui-only
-
-# Terraform/RBAC/config only. Builds no images and never starts indexing.
-./ui/deploy/deploy.sh --infra-only
-
-# Full deployment. Reconciles infrastructure, builds UI + indexer,
-# and starts indexing when the deployed indexer image changed.
-./ui/deploy/deploy.sh
-
-# Full deployment plus an explicit new indexing execution.
-./ui/deploy/deploy.sh --restart-index
-```
-
-`--full` is accepted as an explicit alias for the default full mode:
-
-```bash
-./ui/deploy/deploy.sh --full
-```
-
-`--no-start` has been removed. Its behavior was ambiguous because an indexer image change could still cause an indexing run. Use `--ui-only` or `--infra-only` instead.
-
-### Which command should I use?
-
-| Change | Command |
-|---|---|
-| Next.js UI or API code | `./ui/deploy/deploy.sh --ui-only` |
-| UI code plus Terraform/RBAC/env changes | `./ui/deploy/deploy.sh --ui-only` |
-| Terraform/RBAC/env only | `./ui/deploy/deploy.sh --infra-only` |
-| Search/Foundry infrastructure plus workloads | `./ui/deploy/deploy.sh` |
-| Indexer code changed | `./ui/deploy/deploy.sh` |
-| Normalized corpus changed and must be republished | `./ui/deploy/deploy.sh --restart-index` |
-| First deployment | `./ui/deploy/deploy.sh` |
-
-The UI and indexer now have separate Terraform image tags. A UI-only deployment advances only the UI tag, so Terraform does not treat a UI commit as an indexer change.
-
----
-
-# Terraform state and Cloud Shell
+# Terraform state and the stable `NAME_SUFFIX`
 
 Cloud Shell does not need to preserve a local `.tfstate` file. Terraform state is remote and normally lives at:
 
@@ -164,9 +176,13 @@ terraform/regdocs-atlas.tfstate
 
 inside the existing Blob container configured by `STORAGE_ACCOUNT` and `BLOB_CONTAINER`.
 
-Every deployment mode runs `terraform init -reconfigure` against that Blob.
+Every deployment mode reconnects to that Blob with `terraform init -reconfigure`.
 
-## Verify state before considering imports
+`NAME_SUFFIX` is a **stable installation identifier**, not a release/version number. Pick it once and reuse it for every update with the same remote Terraform state.
+
+Do not create a new suffix just because Cloud Shell restarted or because a deployment is being updated.
+
+## Verify the state before considering imports
 
 ```bash
 cd ~/cer-regdocs2
@@ -188,6 +204,22 @@ az storage blob show \
 If the Blob exists, **do not import the Azure resources**. Reuse the remote state.
 
 If the Blob is missing but the Azure resources still exist, stop before `terraform apply`. That is a state-recovery/import situation and the existing Azure resource IDs should be imported deliberately.
+
+## Accidental-delete protection
+
+Terraform has `prevent_destroy` on the three globally named resources most painful to recreate:
+
+```text
+Azure Container Registry
+Azure AI Search
+Microsoft Foundry account
+```
+
+A Terraform plan that would destroy or replace one of those resources fails instead of deleting it.
+
+This also protects the stable names behind `NAME_SUFFIX`. Foundry is soft-deleted by Azure after removal, so accidental deletion can temporarily prevent immediate recreation with the same name.
+
+An intentional teardown requires an explicit code change to remove the relevant `prevent_destroy` lifecycle first. Do not work around the guard by inventing a new `NAME_SUFFIX`.
 
 ---
 
@@ -211,7 +243,15 @@ BLOB_CONTAINER
 CONFIRM_BILLABLE_DEPLOYMENT=yes
 ```
 
-Before each deployment, update the checkout and export a valid container SAS:
+The production-safe embedding setting is:
+
+```text
+EMBEDDING_BATCH_SIZE="32"
+```
+
+The Terraform default and the cloud-indexer fallback are also 32. Larger values should not be reintroduced without testing because the larger request batches previously caused indexing failures.
+
+Before a deployment, update the checkout and export a valid container SAS:
 
 ```bash
 cd ~/cer-regdocs2
@@ -224,11 +264,13 @@ printf '\n'
 export AZURE_STORAGE_SAS_TOKEN="${AZURE_STORAGE_SAS_TOKEN#\?}"
 ```
 
-The SAS is used by Cloud Shell for the remote Terraform backend. A full deployment also uses it to verify normalized index inputs. Keep it out of Git and out of `config.env`.
+The SAS is used for the remote Terraform backend. Full deployments also use it to verify normalized index inputs. Keep it out of Git and out of `config.env`.
+
+Read-only `--status` and `--error` operations do **not** require the Storage SAS token.
 
 ---
 
-# UI-only deployment
+# Deploy or update only the UI
 
 For a normal UI/API release:
 
@@ -242,7 +284,7 @@ This mode:
 - reconciles infrastructure/RBAC/environment variables;
 - determines the currently deployed indexer image;
 - builds only `regdocs-ui:<git-sha>`;
-- deploys that UI image through Terraform;
+- deploys the UI through Terraform;
 - preserves the indexer image tag in Terraform state;
 - never builds the indexer;
 - never starts the indexing job.
@@ -253,13 +295,13 @@ If ACR is still building the UI image, the script exits safely. Run the same com
 ./ui/deploy/deploy.sh --ui-only
 ```
 
-This is the correct mode for the diagnostics/error-observability release because it applies the new Terraform RBAC/env changes and deploys the new UI without causing an indexing run.
+This is the normal update command for the Atlas web application.
 
 ---
 
-# Infrastructure-only deployment
+# Infrastructure-only update
 
-Use this when Terraform, RBAC, identities, Foundry configuration, Search configuration, or Container App environment values changed but no application image should change:
+Use this when Terraform, RBAC, identities, Foundry/Search settings, or Container App environment values changed but neither application image should move:
 
 ```bash
 ./ui/deploy/deploy.sh --infra-only
@@ -271,15 +313,15 @@ This mode builds no images and starts no indexing execution.
 
 # Full deployment and indexing
 
-For a first deployment or when indexer code changed:
+For a first deployment or an indexer-code change:
 
 ```bash
 ./ui/deploy/deploy.sh
 ```
 
-The script builds both immutable images with the current Git SHA. If the deployed indexer image changed, the full mode starts a new indexing execution unless one is already active.
+The script builds the UI and indexer images with the current Git SHA. A full deployment starts indexing when the deployed indexer image changed unless an execution is already active.
 
-When the normalized corpus changed and you explicitly need to republish it even if the indexer image did not change:
+When the normalized corpus changed and you explicitly need a fresh publication even if the indexer code did not change:
 
 ```bash
 ./ui/deploy/deploy.sh --restart-index
@@ -287,11 +329,61 @@ When the normalized corpus changed and you explicitly need to republish it even 
 
 Do not use `--restart-index` for an ordinary UI release.
 
-ACR builds and Container Apps indexing continue in Azure if Cloud Shell disconnects. Re-run the same command to resume/check the deployment.
+ACR builds and Container Apps indexing continue in Azure if Cloud Shell disconnects. Re-run the same deployment command to resume/check the deployment.
 
 ---
 
-# Diagnostics
+# Check indexing status and Log Analytics
+
+The easiest operator command is:
+
+```bash
+./ui/deploy/deploy.sh --status
+```
+
+This is read-only and does not require a Storage SAS token. It shows:
+
+```text
+current UI URL
+current UI image
+current indexer image
+recent indexer job executions
+latest execution status
+recent logs from the latest execution in Log Analytics
+```
+
+The status command queries `ContainerAppConsoleLogs_CL` using the latest Container Apps job execution name.
+
+If logs are empty immediately after a job starts, wait a few minutes for Log Analytics ingestion and run the same command again.
+
+## Direct Log Analytics query for the latest index execution
+
+```bash
+source ui/deploy/config.env
+az account set --subscription "$SUBSCRIPTION_ID"
+
+WORKSPACE_ID="$(az monitor log-analytics workspace show \
+  --resource-group "$RESOURCE_GROUP" \
+  --workspace-name "log-regdocs-${NAME_SUFFIX}" \
+  --query customerId \
+  --output tsv)"
+
+JOB_NAME="job-regdocs-${NAME_SUFFIX}"
+LATEST_EXECUTION="$(az containerapp job execution list \
+  --name "$JOB_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query 'sort_by(@, &properties.startTime)[-1].name' \
+  --output tsv)"
+
+az monitor log-analytics query \
+  --workspace "$WORKSPACE_ID" \
+  --analytics-query "ContainerAppConsoleLogs_CL | where TimeGenerated > ago(48h) | where ContainerGroupName_s startswith '$LATEST_EXECUTION' | project Time=TimeGenerated, Message=Log_s | order by Time asc | take 200" \
+  --output table
+```
+
+---
+
+# Diagnostics: is Search / Foundry actually working?
 
 Open:
 
@@ -299,9 +391,22 @@ Open:
 https://<atlas-host>/diagnostics
 ```
 
-The page first shows inexpensive configuration checks. Choosing **Run live checks** performs real server-side checks against Azure AI Search, hybrid/semantic retrieval, Microsoft Foundry grounded inference, the HTML document reader backend, and Stage 6 intelligence indexes.
+The initial page shows inexpensive configuration checks. Choose **Run live checks** to perform actual server-side calls to:
 
-These are operator-initiated diagnostics, not an automated smoke-test suite.
+```text
+Azure AI Search keyword retrieval
+hybrid/vector retrieval
+semantic ranking when configured
+HTML document-view retrieval
+Microsoft Foundry grounded inference
+Stage 6 entities index
+Stage 6 relations index
+Stage 6 events index
+```
+
+These are operator-initiated diagnostics. They are not an automated smoke-test suite.
+
+Ask also emits structured telemetry without question text, including retrieval mode, hybrid fallback, evidence count, whether Foundry was used, Foundry model/deployment, citation validation, retries, Search time, Foundry time, and total time.
 
 ---
 
@@ -313,11 +418,17 @@ Real server faults from Ask, Search, document view, evidence lookup, timeline, a
 ATLAS-0123ABCD4567EF89
 ```
 
-The user sees a safe message containing the reference. The same ID is written as a structured `atlas.error` event to Container Apps console output and flows into Log Analytics.
+The same ID is written as a structured `atlas.error` event to Container Apps console output and flows to Log Analytics.
 
-Normal validation errors, no-result responses, 404s, and rate limits are not treated as server faults. Ask question text is not added to structured error events or Ask telemetry.
+The quickest operator lookup is:
 
-## Operator lookup URL
+```bash
+./ui/deploy/deploy.sh --error ATLAS-0123ABCD4567EF89
+```
+
+This is read-only and does not require a Storage SAS token.
+
+You can also open:
 
 ```text
 https://<atlas-host>/diagnostics/errors?errorId=ATLAS-0123ABCD4567EF89
@@ -330,9 +441,9 @@ terraform -chdir=ui/deploy/terraform output -raw diagnostics_operator_token
 printf '\n'
 ```
 
-The output is sensitive. Do not put the token in client-side variables, screenshots, tickets, or Git.
+The token is sensitive. Do not put it in client-side variables, screenshots, tickets, or Git.
 
-## Direct Log Analytics query
+## Direct KQL error query
 
 ```kusto
 ContainerAppConsoleLogs_CL
@@ -342,30 +453,37 @@ ContainerAppConsoleLogs_CL
 | order by TimeGenerated desc
 ```
 
-When investigating a user report, the exact `ATLAS-...` reference and approximate time are normally enough to find the underlying exception.
+Normal validation errors, no-result responses, 404s, and rate limits are not treated as server faults. Ask question text is not added to structured error or Ask telemetry events.
 
 ---
 
-# Ask / Foundry observability
+# Public URL
 
-Ask emits structured telemetry without question text. It records operational fields including:
+REGDOCS Atlas runs on **Azure Container Apps**, not Azure App Service. The Azure-provided hostname therefore follows the Container Apps pattern and is not an `azurewebsites.net` address.
 
-```text
-retrieval mode
-hybrid -> keyword fallback
-evidence count
-Foundry used
-Foundry deployment/model
-citation-validation status
-retry count
-Search time
-Foundry time
-total time
+Get the current public URL with:
+
+```bash
+./ui/deploy/deploy.sh --status
 ```
 
-This lets operators distinguish retrieval failures from Foundry generation failures and citation-validation failures.
+The generated address looks roughly like:
 
-If Foundry fails after Search retrieved evidence, Atlas keeps those source passages visible.
+```text
+https://app-regdocs-<suffix>.<environment-id>.<region>.azurecontainerapps.io
+```
+
+Azure controls the `<environment-id>.<region>.azurecontainerapps.io` suffix, so the platform-provided hostname cannot be reduced to exactly `regdocsatlas.azurecontainerapps.io`.
+
+If you want a genuinely simple address, use a custom domain that you own, for example:
+
+```text
+https://regdocsatlas.example.com
+```
+
+Container Apps supports custom domains and managed TLS certificates. For a subdomain, point a CNAME directly at the generated Container Apps FQDN and add the required validation TXT record before binding the hostname.
+
+The existing Container App name is intentionally left unchanged during normal updates because renaming it would replace the app. A custom domain gives a stable friendly URL without replacing the workload.
 
 ---
 
@@ -390,10 +508,10 @@ The HTML view is optimized for search, accessibility, reading, and evidence coll
 # Operational files
 
 ```text
-ui/README.md                  UI architecture, deployment, diagnostics, errors
-ui/OPERATIONS.md              focused error/operations runbook
+ui/README.md                  UI architecture, deployment, status, diagnostics, errors
+ui/OPERATIONS.md              short operator command/runbook
 ui/deploy/README.md           Cloud Shell/Terraform deployment details
-ui/deploy/deploy.sh           resumable deployment entry point
+ui/deploy/deploy.sh           deploy/update/status/error command entry point
 ui/deploy/config.env          ignored local deployment configuration
 ui/deploy/terraform/          Azure infrastructure and RBAC
 ```
