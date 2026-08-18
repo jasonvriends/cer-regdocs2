@@ -1,4 +1,5 @@
 import { getDocumentView } from "@/lib/azure-search";
+import { publicErrorResponse } from "@/lib/observability";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,16 +37,16 @@ export async function GET(request: Request) {
     }
     return Response.json(response);
   } catch (error) {
-    console.error("REGDOCS document view failed", error);
     const message = error instanceof Error ? error.message : "Document view failed";
     const configurationError = message.includes("AZURE_SEARCH_ENDPOINT");
-    return Response.json(
-      {
-        error: configurationError
-          ? "Azure AI Search is not configured for this Atlas instance."
-          : "The document view could not be loaded.",
-      },
-      { status: configurationError ? 503 : 502 },
+    return publicErrorResponse(
+      "api.document-view",
+      error,
+      configurationError
+        ? "Azure AI Search is not configured for this Atlas instance."
+        : "The document view could not be loaded.",
+      configurationError ? 503 : 502,
+      { documentId },
     );
   }
 }
