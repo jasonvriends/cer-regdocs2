@@ -10,44 +10,45 @@ MODE_SET=false
 OPERATION="deploy"
 ERROR_ID=""
 RESTART_INDEX=false
+RESTART_INTELLIGENCE=false
 
 usage() {
   cat <<'EOF'
 Usage:
   ./ui/deploy/deploy.sh --validate
   ./ui/deploy/deploy.sh [--config PATH] --plan
-  ./ui/deploy/deploy.sh [--config PATH] [--full|--ui-only|--infra-only] [--restart-index]
+  ./ui/deploy/deploy.sh [--config PATH] [--full|--ui-only|--infra-only] [--restart-index] [--restart-intelligence]
   ./ui/deploy/deploy.sh [--config PATH] --status
   ./ui/deploy/deploy.sh [--config PATH] --error ATLAS-0123ABCD4567EF89
 
 Safe to run again after a Cloud Shell timeout. Terraform state is remote, ACR
-builds continue in Azure, and completed work is reused.
+builds and Container Apps jobs continue in Azure, and completed work is reused.
 
 Preflight:
-  --validate        Run local Bash, Terraform, Python, TypeScript, and Next.js
-                    validation. Makes no Azure API calls and needs no SAS token.
-  --plan            Read the existing remote Terraform state and show the
-                    infrastructure plan without applying it or building images.
+  --validate             Run local Bash, Terraform, Python, TypeScript, and
+                         Next.js validation. No Azure calls and no SAS required.
+  --plan                 Read remote Terraform state and show the infrastructure
+                         plan without applying, building, or starting jobs.
 
 Deployment modes:
-  --full            Reconcile infrastructure, build/deploy UI and indexer, and
-                    start indexing when the indexer changed. This is the default.
-  --ui-only         Reconcile infrastructure, build/deploy only the UI, preserve
-                    the deployed indexer image, and never start the indexing job.
-  --infra-only      Reconcile Terraform/RBAC/config only. Build no images and
-                    never start the indexing job.
+  --full                 Reconcile infrastructure, build/deploy UI + publisher
+                         image, and start Stage 5 indexing when the publisher
+                         image changed. This is the default.
+  --ui-only              Reconcile infrastructure and deploy only the UI. Never
+                         builds or starts Stage 5/6 jobs.
+  --infra-only           Reconcile Terraform/RBAC/config only. Builds no images
+                         and starts no jobs.
+
+Explicit publication:
+  --restart-index        With full mode, force a new Stage 5 hybrid-index run.
+  --restart-intelligence With full mode, start the resumable Stage 6 Foundry
+                         extraction/publication job. This can incur model costs.
 
 Read-only operations:
-  --status          Show the live UI URL/image, indexer image, recent job
-                    executions, and recent logs for the latest execution from
-                    Log Analytics. No SAS token is required.
-  --error ID        Find one ATLAS-... server error in Log Analytics. No SAS
-                    token is required.
-
-Other options:
-  --restart-index   With a full deployment, force a new indexing execution even
-                    when the latest execution already succeeded.
-  --config PATH     Read deployment settings from PATH (default: config.env).
+  --status               Show UI/publisher images plus recent Stage 5 and Stage 6
+                         executions and Log Analytics output. No SAS required.
+  --error ID             Find one ATLAS-... server error in Log Analytics.
+  --config PATH          Read settings from PATH (default: config.env).
 
 Examples:
   ./ui/deploy/deploy.sh --validate
@@ -56,6 +57,8 @@ Examples:
   ./ui/deploy/deploy.sh --infra-only
   ./ui/deploy/deploy.sh
   ./ui/deploy/deploy.sh --restart-index
+  ./ui/deploy/deploy.sh --restart-intelligence
+  ./ui/deploy/deploy.sh --restart-index --restart-intelligence
   ./ui/deploy/deploy.sh --status
   ./ui/deploy/deploy.sh --error ATLAS-0123ABCD4567EF89
 EOF
@@ -79,7 +82,7 @@ set_mode() {
 set_operation() {
   local requested="$1"
   [[ "$OPERATION" == "deploy" ]] || fail "Choose only one operation: --validate, --plan, --status, or --error."
-  [[ "$MODE_SET" == false && "$RESTART_INDEX" == false ]] || fail "$requested cannot be combined with deployment-mode flags."
+  [[ "$MODE_SET" == false && "$RESTART_INDEX" == false && "$RESTART_INTELLIGENCE" == false ]] || fail "$requested cannot be combined with deployment-mode flags."
   OPERATION="$requested"
 }
 
@@ -111,8 +114,13 @@ while (($#)); do
       shift
       ;;
     --restart-index)
-      [[ "$OPERATION" == "deploy" ]] || fail "--restart-index cannot be combined with --validate, --plan, --status, or --error."
+      [[ "$OPERATION" == "deploy" ]] || fail "--restart-index cannot be combined with read-only/preflight operations."
       RESTART_INDEX=true
+      shift
+      ;;
+    --restart-intelligence)
+      [[ "$OPERATION" == "deploy" ]] || fail "--restart-intelligence cannot be combined with read-only/preflight operations."
+      RESTART_INTELLIGENCE=true
       shift
       ;;
     --status)
@@ -140,8 +148,8 @@ while (($#)); do
   esac
 done
 
-if [[ "$RESTART_INDEX" == true && "$MODE" != "full" ]]; then
-  fail "--restart-index can only be used with the full deployment mode."
+if [[ ( "$RESTART_INDEX" == true || "$RESTART_INTELLIGENCE" == true ) && "$MODE" != "full" ]]; then
+  fail "--restart-index and --restart-intelligence can only be used with full deployment mode."
 fi
 
 log() {
@@ -171,6 +179,40 @@ image_tag_from_reference() {
   local image="$1"
   [[ -n "$image" ]] || return 0
   printf '%s' "${image##*:}"
+}
+
+show_job_executions() {
+  local job="$1"
+  local label="$2"
+  echo
+  echo "Recent $label executions:"
+  az containerapp job execution list \
+    --name "$job" \
+    --resource-group "$RESOURCE_GROUP" \
+    --query 'sort_by(@, &properties.startTime)[-10:].{Name:name,Status:properties.status,Started:properties.startTime,Ended:properties.endTime}' \
+    --output table \
+    --only-show-errors 2>/dev/null || echo "No $label job/executions found."
+}
+
+show_latest_job_logs() {
+  local job="$1"
+  local label="$2"
+  local execution
+  execution="$(az containerapp job execution list \
+    --name "$job" \
+    --resource-group "$RESOURCE_GROUP" \
+    --query 'sort_by(@, &properties.startTime)[-1].name' \
+    --output tsv \
+    --only-show-errors 2>/dev/null || true)"
+  if [[ -n "$execution" ]]; then
+    echo
+    echo "Recent Log Analytics output for $label execution $execution:"
+    az monitor log-analytics query \
+      --workspace "$WORKSPACE_ID" \
+      --analytics-query "ContainerAppConsoleLogs_CL | where TimeGenerated > ago(48h) | where ContainerGroupName_s startswith '$execution' | project Time=TimeGenerated, Message=Log_s | order by Time asc | take 200" \
+      --output table \
+      --only-show-errors 2>/dev/null || echo "Logs are not available yet. Log Analytics ingestion can take a few minutes."
+  fi
 }
 
 if [[ "$OPERATION" == "validate" ]]; then
@@ -223,6 +265,7 @@ STORAGE_SUBSCRIPTION_ID="${STORAGE_SUBSCRIPTION_ID:-$SUBSCRIPTION_ID}"
 EMBEDDING_BATCH_SIZE="${EMBEDDING_BATCH_SIZE:-32}"
 APP_NAME="app-regdocs-${NAME_SUFFIX:-}"
 JOB_NAME="job-regdocs-${NAME_SUFFIX:-}"
+INTELLIGENCE_JOB_NAME="job-regdocs-intelligence-${NAME_SUFFIX:-}"
 LOG_WORKSPACE_NAME="log-regdocs-${NAME_SUFFIX:-}"
 
 [[ "$EMBEDDING_BATCH_SIZE" =~ ^[0-9]+$ ]] || fail "EMBEDDING_BATCH_SIZE must be a whole number."
@@ -232,8 +275,6 @@ if (( EMBEDDING_BATCH_SIZE > 32 )); then
   EMBEDDING_BATCH_SIZE=32
 fi
 
-# Read-only status/error operations deliberately do not require Terraform state
-# access or a Storage SAS token.
 if [[ "$OPERATION" == "status" || "$OPERATION" == "error" ]]; then
   for name in SUBSCRIPTION_ID NAME_SUFFIX RESOURCE_GROUP; do
     require_value "$name"
@@ -264,56 +305,22 @@ if [[ "$OPERATION" == "status" || "$OPERATION" == "error" ]]; then
     exit 0
   fi
 
-  UI_FQDN="$(az containerapp show \
-    --name "$APP_NAME" \
-    --resource-group "$RESOURCE_GROUP" \
-    --query properties.configuration.ingress.fqdn \
-    --output tsv \
-    --only-show-errors 2>/dev/null || true)"
-  UI_IMAGE="$(az containerapp show \
-    --name "$APP_NAME" \
-    --resource-group "$RESOURCE_GROUP" \
-    --query 'properties.template.containers[0].image' \
-    --output tsv \
-    --only-show-errors 2>/dev/null || true)"
-  INDEXER_IMAGE="$(az containerapp job show \
-    --name "$JOB_NAME" \
-    --resource-group "$RESOURCE_GROUP" \
-    --query 'properties.template.containers[0].image' \
-    --output tsv \
-    --only-show-errors 2>/dev/null || true)"
+  UI_FQDN="$(az containerapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" --query properties.configuration.ingress.fqdn --output tsv --only-show-errors 2>/dev/null || true)"
+  UI_IMAGE="$(az containerapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" --query 'properties.template.containers[0].image' --output tsv --only-show-errors 2>/dev/null || true)"
+  INDEXER_IMAGE="$(az containerapp job show --name "$JOB_NAME" --resource-group "$RESOURCE_GROUP" --query 'properties.template.containers[0].image' --output tsv --only-show-errors 2>/dev/null || true)"
+  INTELLIGENCE_IMAGE="$(az containerapp job show --name "$INTELLIGENCE_JOB_NAME" --resource-group "$RESOURCE_GROUP" --query 'properties.template.containers[0].image' --output tsv --only-show-errors 2>/dev/null || true)"
 
   log "REGDOCS Atlas deployment status"
   [[ -n "$UI_FQDN" ]] && echo "UI: https://$UI_FQDN" || echo "UI: not found"
   [[ -n "$UI_IMAGE" ]] && echo "UI image: $UI_IMAGE"
-  [[ -n "$INDEXER_IMAGE" ]] && echo "Indexer image: $INDEXER_IMAGE"
+  [[ -n "$INDEXER_IMAGE" ]] && echo "Stage 5 image: $INDEXER_IMAGE"
+  [[ -n "$INTELLIGENCE_IMAGE" ]] && echo "Stage 6 image: $INTELLIGENCE_IMAGE"
   echo "Log Analytics: $LOG_WORKSPACE_NAME ($WORKSPACE_ID)"
 
-  echo
-  echo "Recent index executions:"
-  az containerapp job execution list \
-    --name "$JOB_NAME" \
-    --resource-group "$RESOURCE_GROUP" \
-    --query 'sort_by(@, &properties.startTime)[-10:].{Name:name,Status:properties.status,Started:properties.startTime,Ended:properties.endTime}' \
-    --output table \
-    --only-show-errors 2>/dev/null || echo "No indexer job/executions found."
-
-  LATEST_EXECUTION_NAME="$(az containerapp job execution list \
-    --name "$JOB_NAME" \
-    --resource-group "$RESOURCE_GROUP" \
-    --query 'sort_by(@, &properties.startTime)[-1].name' \
-    --output tsv \
-    --only-show-errors 2>/dev/null || true)"
-
-  if [[ -n "$LATEST_EXECUTION_NAME" ]]; then
-    echo
-    echo "Recent Log Analytics output for $LATEST_EXECUTION_NAME:"
-    az monitor log-analytics query \
-      --workspace "$WORKSPACE_ID" \
-      --analytics-query "ContainerAppConsoleLogs_CL | where TimeGenerated > ago(48h) | where ContainerGroupName_s startswith '$LATEST_EXECUTION_NAME' | project Time=TimeGenerated, Message=Log_s | order by Time asc | take 200" \
-      --output table \
-      --only-show-errors 2>/dev/null || echo "Logs are not available yet. Log Analytics ingestion can take a few minutes."
-  fi
+  show_job_executions "$JOB_NAME" "Stage 5 index"
+  show_latest_job_logs "$JOB_NAME" "Stage 5 index"
+  show_job_executions "$INTELLIGENCE_JOB_NAME" "Stage 6 intelligence"
+  show_latest_job_logs "$INTELLIGENCE_JOB_NAME" "Stage 6 intelligence"
   exit 0
 fi
 
@@ -329,11 +336,9 @@ if [[ "$OPERATION" == "deploy" ]]; then
     "Set CONFIRM_BILLABLE_DEPLOYMENT=yes after reviewing the billable Azure resources."
 fi
 [[ -n "${AZURE_STORAGE_SAS_TOKEN:-}" ]] || fail \
-  "Export AZURE_STORAGE_SAS_TOKEN. It is used only by Cloud Shell to access remote Terraform state and, for full deployments, verify index inputs."
-[[ "$NAME_SUFFIX" =~ ^[a-z0-9]{3,12}$ ]] || fail \
-  "NAME_SUFFIX must be 3-12 lowercase letters and digits."
-[[ "$STORAGE_ACCOUNT" =~ ^[a-z0-9]{3,24}$ ]] || fail \
-  "STORAGE_ACCOUNT must be 3-24 lowercase letters and digits."
+  "Export AZURE_STORAGE_SAS_TOKEN. It is used only by Cloud Shell to access remote Terraform state and verify publication inputs."
+[[ "$NAME_SUFFIX" =~ ^[a-z0-9]{3,12}$ ]] || fail "NAME_SUFFIX must be 3-12 lowercase letters and digits."
+[[ "$STORAGE_ACCOUNT" =~ ^[a-z0-9]{3,24}$ ]] || fail "STORAGE_ACCOUNT must be 3-24 lowercase letters and digits."
 
 for command in az git terraform; do
   require_command "$command"
@@ -351,8 +356,12 @@ export ARM_SAS_TOKEN="$SAS_TOKEN"
 export ARM_SUBSCRIPTION_ID="$SUBSCRIPTION_ID"
 
 if [[ "$OPERATION" == "deploy" && "$MODE" == "full" ]]; then
-  log "Verifying normalized Blob inputs required by the indexing job"
-  for filename in chunks.jsonl provenance.jsonl; do
+  log "Verifying normalized Blob inputs required by publication jobs"
+  REQUIRED_FILES=(chunks.jsonl provenance.jsonl)
+  if [[ "$RESTART_INTELLIGENCE" == true ]]; then
+    REQUIRED_FILES+=(documents.jsonl)
+  fi
+  for filename in "${REQUIRED_FILES[@]}"; do
     blob_name="${NORMALIZED_BLOB_PREFIX%/}/$filename"
     az storage blob show \
       --account-name "$STORAGE_ACCOUNT" \
@@ -362,7 +371,7 @@ if [[ "$OPERATION" == "deploy" && "$MODE" == "full" ]]; then
       --query '[name,properties.contentLength]' \
       --output tsv \
       --only-show-errors >/dev/null || fail \
-        "Cannot read $blob_name using the supplied SAS token. Check its expiry, permissions, IP restrictions, and Storage firewall."
+        "Cannot read $blob_name using the supplied SAS token. Check expiry, permissions, IP restrictions, and Storage firewall."
     echo "Verified $blob_name"
   done
 fi
@@ -381,7 +390,6 @@ export TF_VAR_normalized_blob_prefix="$NORMALIZED_BLOB_PREFIX"
 export TF_VAR_embedding_cache_blob="$EMBEDDING_CACHE_BLOB"
 CURRENT_IMAGE_TAG="$(git -C "$REPOSITORY_ROOT" rev-parse --short=12 HEAD)"
 
-# Optional config.env overrides map directly to Terraform variables.
 declare -A TF_OVERRIDES=(
   [SEARCH_SKU]=search_sku
   [SEARCH_PARTITIONS]=search_partition_count
@@ -430,23 +438,13 @@ PREVIOUS_UI_IMAGE_TAG="$(terraform_output deployed_ui_image_tag)"
 PREVIOUS_INDEXER_IMAGE_TAG="$(terraform_output deployed_indexer_image_tag)"
 
 if [[ "$UI_IN_STATE" == true ]]; then
-  ACTUAL_UI_IMAGE="$(az containerapp show \
-    --name "$APP_NAME" \
-    --resource-group "$RESOURCE_GROUP" \
-    --query 'properties.template.containers[0].image' \
-    --output tsv \
-    --only-show-errors 2>/dev/null || true)"
+  ACTUAL_UI_IMAGE="$(az containerapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" --query 'properties.template.containers[0].image' --output tsv --only-show-errors 2>/dev/null || true)"
   ACTUAL_UI_TAG="$(image_tag_from_reference "$ACTUAL_UI_IMAGE")"
   [[ -n "$ACTUAL_UI_TAG" ]] && PREVIOUS_UI_IMAGE_TAG="$ACTUAL_UI_TAG"
 fi
 
 if [[ "$INDEXER_IN_STATE" == true ]]; then
-  ACTUAL_INDEXER_IMAGE="$(az containerapp job show \
-    --name "$JOB_NAME" \
-    --resource-group "$RESOURCE_GROUP" \
-    --query 'properties.template.containers[0].image' \
-    --output tsv \
-    --only-show-errors 2>/dev/null || true)"
+  ACTUAL_INDEXER_IMAGE="$(az containerapp job show --name "$JOB_NAME" --resource-group "$RESOURCE_GROUP" --query 'properties.template.containers[0].image' --output tsv --only-show-errors 2>/dev/null || true)"
   ACTUAL_INDEXER_TAG="$(image_tag_from_reference "$ACTUAL_INDEXER_IMAGE")"
   [[ -n "$ACTUAL_INDEXER_TAG" ]] && PREVIOUS_INDEXER_IMAGE_TAG="$ACTUAL_INDEXER_TAG"
 fi
@@ -455,12 +453,12 @@ fi
 [[ -n "$PREVIOUS_INDEXER_IMAGE_TAG" ]] || PREVIOUS_INDEXER_IMAGE_TAG="$LEGACY_IMAGE_TAG"
 
 if [[ "$MODE" == "ui-only" && ( "$UI_IN_STATE" != true || "$INDEXER_IN_STATE" != true ) ]]; then
-  fail "--ui-only requires an existing deployed UI and indexer. Use a full deployment first."
+  fail "--ui-only requires an existing deployed UI and publisher image. Use a full deployment first."
 fi
 
 if [[ "$UI_IN_STATE" == true || "$INDEXER_IN_STATE" == true ]]; then
   [[ -n "$PREVIOUS_UI_IMAGE_TAG" ]] || fail "Could not determine the currently deployed UI image tag."
-  [[ -n "$PREVIOUS_INDEXER_IMAGE_TAG" ]] || fail "Could not determine the currently deployed indexer image tag."
+  [[ -n "$PREVIOUS_INDEXER_IMAGE_TAG" ]] || fail "Could not determine the currently deployed publisher image tag."
   FOUNDATION_DEPLOY_WORKLOADS=true
   FOUNDATION_UI_IMAGE_TAG="$PREVIOUS_UI_IMAGE_TAG"
   FOUNDATION_INDEXER_IMAGE_TAG="$PREVIOUS_INDEXER_IMAGE_TAG"
@@ -478,7 +476,7 @@ if [[ "$OPERATION" == "plan" ]]; then
     -var="ui_image_tag=$FOUNDATION_UI_IMAGE_TAG" \
     -var="indexer_image_tag=$FOUNDATION_INDEXER_IMAGE_TAG"
   echo
-  echo "Plan only: no Terraform changes were applied, no images were built, and no indexing job was started."
+  echo "Plan only: no Terraform changes applied, no images built, and no jobs started."
   exit 0
 fi
 
@@ -493,34 +491,25 @@ if [[ "$MODE" == "infra-only" ]]; then
   UI_URL="$(terraform_output ui_url)"
   log "Infrastructure reconciliation complete"
   [[ -n "$UI_URL" ]] && echo "UI: $UI_URL"
-  echo "No images were built and the indexing job was not started."
+  echo "No images were built and no publication jobs were started."
   exit 0
 fi
 
 ACR_NAME="$(terraform_output container_registry_name)"
 ACR_LOGIN_SERVER="$(terraform_output container_registry_login_server)"
-[[ -n "$ACR_NAME" && -n "$ACR_LOGIN_SERVER" ]] || fail "Terraform did not return the Container Registry outputs."
+[[ -n "$ACR_NAME" && -n "$ACR_LOGIN_SERVER" ]] || fail "Terraform did not return Container Registry outputs."
 
 UI_IMAGE="regdocs-ui:$CURRENT_IMAGE_TAG"
 INDEXER_IMAGE="regdocs-indexer:$CURRENT_IMAGE_TAG"
 
 image_exists() {
-  az acr repository show \
-    --name "$ACR_NAME" \
-    --image "$1" \
-    --output none \
-    --only-show-errors 2>/dev/null
+  az acr repository show --name "$ACR_NAME" --image "$1" --output none --only-show-errors 2>/dev/null
 }
 
 build_active() {
   local image="$1"
   local active
-  active="$(az acr task list-runs \
-    --registry "$ACR_NAME" \
-    --image "$image" \
-    --query "[?status=='Queued' || status=='Running' || status=='Started'] | length(@)" \
-    --output tsv \
-    --only-show-errors 2>/dev/null || echo 0)"
+  active="$(az acr task list-runs --registry "$ACR_NAME" --image "$image" --query "[?status=='Queued' || status=='Running' || status=='Started'] | length(@)" --output tsv --only-show-errors 2>/dev/null || echo 0)"
   [[ "${active:-0}" -gt 0 ]]
 }
 
@@ -538,43 +527,28 @@ queue_build() {
   log "Queuing server-side ACR build for $image"
   if ! (
     cd "$REPOSITORY_ROOT"
-    az acr build \
-      --registry "$ACR_NAME" \
-      --image "$image" \
-      --file "$dockerfile" \
-      --no-wait \
-      --no-logs \
-      . \
-      --only-show-errors \
-      --output none
+    az acr build --registry "$ACR_NAME" --image "$image" --file "$dockerfile" --no-wait --no-logs . --only-show-errors --output none
   ); then
-    fail "Failed to queue the ACR build for $image"
+    fail "Failed to queue ACR build for $image"
   fi
   return 0
 }
 
 show_recent_builds() {
-  az acr task list-runs \
-    --registry "$ACR_NAME" \
-    --top 5 \
-    --query '[].{Image:outputImages[0],Status:status,Started:startTime}' \
-    --output table \
-    --only-show-errors || true
+  az acr task list-runs --registry "$ACR_NAME" --top 5 --query '[].{Image:outputImages[0],Status:status,Started:startTime}' --output table --only-show-errors || true
 }
 
 if [[ "$MODE" == "ui-only" ]]; then
   QUEUED=false
   queue_build "$UI_IMAGE" "ui/deploy/containers/ui.Dockerfile" && QUEUED=true
-
   if [[ "$QUEUED" == true ]] || ! image_exists "$UI_IMAGE"; then
     log "ACR is building the UI image independently of this Cloud Shell session"
     show_recent_builds
-    echo
-    echo "Run this same --ui-only command again after the build finishes."
+    echo "Run the same --ui-only command again after the build finishes."
     exit 0
   fi
 
-  log "Deploying only the UI; preserving the indexer image and execution state"
+  log "Deploying only the UI; preserving Stage 5/6 publisher image and execution state"
   terraform -chdir="$TERRAFORM_DIR" apply -auto-approve -input=false \
     -lock-timeout=5m \
     -var="deploy_workloads=true" \
@@ -585,8 +559,8 @@ if [[ "$MODE" == "ui-only" ]]; then
   log "UI-only deployment complete"
   echo "UI: $UI_URL"
   echo "UI image tag: $CURRENT_IMAGE_TAG"
-  echo "Indexer image tag preserved: $PREVIOUS_INDEXER_IMAGE_TAG"
-  echo "The indexing job was not built, changed, or started."
+  echo "Publisher image tag preserved: $PREVIOUS_INDEXER_IMAGE_TAG"
+  echo "No Stage 5 or Stage 6 job was built or started."
   exit 0
 fi
 
@@ -597,12 +571,11 @@ queue_build "$INDEXER_IMAGE" "ui/deploy/containers/indexer.Dockerfile" && QUEUED
 if [[ "$QUEUED" == true ]] || ! image_exists "$UI_IMAGE" || ! image_exists "$INDEXER_IMAGE"; then
   log "ACR is building the images independently of this Cloud Shell session"
   show_recent_builds
-  echo
-  echo "Run this same full deployment command again after the builds finish."
+  echo "Run the same full deployment command again after the builds finish."
   exit 0
 fi
 
-log "Deploying the UI and indexing job from completed ACR images"
+log "Deploying UI plus Stage 5/6 jobs from completed ACR images"
 terraform -chdir="$TERRAFORM_DIR" apply -auto-approve -input=false \
   -lock-timeout=5m \
   -var="deploy_workloads=true" \
@@ -610,18 +583,15 @@ terraform -chdir="$TERRAFORM_DIR" apply -auto-approve -input=false \
   -var="indexer_image_tag=$CURRENT_IMAGE_TAG"
 
 JOB_NAME="$(terraform_output index_job_name)"
+INTELLIGENCE_JOB_NAME="$(terraform_output intelligence_job_name)"
 UI_URL="$(terraform_output ui_url)"
 
 log "Deployment status"
 echo "UI: $UI_URL"
-echo "Indexer job: $JOB_NAME"
+echo "Stage 5 job: $JOB_NAME"
+echo "Stage 6 intelligence job: $INTELLIGENCE_JOB_NAME"
 
-LATEST_EXECUTION="$(az containerapp job execution list \
-  --name "$JOB_NAME" \
-  --resource-group "$RESOURCE_GROUP" \
-  --query 'sort_by(@, &properties.startTime)[-1].[properties.status,name,properties.template.containers[0].image]' \
-  --output tsv \
-  --only-show-errors 2>/dev/null || true)"
+LATEST_EXECUTION="$(az containerapp job execution list --name "$JOB_NAME" --resource-group "$RESOURCE_GROUP" --query 'sort_by(@, &properties.startTime)[-1].[properties.status,name,properties.template.containers[0].image]' --output tsv --only-show-errors 2>/dev/null || true)"
 LATEST_STATUS="$(cut -f1 <<<"$LATEST_EXECUTION")"
 LATEST_NAME="$(cut -f2 <<<"$LATEST_EXECUTION")"
 LATEST_IMAGE="$(cut -f3 <<<"$LATEST_EXECUTION")"
@@ -629,38 +599,41 @@ EXPECTED_INDEXER_IMAGE="$ACR_LOGIN_SERVER/$INDEXER_IMAGE"
 
 case "$LATEST_STATUS" in
   Running|Processing)
-    echo "Index execution is already active: $LATEST_NAME ($LATEST_STATUS). No duplicate was started."
+    echo "Stage 5 execution active: $LATEST_NAME ($LATEST_STATUS). No duplicate started."
     ;;
   Succeeded)
     if [[ "$RESTART_INDEX" == true || "$LATEST_IMAGE" != "$EXPECTED_INDEXER_IMAGE" ]]; then
-      if [[ "$RESTART_INDEX" == true ]]; then
-        log "Starting a new indexing execution by explicit request"
-      else
-        log "Starting a new indexing execution because the deployed indexer image changed"
-      fi
-      az containerapp job start --name "$JOB_NAME" --resource-group "$RESOURCE_GROUP" \
-        --no-wait --output none --only-show-errors
+      [[ "$RESTART_INDEX" == true ]] && log "Starting Stage 5 by explicit request" || log "Starting Stage 5 because publisher image changed"
+      az containerapp job start --name "$JOB_NAME" --resource-group "$RESOURCE_GROUP" --no-wait --output none --only-show-errors
     else
-      echo "Latest index execution succeeded: $LATEST_NAME. Use --restart-index only when Blob inputs changed."
+      echo "Latest Stage 5 execution succeeded: $LATEST_NAME."
     fi
     ;;
   *)
-    log "Starting the resumable Azure indexing job"
+    log "Starting resumable Stage 5 indexing job"
     [[ -n "$LATEST_STATUS" ]] && echo "Previous execution: $LATEST_NAME ($LATEST_STATUS)"
-    az containerapp job start --name "$JOB_NAME" --resource-group "$RESOURCE_GROUP" \
-      --no-wait --output none --only-show-errors
-    echo "The job now runs in Azure and survives Cloud Shell disconnects. Use --status to inspect executions and Log Analytics output."
+    az containerapp job start --name "$JOB_NAME" --resource-group "$RESOURCE_GROUP" --no-wait --output none --only-show-errors
     ;;
 esac
 
-echo
-echo "Recent index executions:"
-az containerapp job execution list \
-  --name "$JOB_NAME" \
-  --resource-group "$RESOURCE_GROUP" \
-  --query 'sort_by(@, &properties.startTime)[-5:].{Name:name,Status:properties.status,Started:properties.startTime,Ended:properties.endTime}' \
-  --output table \
-  --only-show-errors || true
+if [[ "$RESTART_INTELLIGENCE" == true ]]; then
+  INTELLIGENCE_STATUS="$(az containerapp job execution list --name "$INTELLIGENCE_JOB_NAME" --resource-group "$RESOURCE_GROUP" --query 'sort_by(@, &properties.startTime)[-1].properties.status' --output tsv --only-show-errors 2>/dev/null || true)"
+  case "$INTELLIGENCE_STATUS" in
+    Running|Processing)
+      echo "Stage 6 intelligence execution is already active. No duplicate started."
+      ;;
+    *)
+      log "Starting resumable Stage 6 Microsoft Foundry intelligence job"
+      az containerapp job start --name "$INTELLIGENCE_JOB_NAME" --resource-group "$RESOURCE_GROUP" --no-wait --output none --only-show-errors
+      echo "Stage 6 checkpoints its extraction cache to Blob and can resume after a timeout/restart."
+      ;;
+  esac
+else
+  echo "Stage 6 intelligence was not started. Use --restart-intelligence when you intentionally want Foundry extraction/publication."
+fi
+
+show_job_executions "$JOB_NAME" "Stage 5 index"
+show_job_executions "$INTELLIGENCE_JOB_NAME" "Stage 6 intelligence"
 
 echo
-echo "Use ./ui/deploy/deploy.sh --status for recent indexer logs from Log Analytics."
+echo "Use ./ui/deploy/deploy.sh --status for both jobs and recent Log Analytics output."
