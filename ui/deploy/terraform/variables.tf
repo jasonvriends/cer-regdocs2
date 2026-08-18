@@ -27,12 +27,23 @@ variable "foundry_location" {
 }
 
 variable "name_suffix" {
-  description = "Globally unique lowercase letters/digits suffix used in public Azure names."
+  description = "Stable globally unique lowercase letters/digits suffix used in public Azure resource names. Reuse it with the same remote Terraform state."
   type        = string
 
   validation {
     condition     = can(regex("^[a-z0-9]{3,12}$", var.name_suffix))
     error_message = "name_suffix must be 3-12 lowercase letters or digits."
+  }
+}
+
+variable "ui_app_name" {
+  description = "Optional friendly Container App name. Leave empty to preserve the existing app-regdocs-<suffix> convention."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.ui_app_name == "" || can(regex("^[a-z][a-z0-9-]{0,30}[a-z0-9]$", var.ui_app_name))
+    error_message = "ui_app_name must be empty or a lowercase Container Apps name such as regdocsatlas."
   }
 }
 
@@ -145,8 +156,9 @@ variable "embedding_dimensions" {
 }
 
 variable "embedding_batch_size" {
-  type    = number
-  default = 128
+  description = "Embedding request batch size. 32 is the production-safe default after larger batches caused indexing failures."
+  type        = number
+  default     = 32
 }
 
 variable "search_upload_batch_size" {
