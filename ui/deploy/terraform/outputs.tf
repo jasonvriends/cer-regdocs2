@@ -41,9 +41,14 @@ output "index_job_name" {
   value = local.index_job_name
 }
 
-output "deployed_image_tag" {
-  description = "Last image tag applied to the Container App and job."
-  value       = var.deploy_workloads ? var.image_tag : null
+output "deployed_ui_image_tag" {
+  description = "Last UI image tag applied to the Container App."
+  value       = var.deploy_workloads ? var.ui_image_tag : null
+}
+
+output "deployed_indexer_image_tag" {
+  description = "Last indexer image tag applied to the Container Apps job."
+  value       = var.deploy_workloads ? var.indexer_image_tag : null
 }
 
 output "ui_url" {
