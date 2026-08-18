@@ -86,7 +86,7 @@ Do not proceed to Stage 5/6 publication until all five normalized files are repo
 ./ui/deploy/deploy.sh --validate
 ```
 
-This checks Bash, Terraform configuration/formatting, Python compilation, TypeScript, and the production Next.js build. It does not change Azure.
+This checks all deployment Bash scripts, Terraform configuration/formatting, Python compilation, TypeScript, and the production Next.js build. It does not change Azure. The wrapper removes an inherited interactive-shell `NODE_ENV` before Next.js validation so Cloud Shell cannot accidentally force the production build into development mode.
 
 Review the Terraform plan:
 
@@ -95,6 +95,23 @@ Review the Terraform plan:
 ```
 
 If the plan proposes an unexpected destructive replacement of a protected global resource, stop and fix the configuration/state problem. Do not invent a new suffix as a workaround.
+
+## Clean infrastructure rebuild
+
+A clean rebuild normally means deleting the **Atlas infrastructure resource group only**, then letting the same Terraform state recreate it.
+
+Preserve the source/storage account and Blob container that hold:
+
+```text
+workspace/4_normalize/
+terraform/regdocs-atlas.tfstate
+```
+
+Do not delete that Storage account/container unless you deliberately intend to re-upload the complete Stage 4 source package and create fresh Terraform state.
+
+The deployment script distinguishes resources that are merely recorded in Terraform state from workloads that still exist in Azure. If the Atlas infrastructure resource group has been deleted while the remote state Blob remains, a full deployment will first reconcile the foundation without Container Apps workloads, queue the deterministic ACR images, and then create the UI + Stage 5 + Stage 6 workloads on a later `--full` after those builds succeed.
+
+ACR build/existence checks use Azure ACR Task run history. They do not require `az acr login`, a registry username, or a registry password. If a deployment ever asks for a registry password, stop rather than entering one.
 
 ## Follow the guide
 
