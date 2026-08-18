@@ -1,66 +1,66 @@
 # Resumable Azure deployment from Cloud Shell
 
-This deployment is designed for the following constraint: interactive Azure
-login works only in Azure Cloud Shell opened on a company-managed computer, and
-Cloud Shell can disconnect before a 200,000+ chunk index finishes.
+This deployment is designed for disposable Azure Cloud Shell sessions. Cloud Shell is only the control terminal: Terraform state is remote, Azure Container Registry builds images in Azure, and the Container Apps indexing job continues after Cloud Shell disconnects.
 
-Cloud Shell is therefore only the control terminal. It runs short, idempotent
-Terraform and Azure CLI phases. Azure Container Registry builds the images, and
-an Azure Container Apps job performs the long index publication independently
-of the Cloud Shell session.
+The production stack contains:
 
-No VM or container runs `az login`. The UI and indexer use user-assigned managed
-identities for Azure-to-Azure authentication.
+- Azure AI Search;
+- Microsoft Foundry resource/project plus embedding and chat deployments;
+- Azure Container Registry;
+- Azure Container Apps environment;
+- public Next.js UI Container App;
+- resumable/manual indexing Container Apps job;
+- Log Analytics;
+- user-assigned managed identities and RBAC.
 
-## Ownership boundary
+The existing corpus Storage account and Blob container stay outside Terraform ownership.
 
-Terraform creates and manages a new resource group containing:
+---
 
-- Azure AI Search
-- a Microsoft Foundry resource, project, and two model deployments
-- Azure Container Registry
-- a Container Apps environment, public UI app, and manual indexing job
-- Log Analytics, managed identities, and least-privilege role assignments
+# Terraform state is remote
 
-The existing Storage account and Blob container are **not Terraform resources**.
-Terraform constructs their Azure resource ID only for the indexer's Blob role
-assignment; it does not import, read keys from, modify, or delete them. They can
-remain in Canada Central while the new workload runs in East US 2.
-
-The indexer reads only:
+The default Terraform state key is:
 
 ```text
-workspace/4_normalize/chunks.jsonl
-workspace/4_normalize/provenance.jsonl
-workspace/5_index/embedding-cache.sqlite    optional on the first run
+terraform/regdocs-atlas.tfstate
 ```
 
-It periodically writes a consistent embedding-cache checkpoint back to the
-third path. `database/regdocs.db` remains safely stored as the pipeline ledger,
-but neither Search indexing nor the UI needs SQLite.
+in the existing Blob container configured by:
 
-## Why rerunning is safe
+```text
+STORAGE_ACCOUNT
+BLOB_CONTAINER
+STATE_BLOB
+```
 
-Terraform state lives at `terraform/regdocs-atlas.tfstate` in the existing Blob
-container and uses Azure Blob leasing for locking. Each run reconciles the same
-resources rather than creating copies.
+`deploy.sh` runs `terraform init -reconfigure` against that remote Blob on every deployment. Losing Cloud Shell local files does **not** mean the Terraform state is lost.
 
-Images use the current Git commit as an immutable tag. The script:
+## Verify state before importing anything
 
-1. reuses an image if its tag exists;
-2. detects an ACR build already queued or running;
-3. queues missing builds with `--no-wait` and exits;
-4. deploys workloads only after both images exist;
-5. does not start another index execution while one is running;
-6. reuses a successful execution unless `--restart-index` is explicit.
+```bash
+cd ~/cer-regdocs2
+source ui/deploy/config.env
 
-Search documents use stable keys and `merge_or_upload`, so retrying a failed job
-updates existing chunks rather than duplicating them. The remote embedding cache
-avoids paying to regenerate vectors already completed by an earlier execution.
+read -rsp "Paste SAS: " AZURE_STORAGE_SAS_TOKEN
+printf '\n'
+export AZURE_STORAGE_SAS_TOKEN="${AZURE_STORAGE_SAS_TOKEN#\?}"
 
-## One-time Cloud Shell setup
+az storage blob show \
+  --account-name "$STORAGE_ACCOUNT" \
+  --container-name "$BLOB_CONTAINER" \
+  --name "${STATE_BLOB:-terraform/regdocs-atlas.tfstate}" \
+  --sas-token "$AZURE_STORAGE_SAS_TOKEN" \
+  --query '{name:name,size:properties.contentLength,lastModified:properties.lastModified}' \
+  -o table
+```
 
-Clone the repository and create the ignored configuration file:
+If the Blob exists, reuse it. **Do not import the Azure resources.**
+
+If the state Blob is missing but the Azure resources still exist, stop before `terraform apply`; rebuild the state with deliberate imports first.
+
+---
+
+# One-time Cloud Shell setup
 
 ```bash
 git clone <repository-url> cer-regdocs2
@@ -69,37 +69,26 @@ cp ui/deploy/config.env.example ui/deploy/config.env
 code ui/deploy/config.env
 ```
 
-At minimum, set:
+At minimum set:
 
-- `SUBSCRIPTION_ID`
-- a unique `NAME_SUFFIX`
-- `STORAGE_ACCOUNT`
-- `STORAGE_RESOURCE_GROUP`
-- `BLOB_CONTAINER`
-- `CONFIRM_BILLABLE_DEPLOYMENT=yes`
+```text
+SUBSCRIPTION_ID
+NAME_SUFFIX
+STORAGE_ACCOUNT
+STORAGE_RESOURCE_GROUP
+BLOB_CONTAINER
+CONFIRM_BILLABLE_DEPLOYMENT=yes
+```
 
-To restrict the UI and its server-side `/api/*` routes to specific public IPv4
-ranges, set the optional Terraform list in `config.env`:
+Optional UI ingress restriction:
 
 ```bash
 UI_ALLOWED_IP_CIDRS='["203.0.113.10/32","198.51.100.0/24"]'
 ```
 
-Use the public egress address seen by Azure, such as the company network or VPN
-egress address, rather than a device's private address. `/32` permits one IPv4
-address. The default empty list (`[]`) leaves ingress public. The UI and API
-routes run in the same Next.js Container App, so the one allowlist covers both.
+Use the public egress address seen by Azure. The same allowlist protects the UI and its server-side `/api/*` routes.
 
-The defaults use East US 2, `GlobalStandard` model deployments, 1,000,000 TPM
-embedding capacity, embedding batches of 128 inputs, and Search upload batches
-of up to 1,000 documents. Azure can still reject the requested capacity when
-the subscription lacks quota; lower `EMBEDDING_CAPACITY` to the allocated quota
-if that happens. `DataZoneStandard` can replace `GlobalStandard` if policy
-requires inference to remain within the United States data zone.
-
-Generate or reuse a private container SAS. It needs Read, Create, Write, and
-List permission for input verification and Terraform state. Keep it out of
-`config.env` and Git:
+Generate or reuse a private container SAS with Read, Create, Write, and List permission. Keep it out of Git and out of `config.env`.
 
 ```bash
 read -rsp "Paste the container SAS token: " AZURE_STORAGE_SAS_TOKEN
@@ -108,59 +97,196 @@ AZURE_STORAGE_SAS_TOKEN="${AZURE_STORAGE_SAS_TOKEN#\?}"
 export AZURE_STORAGE_SAS_TOKEN
 ```
 
-Run the deployment from the repository root:
+---
 
-```bash
-./ui/deploy/deploy.sh
-```
+# Full deployment
 
-Terraform is preinstalled in current Azure Cloud Shell images. ACR builds Node
-and Python containers in Azure, so Cloud Shell needs no Node, Python packages,
-Docker, or SQLite CLI.
-
-## After a timeout or disconnect
-
-Return to the same clone, export a valid SAS again if needed, and run the exact
-same command:
+Use the full deployment when Terraform/RBAC/environment variables/Search/Foundry/index inputs changed or when provisioning the environment for the first time.
 
 ```bash
 cd ~/cer-regdocs2
-export AZURE_STORAGE_SAS_TOKEN='sv=...&sp=...&sig=...'
+git checkout master
+git pull origin master
 ./ui/deploy/deploy.sh
 ```
 
-The script prints which phase is already complete and continues with the next
-one. An indexing job keeps running after Cloud Shell closes. Its latest status
-appears at the end of each run and in Azure Portal under the Container Apps job
-named `job-regdocs-<suffix>`.
+The script:
 
-When new `chunks.jsonl` or `provenance.jsonl` files have been uploaded and the
-last execution is already successful, explicitly start another publication:
+1. verifies normalized Blob inputs;
+2. reconnects Terraform to the remote state Blob;
+3. reconciles Azure infrastructure;
+4. builds missing images in ACR using the current Git commit as the immutable image tag;
+5. deploys the UI and indexing job after images exist;
+6. avoids duplicate indexing executions while one is already active;
+7. reuses a successful indexing execution unless a new indexer image or explicit restart requires another run.
+
+If ACR builds were queued, the script may exit intentionally. Rerun the same command after the builds complete:
+
+```bash
+./ui/deploy/deploy.sh
+```
+
+Cloud Shell may be closed while ACR builds or the Container Apps indexing job continues.
+
+## Explicitly republish changed normalized data
 
 ```bash
 ./ui/deploy/deploy.sh --restart-index
 ```
 
-To provision the complete deployment without starting the job:
+## Provision without starting an otherwise-needed index job
 
 ```bash
 ./ui/deploy/deploy.sh --no-start
 ```
 
-## Operational notes
+### Important image-tag behavior
 
-- Standard Azure AI Search is the principal fixed monthly cost. Container Apps
-  UI scales to zero when idle, while the manual index job costs only while it is
-  executing. ACR Basic and Log Analytics add smaller charges.
-- A 1,000,000 TPM setting is model quota, not a reservation or a promise to
-  consume that volume. Embedding charges are based on processed tokens.
-- The UI is available before the first index execution completes, but searches
-  will not return the complete corpus until the job succeeds.
-- Keep `config.env` and SAS tokens private. Terraform state is sensitive because
-  it includes resource configuration and the generated Foundry safety salt.
-- A SAS or managed identity does not bypass the Storage firewall. The retained
-  account must permit the Container Apps job's outbound access; this template
-  does not create a VNet or private endpoint for an already locked-down account.
-- `terraform destroy` is intentionally not wrapped by the script. If used
-  manually, it removes only Terraform-managed resources, not the existing
-  Storage account or corpus blobs.
+The full script tags **both** UI and indexer images with the current Git commit. If the indexer image tag changes, deployment logic can start another indexing execution even when the source data itself did not change.
+
+For a UI-code-only release, use the UI-only procedure below instead.
+
+---
+
+# Deploy only the UI
+
+Use this when Terraform, RBAC, Search, Foundry, and index data are already correct and only Next.js/UI/API code changed.
+
+This path does not require the Blob SAS and does not touch the indexing job.
+
+```bash
+cd ~/cer-regdocs2
+git checkout master
+git pull origin master
+
+source ui/deploy/config.env
+az account set --subscription "$SUBSCRIPTION_ID"
+
+RESOURCE_GROUP="${RESOURCE_GROUP:-rg-regdocs-atlas}"
+TAG="$(git rev-parse --short=12 HEAD)"
+ACR_NAME="crregdocs${NAME_SUFFIX}"
+APP_NAME="app-regdocs-${NAME_SUFFIX}"
+
+az acr build \
+  --registry "$ACR_NAME" \
+  --image "regdocs-ui:$TAG" \
+  --file ui/deploy/containers/ui.Dockerfile \
+  .
+
+ACR_LOGIN_SERVER="$(az acr show \
+  --name "$ACR_NAME" \
+  --query loginServer \
+  -o tsv)"
+
+az containerapp update \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --image "$ACR_LOGIN_SERVER/regdocs-ui:$TAG"
+```
+
+Check the revision:
+
+```bash
+az containerapp revision list \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query "[].{Revision:name,Active:properties.active,Traffic:properties.trafficWeight,Created:properties.createdTime}" \
+  -o table
+```
+
+Get the URL:
+
+```bash
+UI_HOST="$(az containerapp show \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query properties.configuration.ingress.fqdn \
+  -o tsv)"
+
+echo "https://$UI_HOST"
+```
+
+## First deployment of an infrastructure-aware UI feature
+
+If a UI release also adds Terraform resources, roles, environment variables, or secrets, run the **full deployment once first**. The UI-only command updates only the image and cannot apply Terraform changes.
+
+The `ATLAS-...` Log Analytics error lookup is one such feature: its first deployment needs the Terraform changes that grant Log Analytics read access and inject the workspace/token configuration.
+
+---
+
+# Diagnostics and errors
+
+The UI exposes:
+
+```text
+/diagnostics
+```
+
+for configuration checks and explicit live checks against Search, Foundry, the document reader, and Stage 6 intelligence indexes.
+
+Server faults shown to users include a reference such as:
+
+```text
+Reference: ATLAS-0123ABCD4567EF89
+```
+
+The same ID is written to Container Apps console output and therefore to the deployment's Log Analytics workspace.
+
+Operator lookup page:
+
+```text
+/diagnostics/errors?errorId=ATLAS-0123ABCD4567EF89
+```
+
+Retrieve the operator token after Terraform has been initialized against the production state:
+
+```bash
+terraform -chdir=ui/deploy/terraform output -raw diagnostics_operator_token
+printf '\n'
+```
+
+The token is a sensitive Terraform output and must not be exposed in browser environment variables or Git.
+
+Direct Log Analytics query:
+
+```kusto
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(30d)
+| where Log_s contains "ATLAS-0123ABCD4567EF89"
+| project TimeGenerated, ContainerAppName_s, RevisionName_s, ContainerName_s, Log_s
+| order by TimeGenerated desc
+```
+
+See [`../OPERATIONS.md`](../OPERATIONS.md) for the operator workflow and [`../README.md`](../README.md) for full UI behavior and architecture.
+
+---
+
+# Deployment resources and data ownership
+
+Terraform creates/manages the REGDOCS Atlas resource group and the application/search/AI infrastructure inside it.
+
+The existing Storage account is referenced but not imported into Terraform ownership. `terraform destroy` therefore removes Terraform-managed Atlas resources but does not delete the retained source Storage account or corpus blobs.
+
+The indexing job reads:
+
+```text
+workspace/4_normalize/chunks.jsonl
+workspace/4_normalize/provenance.jsonl
+workspace/5_index/embedding-cache.sqlite    optional/resumable cache
+```
+
+The SQLite pipeline ledger remains useful for the local acquisition pipeline but is not required by the production UI or Search indexing job.
+
+---
+
+# Operational notes
+
+- Standard Azure AI Search is the main fixed monthly cost.
+- The UI Container App can scale to zero when idle.
+- The indexing job costs only while executions run.
+- ACR and Log Analytics add smaller ongoing charges.
+- Foundry embedding/chat charges depend on processed tokens/requests.
+- The UI can be available before indexing is complete; search completeness depends on the latest successful publication.
+- Keep `config.env`, SAS tokens, Terraform state, and the diagnostics operator token private.
+- A SAS or managed identity does not bypass Storage firewall/network restrictions.
+- Terraform state includes sensitive configuration and must remain private.
