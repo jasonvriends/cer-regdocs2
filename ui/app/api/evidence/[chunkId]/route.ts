@@ -1,4 +1,5 @@
 import { getRegdocsChunk } from "@/lib/azure-search";
+import { publicErrorResponse } from "@/lib/observability";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,7 +16,6 @@ export async function GET(
       ? Response.json(result)
       : Response.json({ error: "Evidence chunk not found." }, { status: 404 });
   } catch (error) {
-    console.error("REGDOCS evidence lookup failed", error);
-    return Response.json({ error: "Evidence lookup failed." }, { status: 502 });
+    return publicErrorResponse("api.evidence", error, "Evidence lookup failed.", 502, { chunkId });
   }
 }

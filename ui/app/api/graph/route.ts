@@ -1,4 +1,5 @@
 import { getGraph, hasIntelligenceScope, type IntelligenceScope } from "@/lib/intelligence";
+import { publicErrorResponse } from "@/lib/observability";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,7 +28,6 @@ export async function GET(request: Request) {
     const graph = await getGraph(requestedScope, Number.isFinite(requestedTop) ? requestedTop : 400);
     return Response.json(graph);
   } catch (error) {
-    console.error("REGDOCS graph failed", error);
-    return Response.json({ error: "Graph retrieval failed." }, { status: 502 });
+    return publicErrorResponse("api.graph", error, "Graph retrieval failed.", 502, requestedScope);
   }
 }

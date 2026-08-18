@@ -1,4 +1,5 @@
 import { getTimeline, hasIntelligenceScope, type IntelligenceScope } from "@/lib/intelligence";
+import { publicErrorResponse } from "@/lib/observability";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,7 +28,6 @@ export async function GET(request: Request) {
     const events = await getTimeline(requestedScope, Number.isFinite(requestedTop) ? requestedTop : 200);
     return Response.json({ count: events.length, events });
   } catch (error) {
-    console.error("REGDOCS timeline failed", error);
-    return Response.json({ error: "Timeline retrieval failed." }, { status: 502 });
+    return publicErrorResponse("api.timeline", error, "Timeline retrieval failed.", 502, requestedScope);
   }
 }

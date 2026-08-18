@@ -26,6 +26,11 @@ resource "random_password" "foundry_safety_salt" {
   special = false
 }
 
+resource "random_password" "diagnostics_operator_token" {
+  length  = 40
+  special = false
+}
+
 resource "azurerm_container_registry" "main" {
   name                = local.registry_name
   resource_group_name = azurerm_resource_group.main.name
@@ -172,6 +177,13 @@ resource "azurerm_role_assignment" "ui_search_reader" {
   skip_service_principal_aad_check = true
 }
 
+resource "azurerm_role_assignment" "ui_log_analytics_reader" {
+  scope                            = azurerm_log_analytics_workspace.main.id
+  role_definition_name             = "Log Analytics Reader"
+  principal_id                     = azurerm_user_assigned_identity.ui.principal_id
+  skip_service_principal_aad_check = true
+}
+
 resource "azurerm_role_assignment" "indexer_search_service" {
   scope                            = azurerm_search_service.main.id
   role_definition_name             = "Search Service Contributor"
@@ -290,6 +302,14 @@ resource "azurerm_container_app" "ui" {
         value = azurerm_user_assigned_identity.ui.client_id
       }
       env {
+        name  = "LOG_ANALYTICS_WORKSPACE_ID"
+        value = azurerm_log_analytics_workspace.main.workspace_id
+      }
+      env {
+        name  = "REGDOCS_DIAGNOSTICS_TOKEN"
+        value = random_password.diagnostics_operator_token.result
+      }
+      env {
         name  = "AZURE_SEARCH_ENDPOINT"
         value = azurerm_search_service.main.endpoint
       }
@@ -323,6 +343,7 @@ resource "azurerm_container_app" "ui" {
   depends_on = [
     azurerm_role_assignment.ui_acr_pull,
     azurerm_role_assignment.ui_foundry_user,
+    azurerm_role_assignment.ui_log_analytics_reader,
     azurerm_role_assignment.ui_openai,
     azurerm_role_assignment.ui_search_reader,
   ]
