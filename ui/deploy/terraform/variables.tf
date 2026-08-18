@@ -36,17 +36,6 @@ variable "name_suffix" {
   }
 }
 
-variable "ui_app_name" {
-  description = "Optional friendly Container App name. Leave empty to preserve the existing app-regdocs-<suffix> convention."
-  type        = string
-  default     = ""
-
-  validation {
-    condition     = var.ui_app_name == "" || can(regex("^[a-z][a-z0-9-]{0,30}[a-z0-9]$", var.ui_app_name))
-    error_message = "ui_app_name must be empty or a lowercase Container Apps name such as regdocsatlas."
-  }
-}
-
 variable "storage_account_name" {
   description = "Existing Storage account that contains the database and workspace. Terraform never manages it."
   type        = string
