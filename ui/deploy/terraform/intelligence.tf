@@ -1,3 +1,9 @@
+variable "intelligence_document_limit" {
+  description = "Optional Stage 6 pilot document limit. Empty means the full normalized corpus."
+  type        = string
+  default     = ""
+}
+
 locals {
   intelligence_job_name = "job-regdocs-intelligence-${var.name_suffix}"
 }
@@ -68,6 +74,10 @@ resource "azurerm_container_app_job" "intelligence" {
       env {
         name  = "REGDOCS_INTELLIGENCE_CACHE_SYNC_SECONDS"
         value = "900"
+      }
+      env {
+        name  = "REGDOCS_INTELLIGENCE_DOCUMENT_LIMIT"
+        value = var.intelligence_document_limit
       }
       env {
         name  = "FOUNDRY_PROJECT_ENDPOINT"
