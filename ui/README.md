@@ -59,6 +59,8 @@ The production Terraform deployment configures these values automatically on the
 
 ```text
 AZURE_CLIENT_ID
+LOG_ANALYTICS_WORKSPACE_ID
+REGDOCS_DIAGNOSTICS_TOKEN
 AZURE_SEARCH_ENDPOINT
 AZURE_SEARCH_INDEX
 AZURE_SEARCH_VECTOR_FIELD
@@ -66,12 +68,9 @@ AZURE_SEARCH_SEMANTIC_CONFIGURATION
 FOUNDRY_PROJECT_ENDPOINT
 FOUNDRY_MODEL_DEPLOYMENT
 FOUNDRY_SAFETY_SALT
-AZURE_SEARCH_ENTITIES_INDEX
-AZURE_SEARCH_RELATIONS_INDEX
-AZURE_SEARCH_EVENTS_INDEX
-REGDOCS_LOG_ANALYTICS_WORKSPACE_ID
-REGDOCS_DIAGNOSTICS_OPERATOR_TOKEN
 ```
+
+The Stage 6 intelligence readers default to the deployed index names `regdocs-entities`, `regdocs-relations`, and `regdocs-events`. They can be overridden for nonstandard deployments with `AZURE_SEARCH_ENTITIES_INDEX`, `AZURE_SEARCH_RELATIONS_INDEX`, and `AZURE_SEARCH_EVENTS_INDEX`.
 
 For local development, Azure Search may also use a read-only `AZURE_SEARCH_API_KEY`. Do not put secrets in variables beginning with `NEXT_PUBLIC_`; Next.js exposes those variables to browser code.
 
