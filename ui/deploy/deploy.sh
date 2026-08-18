@@ -14,12 +14,20 @@ RESTART_INDEX=false
 usage() {
   cat <<'EOF'
 Usage:
+  ./ui/deploy/deploy.sh --validate
+  ./ui/deploy/deploy.sh [--config PATH] --plan
   ./ui/deploy/deploy.sh [--config PATH] [--full|--ui-only|--infra-only] [--restart-index]
   ./ui/deploy/deploy.sh [--config PATH] --status
   ./ui/deploy/deploy.sh [--config PATH] --error ATLAS-0123ABCD4567EF89
 
 Safe to run again after a Cloud Shell timeout. Terraform state is remote, ACR
 builds continue in Azure, and completed work is reused.
+
+Preflight:
+  --validate        Run local Bash, Terraform, Python, TypeScript, and Next.js
+                    validation. Makes no Azure API calls and needs no SAS token.
+  --plan            Read the existing remote Terraform state and show the
+                    infrastructure plan without applying it or building images.
 
 Deployment modes:
   --full            Reconcile infrastructure, build/deploy UI and indexer, and
@@ -42,6 +50,8 @@ Other options:
   --config PATH     Read deployment settings from PATH (default: config.env).
 
 Examples:
+  ./ui/deploy/deploy.sh --validate
+  ./ui/deploy/deploy.sh --plan
   ./ui/deploy/deploy.sh --ui-only
   ./ui/deploy/deploy.sh --infra-only
   ./ui/deploy/deploy.sh
@@ -58,7 +68,7 @@ fail() {
 
 set_mode() {
   local requested="$1"
-  [[ "$OPERATION" == "deploy" ]] || fail "Deployment modes cannot be combined with --status or --error."
+  [[ "$OPERATION" == "deploy" ]] || fail "Deployment modes cannot be combined with --validate, --plan, --status, or --error."
   if [[ "$MODE_SET" == true && "$MODE" != "$requested" ]]; then
     fail "Choose only one deployment mode: --full, --ui-only, or --infra-only."
   fi
@@ -68,7 +78,7 @@ set_mode() {
 
 set_operation() {
   local requested="$1"
-  [[ "$OPERATION" == "deploy" ]] || fail "Choose only one read-only operation: --status or --error."
+  [[ "$OPERATION" == "deploy" ]] || fail "Choose only one operation: --validate, --plan, --status, or --error."
   [[ "$MODE_SET" == false && "$RESTART_INDEX" == false ]] || fail "$requested cannot be combined with deployment-mode flags."
   OPERATION="$requested"
 }
@@ -79,6 +89,14 @@ while (($#)); do
       [[ $# -ge 2 ]] || fail "--config requires a path"
       CONFIG_FILE="$2"
       shift 2
+      ;;
+    --validate)
+      set_operation validate
+      shift
+      ;;
+    --plan)
+      set_operation plan
+      shift
       ;;
     --full)
       set_mode full
@@ -93,7 +111,7 @@ while (($#)); do
       shift
       ;;
     --restart-index)
-      [[ "$OPERATION" == "deploy" ]] || fail "--restart-index cannot be combined with --status or --error."
+      [[ "$OPERATION" == "deploy" ]] || fail "--restart-index cannot be combined with --validate, --plan, --status, or --error."
       RESTART_INDEX=true
       shift
       ;;
@@ -154,6 +172,38 @@ image_tag_from_reference() {
   [[ -n "$image" ]] || return 0
   printf '%s' "${image##*:}"
 }
+
+if [[ "$OPERATION" == "validate" ]]; then
+  for command in bash terraform python npm; do
+    require_command "$command"
+  done
+
+  log "Validating deployment shell syntax"
+  bash -n "$SCRIPT_DIR/deploy.sh"
+
+  log "Validating Terraform formatting and configuration without a backend"
+  terraform -chdir="$TERRAFORM_DIR" fmt -check -recursive
+  terraform -chdir="$TERRAFORM_DIR" init -backend=false -input=false
+  terraform -chdir="$TERRAFORM_DIR" validate
+
+  log "Compiling Python entry points"
+  (
+    cd "$REPOSITORY_ROOT"
+    python -m compileall -q pipeline.py regdocs_atlas tools
+  )
+
+  log "Validating the Next.js UI"
+  (
+    cd "$REPOSITORY_ROOT/ui"
+    npm ci
+    npm run typecheck
+    npm run build
+  )
+
+  log "Validation complete"
+  echo "No Azure resources were read, created, changed, or deleted."
+  exit 0
+fi
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
   fail "Missing $CONFIG_FILE. Copy config.env.example to config.env and edit it first."
@@ -274,8 +324,10 @@ for name in \
   require_value "$name"
 done
 
-[[ "${CONFIRM_BILLABLE_DEPLOYMENT:-}" == "yes" ]] || fail \
-  "Set CONFIRM_BILLABLE_DEPLOYMENT=yes after reviewing the billable Azure resources."
+if [[ "$OPERATION" == "deploy" ]]; then
+  [[ "${CONFIRM_BILLABLE_DEPLOYMENT:-}" == "yes" ]] || fail \
+    "Set CONFIRM_BILLABLE_DEPLOYMENT=yes after reviewing the billable Azure resources."
+fi
 [[ -n "${AZURE_STORAGE_SAS_TOKEN:-}" ]] || fail \
   "Export AZURE_STORAGE_SAS_TOKEN. It is used only by Cloud Shell to access remote Terraform state and, for full deployments, verify index inputs."
 [[ "$NAME_SUFFIX" =~ ^[a-z0-9]{3,12}$ ]] || fail \
@@ -298,7 +350,7 @@ SAS_TOKEN="${AZURE_STORAGE_SAS_TOKEN#\?}"
 export ARM_SAS_TOKEN="$SAS_TOKEN"
 export ARM_SUBSCRIPTION_ID="$SUBSCRIPTION_ID"
 
-if [[ "$MODE" == "full" ]]; then
+if [[ "$OPERATION" == "deploy" && "$MODE" == "full" ]]; then
   log "Verifying normalized Blob inputs required by the indexing job"
   for filename in chunks.jsonl provenance.jsonl; do
     blob_name="${NORMALIZED_BLOB_PREFIX%/}/$filename"
@@ -416,6 +468,18 @@ else
   FOUNDATION_DEPLOY_WORKLOADS=false
   FOUNDATION_UI_IMAGE_TAG="$CURRENT_IMAGE_TAG"
   FOUNDATION_INDEXER_IMAGE_TAG="$CURRENT_IMAGE_TAG"
+fi
+
+if [[ "$OPERATION" == "plan" ]]; then
+  log "Planning Terraform changes against the existing remote state"
+  terraform -chdir="$TERRAFORM_DIR" plan -input=false \
+    -lock-timeout=5m \
+    -var="deploy_workloads=$FOUNDATION_DEPLOY_WORKLOADS" \
+    -var="ui_image_tag=$FOUNDATION_UI_IMAGE_TAG" \
+    -var="indexer_image_tag=$FOUNDATION_INDEXER_IMAGE_TAG"
+  echo
+  echo "Plan only: no Terraform changes were applied, no images were built, and no indexing job was started."
+  exit 0
 fi
 
 log "Reconciling Azure infrastructure (safe to rerun)"
