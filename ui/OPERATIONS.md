@@ -26,6 +26,69 @@ This file is the short operator runbook. For the full deployment guide, see [`RE
 
 `--no-start` is intentionally not supported. Use `--ui-only` or `--infra-only`, which have precise no-indexing semantics.
 
+## Cloud Shell can die at any time
+
+Treat Azure Cloud Shell as disposable. A deployment must never depend on a long-running local shell process or local Terraform state.
+
+The durable pieces live in Azure:
+
+- Terraform state is stored in the configured Blob container;
+- ACR builds run server-side and continue after Cloud Shell disconnects;
+- Container Apps job executions run server-side and continue after Cloud Shell disconnects;
+- Log Analytics keeps the indexer/application output;
+- deployed image tags can be read back from Azure.
+
+If Cloud Shell closes during a deployment, reopen it and first inspect Azure without a SAS token:
+
+```bash
+cd ~/cer-regdocs2
+source ui/deploy/config.env
+./ui/deploy/deploy.sh --status
+```
+
+Then, if the deployment still needs to finish, export a fresh SAS token and rerun the **same deployment mode you originally used**:
+
+```bash
+read -rsp "Paste the container SAS token: " AZURE_STORAGE_SAS_TOKEN
+printf '\n'
+export AZURE_STORAGE_SAS_TOKEN="${AZURE_STORAGE_SAS_TOKEN#\?}"
+
+# Example: resume a UI-only release.
+./ui/deploy/deploy.sh --ui-only
+```
+
+For a full deployment, rerun:
+
+```bash
+./ui/deploy/deploy.sh
+```
+
+For an explicit corpus republish, rerun:
+
+```bash
+./ui/deploy/deploy.sh --restart-index
+```
+
+The commands are intentionally idempotent: completed Azure resources are reused, completed ACR images are reused, a running indexing execution is not duplicated, and remote Terraform state is reattached on every deployment invocation.
+
+Do **not** run `terraform destroy`, create a new `NAME_SUFFIX`, or import resources merely because Cloud Shell disappeared.
+
+### If Terraform itself was interrupted
+
+A hard disconnect can stop a local `terraform apply`, but it does not delete the remote state or the Azure resources already created. Rerun the same deployment command and Terraform reconciles the remaining differences.
+
+If Terraform reports that the remote state is locked, first make sure there is no other Cloud Shell or Terraform process still applying the same state. Only when you are certain the lock is stale should you use Terraform's `force-unlock` command with the lock ID printed by Terraform:
+
+```bash
+terraform -chdir=ui/deploy/terraform force-unlock <LOCK_ID>
+```
+
+Never automate or blindly force-unlock a state that another deployment may still be using.
+
+### Do not change commits just to resume
+
+If Cloud Shell died while ACR was building a specific Git commit, prefer finishing that deployment before pulling newer commits. The image tag is the Git SHA. `--status` tells you what is currently deployed, and rerunning the same deployment mode reuses an already completed image for the current commit.
+
 ## Check indexing status
 
 Run:
