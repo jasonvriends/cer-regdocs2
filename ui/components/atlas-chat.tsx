@@ -10,9 +10,7 @@ import {
 import { createLocalStorageAdapter, createSimpleTitleAdapter } from "@assistant-ui/core/react";
 import {
   Clock3,
-  Database,
   Download,
-  FileText,
   GitFork,
   LibraryBig,
   Trash2,
@@ -112,7 +110,6 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
   const [coverageLoading, setCoverageLoading] = useState(false);
   const [coverageError, setCoverageError] = useState<string | null>(null);
   const [corpusStatus, setCorpusStatus] = useState<CorpusStatusPayload | null>(null);
-  const [dataOpen, setDataOpen] = useState(false);
   const [preview, setPreview] = useState<AtlasSearchResult | null>(null);
   const [intelligenceView, setIntelligenceView] = useState<IntelligenceView | null>(null);
   const [intelligenceError, setIntelligenceError] = useState<string | null>(null);
@@ -312,7 +309,6 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
           <AtlasSidebar
             onClaims={() => { setIntelligenceError(null); setIntelligenceView("claims"); }}
             onCoverage={() => { setCoverageOpen(true); void loadCoverage(); }}
-            onDataset={() => setDataOpen(true)}
             onGraph={() => { setIntelligenceError(null); setIntelligenceView("graph"); }}
             onObligations={() => { setIntelligenceError(null); setIntelligenceView("obligations"); }}
             onShelf={() => setEvidenceOpen(true)}
@@ -377,10 +373,6 @@ export function AtlasChat({ defaultSidebarOpen = true }: { defaultSidebarOpen?: 
               ) : null}
               <p className="text-xs leading-5 text-muted-foreground">Atlas can only answer from indexed evidence. Verify material decisions against the original REGDOCS source.</p>
             </DialogContent>
-          </Dialog>
-
-          <Dialog onOpenChange={setDataOpen} open={dataOpen}>
-            <DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle className="text-xl">Make a data product</DialogTitle><DialogDescription>Start with a useful shape; Atlas will find the underlying evidence first.</DialogDescription></DialogHeader><div className="space-y-2">{[["Schedule A table inventory", "Find candidate tables and reusable columns."], ["Source inventory", "Document, filing, page, company, project and link."], ["Shelf CSV", "Export the source passages currently on your shelf."]].map(([title, description], index) => <Button className="h-auto w-full justify-start gap-3 rounded-xl border px-4 py-3 text-left" disabled={index === 2 && !basket.length} key={title} onClick={() => { if (index === 0) { setFilters((current) => ({ ...current, chunkTypes: ["table"] })); runtime.thread.composer.setText("Find Schedule A tables and identify the columns needed for a reusable CSV dataset."); } else if (index === 1) { runtime.thread.composer.setText("Create a source inventory with document, filing, page, company, project, and source link."); } else { exportEvidence(basket); } setDataOpen(false); }} variant="ghost"><span className="grid size-9 place-items-center rounded-lg bg-primary/8 text-primary">{index === 2 ? <Download className="size-4" /> : index === 1 ? <FileText className="size-4" /> : <Database className="size-4" />}</span><span><strong className="block text-sm">{title}</strong><small className="text-xs text-muted-foreground">{description}</small></span></Button>)}</div></DialogContent>
           </Dialog>
 
           <Dialog onOpenChange={(open) => { if (!open) setIntelligenceView(null); }} open={intelligenceView !== null}>
