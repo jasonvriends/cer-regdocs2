@@ -149,7 +149,7 @@ export function AtlasSidebar({
                 <span>
                   <span className="block">Coverage</span>
                   <span className="mt-0.5 flex items-center gap-1 text-[10px] font-normal text-muted-foreground">
-                    <ShieldCheck aria-hidden="true" className="size-3 text-emerald-600" />Jan–Jul 2026 complete
+                    <ShieldCheck aria-hidden="true" className="size-3 text-emerald-600" />Live index status
                   </span>
                 </span>
               </SidebarMenuButton>
