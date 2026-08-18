@@ -1,118 +1,199 @@
-# REGDOCS Atlas product direction
+# REGDOCS Atlas v1 product contract
 
 ## Product promise
 
-REGDOCS Atlas helps any CER user find, verify, collect, compare, and export regulatory evidence that is otherwise buried inside filings.
+REGDOCS Atlas helps a CER researcher find, verify, collect, compare, and understand evidence that is otherwise buried inside REGDOCS filings.
 
-The authoritative source remains REGDOCS. Atlas must preserve a visible link from every result, extracted row, and generated statement to the original document and page.
+The Canada Energy Regulator REGDOCS source remains authoritative. Atlas keeps a visible path from retrieved evidence and derived regulatory intelligence back to the source document and page wherever the source data permits it.
 
-## Primary user jobs
+This file describes **v1**, not a roadmap. A control belongs in the v1 UI only when its end-to-end data path is implemented.
 
-1. **Find one known item:** a filing number, document ID, company, project, title, or quoted passage.
-2. **Discover an unknown item:** use a plain-language description when the user does not know CER terminology or where the evidence was filed.
-3. **Understand a record:** see the matching passage in context, then inspect the whole document, filing, project, or company history.
-4. **Build an evidence set:** collect passages into a focused Research Workspace and search within that set.
-5. **Reuse regulatory data:** turn recurring tables and forms into reviewed, source-linked datasets and download CSV files.
-6. **Answer a question:** synthesize only retrieved evidence, cite exact pages, disclose corpus coverage, and say when the evidence is insufficient.
+## V1 user jobs
 
-## Why the Research Workspace exists
+1. **Ask a question** in ordinary language and get a Microsoft Foundry answer grounded in retrieved CER evidence.
+2. **Find evidence** by exact identifiers, company, project, filing, content type, keyword, concept, or a combination of filters.
+3. **Verify the source** by opening the cited passage inside Atlas's normalized HTML document viewer and following the original REGDOCS link when available.
+4. **Build an evidence set** by saving source passages to the Shelf, questioning only that set, and exporting it as CSV.
+5. **Understand chronology** through a scoped regulatory timeline.
+6. **Understand relationships** through a scoped entity/relationship graph.
+7. **Inspect regulatory statements** through Findings & claims.
+8. **Inspect regulatory duties** through Commitments & obligations, including explicit deadline/status views.
+9. **Understand coverage and provenance** through live corpus metadata, answer-run details, diagnostics, and source links.
 
-The Research Workspace is the product's equivalent of BERDI's shelf, extended for evidence-based research. It is not a shopping cart.
+## V1 UI capabilities
 
-It allows a user to:
+### Grounded Ask
 
-- collect page-level passages during a broad search;
-- search within the collected set;
-- keep the set's document and page identity;
-- export a flat evidence CSV now;
-- later share or save a workspace;
-- constrain a Microsoft Foundry answer to only this evidence.
+Atlas retrieves evidence from Azure AI Search before synthesis. The Ask route can use keyword, hybrid vector, and semantic retrieval according to deployment configuration.
 
-An item should never enter the workspace without a source document ID, page reference, and source URL when REGDOCS provides one.
+The UI distinguishes:
 
-## Capability labels
+- **Retrieved evidence** — passages Search found;
+- **Cited evidence** — passages the validated Foundry answer actually cited.
 
-Every feature must have one visible readiness state:
+A successful answer exposes an expandable run summary with:
 
-- **Live:** works end to end with the current production data.
-- **Pilot:** works on a named subset and includes its coverage and known limitations.
-- **Planned:** explains the intended output but cannot be mistaken for a working control.
+- whether Microsoft Foundry was used;
+- Foundry deployment;
+- retrieval mode and any fallback;
+- semantic-ranking state;
+- retrieved/cited evidence counts;
+- retry count;
+- Search, Foundry, and total timing;
+- live corpus index/date coverage.
 
-The current UI supports Azure AI Search keyword retrieval, filters, a page-like HTML document reconstruction with match highlighting, page-scoped evidence, Research Workspace search, evidence CSV export, hybrid vector retrieval, and Foundry grounded answers. Hybrid and Foundry are configuration-gated and still require deployment evaluation before being labelled broadly live. Reviewed Schedule A exports remain planned.
+If synthesis fails after retrieval, retrieved evidence can still be shown without being mislabeled as cited evidence.
 
-## Search architecture
+### Search and filters
 
-### Current
+The Search backend supports:
 
-The Stage 5 `regdocs-chunks` index contains normalized Azure layout text, tables, figures, registry metadata, page ranges, and provenance paths. It supports lexical search, exact scopes, facets, and deterministic sorting.
+- keyword retrieval;
+- hybrid vector retrieval;
+- optional semantic reranking;
+- document ID;
+- filing ID / filing number;
+- company;
+- project;
+- page;
+- content type (text/table/figure);
+- application type;
+- commodity;
+- document type;
+- file type;
+- role;
+- relevance/newest/oldest/document-order sorting where applicable.
 
-### Integrated: hybrid retrieval
+The chat composer exposes the high-value filters needed by the research workflow. Exact Search API fields remain available server-side for future clients without requiring another data pipeline.
 
-The versioned publisher adds an embedding field, matching query vectorizer, and semantic configuration to a replacement index without touching the lexical production index. A hybrid query executes keyword and vector retrieval together and optionally applies semantic reranking. Exact identifiers, quoted phrases, and filters remain available on the lexical path; hybrid retrieval is most valuable for concept searches and unfamiliar language.
+### Source/document viewer
 
-Evaluate against a CER-specific relevance set before making hybrid the default. Include known-item, concept, table, OCR, bilingual, and hard-negative queries. Track recall at 10, normalized discounted cumulative gain, citation correctness, zero-result rate, latency, and cost.
+Atlas uses a normalized HTML reconstruction instead of embedding a PDF.
 
-### Integrated: Microsoft Foundry
+The reader:
 
-The cited-answer route uses Azure AI Search as the retrieval layer and Microsoft Foundry as the synthesis layer, not the database or source of truth.
+- loads all indexed chunks for a document in `chunk_index` order;
+- groups content by normalized page number;
+- jumps to a requested page;
+- highlights the selected evidence passage and useful terms;
+- renders text chunks;
+- renders tabular chunks as HTML tables when row/column separators are available;
+- shows extracted figure text for figure chunks;
+- lets the user add the selected passage to the Shelf;
+- provides **Original in REGDOCS** when the normalized source has a source URL;
+- clearly states that HTML layout can differ from the original source.
 
-The route must:
+The viewer requires only the Stage 5 Search data described in [`DATA-CONTRACT.md`](DATA-CONTRACT.md). A duplicate PDF upload is not required for the v1 application.
 
-- honor all active scopes and filters;
-- allow a workspace-only mode;
-- return document/page citations that the UI can open;
-- show the primary corpus date window with every answer;
-- distinguish sourced statements from model inference;
-- decline or qualify answers when retrieval is insufficient;
-- log retrieval and citations for evaluation without exposing secrets.
+### Shelf
 
-## Data products and Schedule A
+The Shelf is a browser-side research evidence set. A saved item keeps its Search chunk/document/page/source identity.
 
-“Schedule A” is a document label, not one universal schema. The first pilot should therefore be a two-stage system:
+Users can:
 
-1. **Candidate discovery:** find title, heading, and body mentions; cluster candidates by form family and filing context.
-2. **Reviewed extraction:** define a schema for one family, extract rows with page provenance, validate types and units, review exceptions, then publish CSV plus a data dictionary.
+- add evidence from cited/retrieved source cards;
+- add the selected passage from the document reader;
+- reopen saved evidence;
+- remove evidence;
+- ask a question constrained to the saved chunk IDs;
+- export the saved evidence as CSV.
 
-Each published row needs:
+Server-side saved/shared workspaces are not part of v1.
 
-- stable row and source identifiers;
-- original value and normalized value;
-- document ID, filing number, page, and source URL;
-- extraction model/version;
-- review status and confidence or exception reason;
-- dataset coverage dates and refresh timestamp.
+### Regulatory timeline
 
-The same catalogue pattern can later support conditions, commitments, information requests, consultation logs, watercourse tables, financial schedules, incident timelines, and regulatory instruments.
+The timeline reads `regdocs-events` and requires an explicit document, filing, company, or project scope. Event records retain date basis/precision, origin, confidence, review state, and available source evidence.
 
-## Corpus statistics contract
+### Relationship graph
 
-Never display an unlabeled “documents” number. Use these definitions:
+The graph reads `regdocs-relations` and `regdocs-entities` for an explicit research scope. Relationship edges retain available source evidence and review/provenance metadata.
 
-- **Registry record:** a filing, folder, compound document, or file returned by REGDOCS collection.
-- **Searchable document:** a downloaded file analyzed and published to the search index.
-- **Page:** an analyzer page record.
-- **Table:** an analyzer-detected table; this is not necessarily one logical table across multiple pages.
-- **Passage:** a normalized text, table, or figure chunk returned by search.
+### Findings & claims
 
-Coverage metrics should eventually come from a generated, deployable manifest rather than constants in the browser bundle. The manifest should include the primary complete date window, linked-record range, counts, generation time, index version, and known gaps.
+The view reads `regdocs-claims` and exposes extracted statement, claimant/subject where present, evidence, confidence, origin, extractor version, and review state.
 
-## Delivery order
+A “regulator finding” label is used conservatively from explicit extracted claimant/type information; Atlas does not silently turn party claims into regulator findings.
 
-1. Instrument search queries, zero-result searches, filter use, source opens, workspace adds, and exports with privacy-conscious analytics.
-2. Generate the coverage manifest during normalization/index publication and expose it through an API.
-3. Add saved/shareable workspaces with stable URLs and an explicit retention policy.
-4. Publish and evaluate the integrated vector index; make hybrid the default only after it clears the relevance and latency thresholds.
-5. Evaluate the integrated Foundry route for citation correctness, unsupported claims, retrieval sufficiency, latency, and cost.
-6. Pilot one Schedule A family and publish its reviewed CSV/data dictionary.
-7. Add an optional original-page comparison beside the accessible HTML reader and provenance polygon highlights on the source image.
+### Commitments & obligations
 
-## Product success measures
+The view reads `regdocs-obligations` and exposes obligation type, obligated party, action, deadline/status where present, source evidence, confidence, origin, extractor version, and review state.
 
-- percentage of tasks that reach a verified source page;
-- median time to first useful passage;
-- successful known-item lookup rate;
-- zero-result and reformulation rates;
-- workspace-to-source-open and workspace-to-export rates;
-- search relevance and citation correctness on the CER evaluation set;
-- structured extraction precision, recall, and review burden;
-- user confidence in coverage and source traceability.
+“Outstanding” is based on explicit extracted status such as open/pending/outstanding/incomplete/due/overdue. Atlas does not independently make a legal determination that an obligation remains unsatisfied.
+
+### Coverage
+
+Coverage is read from the currently configured Search index rather than hard-coded dates. It reports the active index, indexed chunk count, and represented filing-date range.
+
+### Diagnostics and errors
+
+Operators have:
+
+- shallow service/configuration diagnostics;
+- protected live diagnostics for Search, hybrid/semantic retrieval, document retrieval, Foundry, and the five intelligence indexes;
+- structured Ask telemetry without question text;
+- user-visible `ATLAS-...` references for server faults;
+- Log Analytics lookup by error reference.
+
+## V1 data architecture
+
+```text
+CER REGDOCS
+   ↓
+Stages 1–4
+   ↓
+normalized five-file package
+   ├── Stage 5 → regdocs-chunks-hybrid
+   │               ├── Ask retrieval
+   │               ├── source cards
+   │               ├── HTML document viewer
+   │               ├── Shelf evidence
+   │               └── coverage
+   │
+   └── Stage 6 → deterministic + Microsoft Foundry extraction
+                   ├── regdocs-entities
+                   ├── regdocs-relations
+                   ├── regdocs-events
+                   ├── regdocs-claims
+                   └── regdocs-obligations
+```
+
+Stage 6 is the final data-processing stage. Deployment verification is not another pipeline stage.
+
+See [`DATA-CONTRACT.md`](DATA-CONTRACT.md) for the exact feature-to-data contract.
+
+## Grounding rules
+
+Atlas is evidence-first:
+
+- Azure AI Search is the retrieval layer and corpus source for Ask.
+- Foundry is the synthesis/extraction layer, not the authoritative record.
+- citations must resolve to retrieved evidence;
+- Stage 6 model records must cite valid chunk IDs from the exact extraction input;
+- model-derived intelligence remains `unreviewed` until reviewed;
+- material decisions should be checked against the original REGDOCS source.
+
+## Capability status for v1
+
+The v1 product is designed to ship with these controls:
+
+```text
+Ask
+Filters
+Retrieved/cited sources
+HTML source viewer
+Shelf + Shelf-only Ask + CSV export
+Timeline
+Relationship graph
+Findings & claims
+Commitments & obligations
+Coverage
+Diagnostics/error tracing
+```
+
+The UI intentionally does **not** advertise unfinished controls for reviewed Schedule A datasets, arbitrary data-product generation, shared server-side workspaces, or embedded original-page PDF rendering.
+
+## V1 completion
+
+The project is complete when the finite acceptance list in [`../COMPLETION.md`](../COMPLETION.md) passes against the production deployment.
+
+New capabilities after that point are a later release, not additional stages required to complete v1.
