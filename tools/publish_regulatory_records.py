@@ -119,7 +119,7 @@ def batches(records: Sequence[dict[str, Any]], size: int) -> Iterator[list[dict[
         yield list(records[start : start + size])
 
 
-def upload(client: SearchClient[dict[str, Any]], records: Sequence[dict[str, Any]], batch_size: int) -> int:
+def upload(client: SearchClient, records: Sequence[dict[str, Any]], batch_size: int) -> int:
     uploaded = 0
     for batch_number, batch in enumerate(batches(records, batch_size), 1):
         documents = [{"key": search_key(str(item["id"])), **item} for item in batch]
@@ -160,7 +160,7 @@ def run(args: argparse.Namespace) -> int:
     obligations = list(iter_jsonl(input_dir / "obligations.jsonl"))
     credential = DefaultAzureCredential()
     index_client = SearchIndexClient(endpoint=args.endpoint, credential=credential)
-    search_clients: list[SearchClient[dict[str, Any]]] = []
+    search_clients: list[SearchClient] = []
     try:
         definitions = {
             "claims": claims_index(args.claims_index),
@@ -174,7 +174,7 @@ def run(args: argparse.Namespace) -> int:
             ("claims", claims, args.claims_index),
             ("obligations", obligations, args.obligations_index),
         ):
-            client = SearchClient[dict[str, Any]](endpoint=args.endpoint, index_name=index_name, credential=credential)
+            client = SearchClient(endpoint=args.endpoint, index_name=index_name, credential=credential)
             search_clients.append(client)
             published[kind] = upload(client, records, args.batch_size)
             print(f"Published {published[kind]} {kind} to {index_name}", flush=True)
