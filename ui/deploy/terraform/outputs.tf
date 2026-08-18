@@ -26,6 +26,17 @@ output "foundry_project_endpoint" {
   value = local.foundry_project_url
 }
 
+output "log_analytics_workspace_id" {
+  description = "Workspace customer ID used by the protected Atlas error lookup API."
+  value       = azurerm_log_analytics_workspace.main.workspace_id
+}
+
+output "diagnostics_operator_token" {
+  description = "Bearer token for /api/diagnostics/errors. Retrieve explicitly with terraform output -raw diagnostics_operator_token."
+  value       = random_password.diagnostics_operator_token.result
+  sensitive   = true
+}
+
 output "index_job_name" {
   value = local.index_job_name
 }
