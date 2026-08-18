@@ -162,7 +162,7 @@ resource "azurerm_cognitive_deployment" "chat" {
 
   sku {
     name     = var.chat_sku
-    capacity = var.chat_capacity
+    capacity = max(var.chat_capacity, 100)
   }
 
   version_upgrade_option = "NoAutoUpgrade"
