@@ -38,6 +38,10 @@ resource "azurerm_container_registry" "main" {
   sku                 = "Basic"
   admin_enabled       = false
   tags                = var.tags
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "azurerm_log_analytics_workspace" "main" {
@@ -86,6 +90,10 @@ resource "azurerm_search_service" "main" {
     type = "SystemAssigned"
   }
 
+  lifecycle {
+    prevent_destroy = true
+  }
+
   tags = var.tags
 }
 
@@ -101,6 +109,10 @@ resource "azurerm_cognitive_account" "foundry" {
 
   identity {
     type = "SystemAssigned"
+  }
+
+  lifecycle {
+    prevent_destroy = true
   }
 
   tags = var.tags
@@ -293,7 +305,7 @@ resource "azurerm_container_app" "ui" {
 
     container {
       name   = "regdocs-ui"
-      image  = "${azurerm_container_registry.main.login_server}/regdocs-ui:${var.image_tag}"
+      image  = "${azurerm_container_registry.main.login_server}/regdocs-ui:${var.ui_image_tag}"
       cpu    = 0.5
       memory = "1Gi"
 
@@ -378,7 +390,7 @@ resource "azurerm_container_app_job" "indexer" {
   template {
     container {
       name   = "regdocs-indexer"
-      image  = "${azurerm_container_registry.main.login_server}/regdocs-indexer:${var.image_tag}"
+      image  = "${azurerm_container_registry.main.login_server}/regdocs-indexer:${var.indexer_image_tag}"
       cpu    = 2
       memory = "4Gi"
 

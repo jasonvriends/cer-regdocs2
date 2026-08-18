@@ -27,7 +27,7 @@ variable "foundry_location" {
 }
 
 variable "name_suffix" {
-  description = "Globally unique lowercase letters/digits suffix used in public Azure names."
+  description = "Stable globally unique lowercase letters/digits suffix used in public Azure resource names. Reuse it with the same remote Terraform state."
   type        = string
 
   validation {
@@ -145,8 +145,9 @@ variable "embedding_dimensions" {
 }
 
 variable "embedding_batch_size" {
-  type    = number
-  default = 128
+  description = "Embedding request batch size. 32 is the production-safe default after larger batches caused indexing failures."
+  type        = number
+  default     = 32
 }
 
 variable "search_upload_batch_size" {
@@ -179,8 +180,14 @@ variable "chat_capacity" {
   default = 10
 }
 
-variable "image_tag" {
-  description = "Immutable source revision tag built by ACR Tasks."
+variable "ui_image_tag" {
+  description = "Immutable source revision tag for the REGDOCS Atlas UI image."
+  type        = string
+  default     = "bootstrap"
+}
+
+variable "indexer_image_tag" {
+  description = "Immutable source revision tag for the REGDOCS Atlas indexer image."
   type        = string
   default     = "bootstrap"
 }
