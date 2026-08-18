@@ -4,18 +4,15 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 GUIDE="$SCRIPT_DIR/deploy-guide.sh"
 
-# Next.js expects NODE_ENV to be exactly production, development, or test and
-# sets the appropriate value for its own commands. Azure Cloud Shell or a user
-# profile can leak a custom value into this process; remove only non-standard
-# values so `--validate` cannot fail because of unrelated shell configuration.
-case "${NODE_ENV:-}" in
-  ""|production|development|test)
-    ;;
-  *)
-    echo "NOTE: ignoring non-standard inherited NODE_ENV=${NODE_ENV@Q}; Next.js will select the correct mode." >&2
-    unset NODE_ENV
-    ;;
-esac
+# Do not let an interactive shell choose the React/Next build mode. In Azure
+# Cloud Shell an inherited NODE_ENV=development caused `next build` to compile
+# and typecheck successfully, then fail while prerendering /_global-error.
+# Next.js selects the correct mode for `next build`; the production container
+# sets NODE_ENV=production explicitly at runtime.
+if [[ -n "${NODE_ENV:-}" ]]; then
+  echo "NOTE: ignoring inherited NODE_ENV=${NODE_ENV@Q}; deploy validation lets Next.js select its build mode." >&2
+  unset NODE_ENV
+fi
 
 usage() {
   cat <<'EOF'
