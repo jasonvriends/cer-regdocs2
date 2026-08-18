@@ -29,7 +29,7 @@ import { useAtlas } from "@/components/atlas-context";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import type { AtlasCitation } from "@/lib/atlas-ui";
+import type { AtlasCitation, AtlasRunInfo } from "@/lib/atlas-ui";
 import { citationToResult } from "@/lib/atlas-ui";
 
 const STARTERS = [
@@ -68,15 +68,14 @@ function Welcome() {
   );
 }
 
-function CitationList({ data }: DataMessagePartProps<AtlasCitation[]>) {
+function SourceCards({ citations, label, countLabel }: { citations: AtlasCitation[]; label: string; countLabel: string }) {
   const { addEvidence, basket, openSource } = useAtlas();
-  const citations = data as AtlasCitation[];
 
   return (
     <div className="mt-5">
       <div className="mb-2.5 flex items-center justify-between">
-        <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Sources</span>
-        <span className="text-xs text-muted-foreground">{citations.length} cited</span>
+        <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">{label}</span>
+        <span className="text-xs text-muted-foreground">{citations.length} {countLabel}</span>
       </div>
       <div className="grid gap-2 sm:grid-cols-2">
         {citations.map((citation) => {
@@ -105,6 +104,35 @@ function CitationList({ data }: DataMessagePartProps<AtlasCitation[]>) {
         })}
       </div>
     </div>
+  );
+}
+
+function CitationList({ data }: DataMessagePartProps<AtlasCitation[]>) {
+  return <SourceCards citations={data as AtlasCitation[]} countLabel="cited" label="Cited sources" />;
+}
+
+function EvidenceList({ data }: DataMessagePartProps<AtlasCitation[]>) {
+  return <SourceCards citations={data as AtlasCitation[]} countLabel="retrieved" label="Retrieved evidence" />;
+}
+
+function RunInfo({ data }: DataMessagePartProps<AtlasRunInfo>) {
+  const info = data as AtlasRunInfo;
+  const retrieval = info.retrievalMode === "hybrid" ? "Hybrid" : info.retrievalMode === "keyword" ? "Keyword" : info.retrievalMode;
+  const retrievalLabel = `${retrieval}${info.semanticApplied ? " + semantic" : ""}`;
+  return (
+    <details className="mt-3 text-[11px] text-muted-foreground">
+      <summary className="cursor-pointer list-none select-none">
+        <span className="font-medium text-foreground">{info.foundryUsed ? "Grounded by Microsoft Foundry" : "Foundry not used"}</span>
+        <span> · {retrievalLabel} · {info.citationCount} cited · {(info.timings.totalMs / 1000).toFixed(1)}s</span>
+      </summary>
+      <div className="mt-2 rounded-lg border bg-muted/35 px-3 py-2 leading-5">
+        <div>Deployment: <span className="font-mono text-foreground">{info.deployment || "unknown"}</span></div>
+        <div>Evidence: {info.evidenceCount} retrieved · {info.citationCount} cited · citation validation passed</div>
+        <div>Retrieval: {info.retrievalMode}{info.retrievalFallbackFrom ? ` (fallback from ${info.retrievalFallbackFrom})` : ""} · retries {info.retryCount}</div>
+        <div>Timing: Search {info.timings.retrievalMs} ms · Foundry {info.timings.foundryMs} ms · total {info.timings.totalMs} ms</div>
+        {info.coverage ? <div>Corpus: {info.coverage.indexName} · {info.coverage.chunkCount.toLocaleString()} chunks · {info.coverage.earliestFilingDate || "unknown"} → {info.coverage.latestFilingDate || "unknown"}</div> : null}
+      </div>
+    </details>
   );
 }
 
@@ -170,7 +198,9 @@ function Composer() {
 }
 
 export function AtlasThread() {
+  useAssistantDataUI({ name: "regdocs-evidence", render: EvidenceList });
   useAssistantDataUI({ name: "regdocs-citations", render: CitationList });
+  useAssistantDataUI({ name: "regdocs-run-info", render: RunInfo });
 
   return (
     <ThreadPrimitive.Root className="flex h-full min-h-0 flex-col bg-background">
