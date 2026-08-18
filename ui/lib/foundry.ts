@@ -25,6 +25,8 @@ export type FoundryAnswer = {
 let cachedProject: AIProjectClient | undefined;
 let cachedEndpoint = "";
 
+const FOUNDRY_RATE_LIMIT_RETRY_DELAYS_MS = [1_000, 3_000];
+
 function foundryConfig() {
   const endpoint = process.env.FOUNDRY_PROJECT_ENDPOINT?.trim();
   const model = process.env.FOUNDRY_MODEL_DEPLOYMENT?.trim();
@@ -97,6 +99,83 @@ function citedSources(answer: string, citations: AtlasCitation[]) {
   return citations.filter((citation) => referenced.has(citation.id));
 }
 
+function errorStatus(error: unknown) {
+  if (!error || typeof error !== "object") return undefined;
+  const candidate = error as { status?: unknown; statusCode?: unknown };
+  if (typeof candidate.status === "number") return candidate.status;
+  if (typeof candidate.statusCode === "number") return candidate.statusCode;
+  return undefined;
+}
+
+function isFoundryRateLimitError(error: unknown) {
+  if (errorStatus(error) === 429) return true;
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return message.includes("rate limit") || message.includes("too many requests");
+}
+
+function abortedError() {
+  const error = new Error("Foundry request was aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+async function waitForRetry(delayMs: number, signal?: AbortSignal) {
+  if (signal?.aborted) throw abortedError();
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+      reject(abortedError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function withFoundryRateLimitRetry<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  let retryCount = 0;
+  while (true) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isFoundryRateLimitError(error) || retryCount >= FOUNDRY_RATE_LIMIT_RETRY_DELAYS_MS.length || signal?.aborted) {
+        throw error;
+      }
+      const delayMs = FOUNDRY_RATE_LIMIT_RETRY_DELAYS_MS[retryCount];
+      retryCount += 1;
+      console.warn("REGDOCS Foundry rate limit; retrying request", { retryCount, delayMs });
+      await waitForRetry(delayMs, signal);
+    }
+  }
+}
+
+async function* streamWithFoundryRateLimitRetry<T>(
+  operation: () => Promise<AsyncIterable<T>>,
+  signal?: AbortSignal,
+): AsyncGenerator<T> {
+  let retryCount = 0;
+  while (true) {
+    const buffered: T[] = [];
+    try {
+      const events = await operation();
+      for await (const event of events) buffered.push(event);
+      for (const event of buffered) yield event;
+      return;
+    } catch (error) {
+      if (!isFoundryRateLimitError(error) || retryCount >= FOUNDRY_RATE_LIMIT_RETRY_DELAYS_MS.length || signal?.aborted) {
+        throw error;
+      }
+      const delayMs = FOUNDRY_RATE_LIMIT_RETRY_DELAYS_MS[retryCount];
+      retryCount += 1;
+      console.warn("REGDOCS Foundry rate limit; retrying stream", { retryCount, delayMs });
+      await waitForRetry(delayMs, signal);
+    }
+  }
+}
+
 export async function answerWithFoundry(
   question: string,
   evidence: AtlasSearchResult[],
@@ -107,14 +186,14 @@ export async function answerWithFoundry(
   const citations = citationsFor(evidence);
 
   const openai = projectClient(endpoint).getOpenAIClient();
-  const response = await openai.responses.create({
+  const response = await withFoundryRateLimitRetry(() => openai.responses.create({
     model,
     instructions: GROUNDED_INSTRUCTIONS,
     input: groundedInput(question, evidence),
     reasoning: { effort: "none" },
     max_output_tokens: 1400,
     ...(safetyIdentifier ? { safety_identifier: safetyIdentifier } : {}),
-  });
+  }));
 
   const answer = response.output_text?.trim();
   if (!answer) throw new Error("Microsoft Foundry returned an empty answer");
@@ -138,17 +217,20 @@ export async function streamWithFoundry(
   const { endpoint, model } = foundryConfig();
   if (!evidence.length) throw new Error("No evidence was retrieved for this question");
   const openai = projectClient(endpoint).getOpenAIClient();
-  const events = await openai.responses.create(
-    {
-      model,
-      instructions: GROUNDED_INSTRUCTIONS,
-      input: groundedInput(question, evidence),
-      reasoning: { effort: "none" },
-      max_output_tokens: 1400,
-      stream: true,
-      ...(safetyIdentifier ? { safety_identifier: safetyIdentifier } : {}),
-    },
-    { signal },
+  const events = streamWithFoundryRateLimitRetry(
+    async () => await openai.responses.create(
+      {
+        model,
+        instructions: GROUNDED_INSTRUCTIONS,
+        input: groundedInput(question, evidence),
+        reasoning: { effort: "none" },
+        max_output_tokens: 1400,
+        stream: true,
+        ...(safetyIdentifier ? { safety_identifier: safetyIdentifier } : {}),
+      },
+      { signal },
+    ),
+    signal,
   );
   return { events, citations: citationsFor(evidence), model };
 }
