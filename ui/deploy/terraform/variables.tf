@@ -182,8 +182,9 @@ variable "chat_sku" {
 }
 
 variable "chat_capacity" {
-  type    = number
-  default = 10
+  description = "Global Standard chat deployment capacity. REGDOCS enforces a production floor of 100 in main.tf to reduce Ask throttling."
+  type        = number
+  default     = 100
 }
 
 variable "ui_image_tag" {
