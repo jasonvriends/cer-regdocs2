@@ -78,11 +78,16 @@ async function probeIndex(indexName: string): Promise<Check> {
     const client = new SearchClient<Record<string, unknown>>(endpoint, indexName, searchCredential());
     const response = await client.search("*", { top: 1, includeTotalCount: true });
     for await (const _ of response.results) break;
-    return response.count ?? null;
+    return response.count ?? 0;
   });
-  return result.value === null
-    ? result.check
-    : { ...result.check, count: result.value, detail: indexName };
+  if (result.value === null) return result.check;
+  return {
+    ...result.check,
+    ok: result.value > 0,
+    count: result.value,
+    detail: indexName,
+    ...(result.value > 0 ? {} : { error: `${indexName} is reachable but contains no records` }),
+  };
 }
 
 function diagnosticEvidence(): AtlasSearchResult {
@@ -107,7 +112,13 @@ async function runDeep(): Promise<DiagnosticsPayload> {
 
   const keyword = await timed(() => searchRegdocs({ query, top: 1, mode: "keyword", sort: "relevance" }));
   checks.keywordSearch = keyword.value
-    ? { ...keyword.check, count: keyword.value.results.length, detail: `query=${query}` }
+    ? {
+        ...keyword.check,
+        ok: keyword.value.results.length > 0,
+        count: keyword.value.results.length,
+        detail: `query=${query}`,
+        ...(keyword.value.results.length ? {} : { error: `No keyword results for diagnostic query ${JSON.stringify(query)}` }),
+      }
     : keyword.check;
 
   let evidence = keyword.value?.results[0] ?? null;
@@ -115,7 +126,13 @@ async function runDeep(): Promise<DiagnosticsPayload> {
   if (config.hybrid) {
     const hybrid = await timed(() => searchRegdocs({ query, top: 1, mode: "hybrid", sort: "relevance" }));
     checks.hybridSearch = hybrid.value
-      ? { ...hybrid.check, count: hybrid.value.results.length, detail: config.semantic ? "vector + semantic" : "vector" }
+      ? {
+          ...hybrid.check,
+          ok: hybrid.value.results.length > 0,
+          count: hybrid.value.results.length,
+          detail: config.semantic ? "vector + semantic" : "vector",
+          ...(hybrid.value.results.length ? {} : { error: `No hybrid results for diagnostic query ${JSON.stringify(query)}` }),
+        }
       : hybrid.check;
     evidence ??= hybrid.value?.results[0] ?? null;
     checks.semanticSearch = config.semantic
@@ -133,7 +150,13 @@ async function runDeep(): Promise<DiagnosticsPayload> {
       page: evidence!.page_start ?? undefined,
     }));
     checks.documentView = document.value
-      ? { ...document.check, count: document.value.results.length, detail: evidence.document_id }
+      ? {
+          ...document.check,
+          ok: document.value.results.length > 0,
+          count: document.value.results.length,
+          detail: evidence.document_id,
+          ...(document.value.results.length ? {} : { error: "Document view returned no indexed chunks" }),
+        }
       : document.check;
   } else {
     checks.documentView = { ok: false, error: "No search result was available to test document retrieval" };
