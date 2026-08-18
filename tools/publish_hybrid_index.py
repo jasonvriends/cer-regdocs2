@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Publish normalized REGDOCS chunks to a versioned hybrid Azure AI Search index.
 
-This intentionally does not modify the existing ``regdocs-chunks`` lexical
-index. Embeddings are generated in client-side batches so the published vector
-is always produced by the same deployment configured for query vectorization.
+Embeddings are generated in client-side batches so the published vector is
+always produced by the same deployment configured for query vectorization.
+A full publication can prune stale keys only after the new corpus uploads
+successfully, avoiding an empty production index when embedding/upload fails.
 """
 from __future__ import annotations
 
@@ -53,7 +54,6 @@ def chunked(items: Iterable[dict[str, Any]], size: int) -> Iterator[list[dict[st
 
 def embedding_text(document: dict[str, Any]) -> str:
     parts = [document.get("title"), document.get("heading"), document.get("content")]
-    # Conservative character cap for the embedding model's context window.
     text = "\n\n".join(str(part).strip() for part in parts if part).strip()[:24_000]
     return text or f"Document {document.get('document_id')} passage {document.get('chunk_id')}"
 
@@ -347,6 +347,36 @@ def upload(client: Any, documents: Iterable[dict[str, Any]], total: int, batch_s
     return uploaded, batch_count
 
 
+def expected_keys(normalized_dir: Path) -> set[str]:
+    return {str(document["key"]) for document in iter_documents(normalized_dir, None, None)}
+
+
+def prune_stale(client: Any, wanted: set[str], batch_size: int = 1000) -> int:
+    stale: list[str] = []
+    results = client.search(search_text="*", select=["key"])
+    for result in results:
+        key = str(result.get("key") or "")
+        if key and key not in wanted:
+            stale.append(key)
+    if not stale:
+        print("Stale-key reconciliation: no obsolete Search chunks found.")
+        return 0
+
+    deleted = 0
+    for start in range(0, len(stale), batch_size):
+        batch = [{"key": key} for key in stale[start : start + batch_size]]
+        responses = client.delete_documents(documents=batch)
+        failed = [result for result in responses if not bool(getattr(result, "succeeded", False))]
+        if failed:
+            detail = "; ".join(
+                f"{getattr(result, 'key', '?')}: {getattr(result, 'error_message', '')}" for result in failed[:10]
+            )
+            raise RuntimeError(f"Azure rejected deletion of {len(failed)} stale chunk(s): {detail}")
+        deleted += len(responses)
+    print(f"Stale-key reconciliation removed {deleted} obsolete Search chunk(s).")
+    return deleted
+
+
 def parser() -> argparse.ArgumentParser:
     value = os.getenv
     p = argparse.ArgumentParser(
@@ -373,6 +403,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--upload-batch-size", type=int, default=100)
     p.add_argument("--cache-db", default=stored_path(DEFAULT_CACHE_DB))
     p.add_argument("--recreate-index", action="store_true")
+    p.add_argument("--prune-stale", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     return p
 
@@ -394,6 +425,8 @@ def validate(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"Normalized directory not found: {args.normalized_dir}")
     if args.recreate_index and (args.document_id or args.limit is not None):
         raise ValueError("--recreate-index cannot be combined with a partial selection")
+    if args.prune_stale and (args.document_id or args.limit is not None):
+        raise ValueError("--prune-stale cannot be combined with a partial selection")
     if args.dry_run:
         return
     missing = [
@@ -465,6 +498,10 @@ def run(args: argparse.Namespace) -> int:
             search_client, enriched, int(meta["search_document_count"]), args.upload_batch_size
         )
         print(f"Published {uploaded} hybrid chunks to {args.index_name!r} in {batch_count} upload batch(es).")
+        if args.prune_stale:
+            wanted = expected_keys(args.normalized_dir)
+            print(f"Reconciling the live index against {len(wanted)} normalized chunk key(s).")
+            prune_stale(search_client, wanted)
         return 0
     finally:
         cache.close()
