@@ -2,7 +2,9 @@
 
 REGDOCS Atlas is the Next.js research workbench for CER REGDOCS evidence published through Azure AI Search and Microsoft Foundry.
 
-It is designed around one rule: **generated answers and derived regulatory intelligence must stay connected to source evidence**.
+The v1 rule is simple: **answers and derived regulatory intelligence stay connected to source evidence**.
+
+For the exact data behind each feature, see [`DATA-CONTRACT.md`](DATA-CONTRACT.md). For the finite project acceptance gate, see [`../COMPLETION.md`](../COMPLETION.md).
 
 ## Production architecture
 
@@ -13,12 +15,12 @@ Browser
 Azure Container App: app-regdocs-<suffix>
   |
   +--> Azure AI Search
-  |      - regdocs-chunks-hybrid       document chunks / keyword / vector / semantic
-  |      - regdocs-entities            Stage 6 entities
-  |      - regdocs-relations           Stage 6 relationships
-  |      - regdocs-events              Stage 6 chronology
-  |      - regdocs-claims              Stage 6 findings/claims
-  |      - regdocs-obligations         Stage 6 conditions/commitments/obligations
+  |      - regdocs-chunks-hybrid       Search / Ask / HTML documents / Shelf / coverage
+  |      - regdocs-entities            graph nodes
+  |      - regdocs-relations           graph edges
+  |      - regdocs-events              regulatory timeline
+  |      - regdocs-claims              findings / claims
+  |      - regdocs-obligations         commitments / obligations
   |
   +--> Microsoft Foundry
   |      - grounded Ask synthesis
@@ -26,35 +28,61 @@ Azure Container App: app-regdocs-<suffix>
   |
   +--> Log Analytics
          - UI/API logs
-         - Stage 5 job logs
-         - Stage 6 job logs
-         - structured atlas.error events
+         - Stage 5 logs
+         - Stage 6 logs
+         - atlas.error events
          - Ask telemetry
 ```
 
-Production Azure calls use managed identities. Search, Foundry, Log Analytics credentials, and the diagnostics operator token are never sent to normal browser code.
+Production Azure calls use managed identities. Search, Foundry, Log Analytics credentials, and the diagnostics operator token are not sent to normal browser code.
 
-## User-facing features
+## V1 user-facing features
 
-Atlas currently provides:
+The visible v1 tools are implemented end to end:
 
-- natural-language grounded Ask;
+- grounded natural-language Ask;
 - keyword, hybrid vector, and optional semantic retrieval;
+- company/project/filing/document/content-type filters;
 - hybrid-to-keyword fallback;
-- separate **retrieved evidence** and **actually cited evidence**;
-- citation validation before generated answer text is accepted;
-- an expandable per-answer line proving which Microsoft Foundry deployment and retrieval path were used;
-- normalized HTML source reading with page/chunk navigation and evidence highlighting;
-- Research Shelf evidence collection/export;
-- live corpus coverage from the configured Search index;
+- separate retrieved evidence and final cited evidence;
+- citation validation;
+- expandable Foundry/retrieval/timing/coverage details on answers;
+- normalized HTML document viewing;
+- page jumps, evidence highlighting, HTML table rendering, extracted figure text, and original REGDOCS links;
+- Shelf evidence collection;
+- Shelf-only Ask;
+- Shelf CSV export;
+- live corpus coverage;
 - regulatory timeline;
 - relationship graph;
-- **Findings & claims** view;
-- **Commitments & obligations** view with explicit condition/commitment/deadline/status filters;
+- Findings & claims;
+- Commitments & obligations;
 - protected operator diagnostics;
 - traceable `ATLAS-...` server-error references.
 
-Model-extracted Stage 6 records remain visibly marked `unreviewed` until a review workflow changes that state. The UI does not infer that an obligation is outstanding unless the extracted status explicitly indicates an open/pending/outstanding state.
+The v1 UI intentionally does not advertise unfinished arbitrary dataset generation, server-side shared workspaces, or an embedded PDF viewer.
+
+## Document viewer
+
+The source reader is an accessible HTML reconstruction of the indexed normalized document.
+
+It uses the Stage 5 fields:
+
+```text
+document_id
+chunk_id
+chunk_index
+chunk_type
+heading
+content
+page_start
+page_end
+source_url
+```
+
+For a source preview Atlas fetches all indexed chunks for the document in `chunk_index` order. It groups them by page, highlights the selected evidence, supports page jumps, renders tables, shows extracted figure text, and exposes the original REGDOCS URL when available.
+
+A duplicate PDF upload is not required. The UI explicitly warns that HTML layout may differ from the authoritative source.
 
 ## Ask provenance
 
@@ -64,53 +92,31 @@ Successful answers show a compact expandable footer such as:
 Grounded by Microsoft Foundry · Hybrid + semantic · 6 cited · 1.8s
 ```
 
-The details include:
+Details include:
 
 ```text
-Foundry deployment/model
-retrieval mode
-hybrid fallback if any
-semantic ranking status
+Foundry deployment
+retrieval mode / fallback
+semantic ranking
 retrieved evidence count
 cited evidence count
 retry count
-Search time
-Foundry time
-total time
+Search / Foundry / total time
 current Search index and filing-date coverage
 ```
 
-The Ask stream distinguishes:
+The stream treats these separately:
 
 ```text
 evidence    passages retrieved from Azure AI Search
-citations   passages the validated Foundry answer actually cited
+citations   passages actually cited by the validated Foundry answer
 ```
 
-If Foundry generation fails after Search succeeds, the retrieved evidence remains available without being mislabeled as cited.
+If synthesis fails after Search succeeds, retrieved evidence can remain visible without being mislabeled as cited.
 
-## Regulatory intelligence
+## Stage 6 regulatory intelligence
 
-Stage 6 has two layers:
-
-```text
-normalized documents
-  |
-  +--> deterministic metadata derivation
-  |
-  +--> Microsoft Foundry structured extraction
-          - events
-          - claims
-          - obligations
-          - relationships
-          - evidence chunk IDs
-          - confidence
-          - review state
-```
-
-Foundry output is rejected if it does not cite valid chunk IDs from the exact input batch. Model-derived records carry evidence page/chunk information, extractor/model version, confidence, and `review_status=unreviewed`.
-
-The cloud Stage 6 job publishes five Search indexes:
+Stage 6 combines deterministic derivation with Microsoft Foundry structured extraction and publishes:
 
 ```text
 regdocs-entities
@@ -120,73 +126,88 @@ regdocs-claims
 regdocs-obligations
 ```
 
-## Operator commands
+Foundry-derived records are rejected unless their evidence chunk IDs belong to the exact extraction input. They retain confidence/origin/extractor information and remain `unreviewed` until a review workflow changes that state.
+
+Stage 6 is the final data-processing stage.
+
+## Start deployment here
 
 ```bash
-# Local preflight; no Azure calls.
-./ui/deploy/deploy.sh --validate
+./ui/deploy/deploy.sh
+```
 
-# Terraform preview against the durable remote state.
-./ui/deploy/deploy.sh --plan
+No arguments means **read-only guide**. It does not deploy anything. It checks what it can see and prints the next command.
 
-# UI/API update only; no Stage 5/Stage 6 run.
-./ui/deploy/deploy.sh --ui-only
+The main commands are:
 
-# Terraform/RBAC/config only.
-./ui/deploy/deploy.sh --infra-only
-
-# Full infrastructure/workload deployment.
+```bash
+# Read-only guide
 ./ui/deploy/deploy.sh
 
-# Explicit Stage 5 hybrid-index publication.
+# Verify the five-file Stage 4 cloud package
+./ui/deploy/deploy.sh --check-data
+
+# Bash/Terraform/Python/TypeScript/Next.js validation; no Azure changes
+./ui/deploy/deploy.sh --validate
+
+# Terraform preview against remote state
+./ui/deploy/deploy.sh --plan
+
+# Terraform/RBAC/config only
+./ui/deploy/deploy.sh --infra-only
+
+# UI/API update only; never starts Stage 5/6
+./ui/deploy/deploy.sh --ui-only
+
+# Explicit full infrastructure/workload deployment
+./ui/deploy/deploy.sh --full
+
+# Explicit Stage 5 publication
 ./ui/deploy/deploy.sh --restart-index
 
-# Explicit Stage 6 Foundry extraction/publication.
+# Explicit Stage 6 publication
 ./ui/deploy/deploy.sh --restart-intelligence
 
-# Refresh both publication layers.
-./ui/deploy/deploy.sh --restart-index --restart-intelligence
-
-# UI URL/images, Stage 5/6 executions, recent Log Analytics logs.
+# Current URL/images, Stage 5/6 executions, and recent logs
 ./ui/deploy/deploy.sh --status
 
-# Trace a user-visible server error.
+# Trace one user-visible error
 ./ui/deploy/deploy.sh --error ATLAS-0123ABCD4567EF89
 ```
 
-See [`deploy/README.md`](deploy/README.md) for the full Cloud Shell deployment/runbook and [`OPERATIONS.md`](OPERATIONS.md) for the short operator workflow.
+See [`deploy/README-FIRST-DEPLOYMENT.md`](deploy/README-FIRST-DEPLOYMENT.md) for a first deployment and [`OPERATIONS.md`](OPERATIONS.md) for the short runbook.
 
 ## No GitHub Actions
 
-This repository intentionally does not use a GitHub Actions verification/deployment workflow. Before deployment run:
+The project intentionally does not require a GitHub Actions workflow for deployment or verification.
+
+Run:
 
 ```bash
 ./ui/deploy/deploy.sh --validate
 ```
 
-It checks Bash syntax, Terraform formatting/validation, Python compilation, TypeScript, and the production Next.js build without calling Azure.
-
-For infrastructure changes follow it with:
+before deployment. For infrastructure changes also review:
 
 ```bash
 ./ui/deploy/deploy.sh --plan
 ```
 
-## Terraform state and naming
+## Durable Terraform state and stable names
 
-Cloud Shell does not need to preserve local Terraform state. State lives in the configured Blob container, normally at:
+Terraform state lives in the configured Blob container, normally:
 
 ```text
 terraform/regdocs-atlas.tfstate
 ```
 
-`NAME_SUFFIX` is a stable installation identifier, not a release number. Reuse it with the same remote state for every normal update.
+`NAME_SUFFIX` is a stable installation ID, not a release number. Reuse it with the same remote state.
 
 Terraform `prevent_destroy` protects the globally named ACR, Azure AI Search, and Foundry resources from accidental deletion/replacement.
 
-If the state Blob exists, do not import resources just because Cloud Shell was restarted.
+If the state Blob exists, do not import resources merely because Cloud Shell restarted.
 
-## Indexing safety setting
+## Indexing safety
 
 Keep:
 
@@ -194,39 +215,32 @@ Keep:
 EMBEDDING_BATCH_SIZE="32"
 ```
 
-The config example, Terraform default, cloud-indexer fallback, and deployment cap all use 32 after larger batches caused indexing failures.
+The config example, Terraform default, cloud-indexer fallback, and deployment cap all enforce the production-safe value after larger request batches caused indexing failures.
 
-## Stage 5 and Stage 6 jobs
+## Cloud jobs
 
-The shared publisher image is used by two independent Container Apps jobs:
+The publisher image is used by two independent Container Apps jobs:
 
 ```text
-job-regdocs-<suffix>                Stage 5 hybrid chunks/embeddings
+job-regdocs-<suffix>                Stage 5 Search/embeddings
 job-regdocs-intelligence-<suffix>   Stage 6 Foundry regulatory intelligence
 ```
 
-Stage 6 is not started implicitly by an ordinary deployment because corpus-wide model extraction can incur meaningful Foundry cost. Start it deliberately with:
+Stage 6 is started explicitly because corpus-wide model extraction can incur meaningful Foundry cost:
 
 ```bash
 ./ui/deploy/deploy.sh --restart-intelligence
 ```
 
-Its SQLite extraction cache is checkpointed to Blob every 15 minutes:
+Its extraction cache is checkpointed to Blob and completed requests can be reused after restarts.
+
+For the first production-quality check you may temporarily set:
 
 ```text
-workspace/6_enrich/model/extraction.sqlite
-```
-
-A restarted job reuses completed requests for unchanged normalized input/model/prompt versions.
-
-For a first pilot, set in `config.env`:
-
-```bash
 INTELLIGENCE_DOCUMENT_LIMIT="10"
-export TF_VAR_intelligence_document_limit="$INTELLIGENCE_DOCUMENT_LIMIT"
 ```
 
-Apply configuration and run Stage 6, inspect the results, then clear the limit for full-corpus extraction.
+Inspect the pilot, then clear the limit for final corpus publication.
 
 ## Live diagnostics
 
@@ -236,16 +250,16 @@ Open:
 https://<atlas-host>/diagnostics
 ```
 
-Shallow configuration is inexpensive. **Run live checks** requires the operator token because it makes real service calls and returns operational diagnostics.
+Shallow configuration is inexpensive. **Run live checks** requires the diagnostics operator token.
 
-Retrieve the token after Terraform is attached to production state:
+Retrieve it after Terraform is attached to the production state:
 
 ```bash
 terraform -chdir=ui/deploy/terraform output -raw diagnostics_operator_token
 printf '\n'
 ```
 
-Live checks verify:
+Live diagnostics exercise:
 
 ```text
 corpus metadata
@@ -253,39 +267,39 @@ keyword Search
 hybrid/vector Search
 semantic ranking when configured
 HTML document retrieval
-real Microsoft Foundry grounded inference
-entities index
-relations index
-events index
-claims index
-obligations index
+Microsoft Foundry grounded inference
+entities
+relations
+events
+claims
+obligations
 ```
 
 ## User-visible errors
 
-Real server faults from Ask, Search, source reading, evidence lookup, timeline, graph, claims, and obligations receive references such as:
+Server faults from the v1 APIs receive references such as:
 
 ```text
 ATLAS-0123ABCD4567EF89
 ```
 
-Fastest operator lookup:
+Fast operator lookup:
 
 ```bash
 ./ui/deploy/deploy.sh --error ATLAS-0123ABCD4567EF89
 ```
 
-Or open:
+Or use:
 
 ```text
 https://<atlas-host>/diagnostics/errors?errorId=ATLAS-0123ABCD4567EF89
 ```
 
-The web lookup requires the operator token. Ask question text is intentionally not written to structured error/Ask telemetry events.
+Ask question text is intentionally not included in structured error/Ask telemetry events.
 
 ## Runtime configuration
 
-Terraform supplies the normal production settings, including:
+Terraform supplies the production settings, including:
 
 ```text
 AZURE_CLIENT_ID
@@ -299,17 +313,9 @@ LOG_ANALYTICS_WORKSPACE_ID
 REGDOCS_DIAGNOSTICS_TOKEN
 ```
 
-The intelligence readers default to:
+The five Stage 6 index names default to the `regdocs-*` names in [`DATA-CONTRACT.md`](DATA-CONTRACT.md).
 
-```text
-AZURE_SEARCH_ENTITIES_INDEX=regdocs-entities
-AZURE_SEARCH_RELATIONS_INDEX=regdocs-relations
-AZURE_SEARCH_EVENTS_INDEX=regdocs-events
-AZURE_SEARCH_CLAIMS_INDEX=regdocs-claims
-AZURE_SEARCH_OBLIGATIONS_INDEX=regdocs-obligations
-```
-
-For local development, Azure Search may also use `AZURE_SEARCH_API_KEY`. Never put credentials or operator secrets in `NEXT_PUBLIC_*` variables.
+For local development Search may also use `AZURE_SEARCH_API_KEY`. Never put credentials or operator secrets in `NEXT_PUBLIC_*` variables.
 
 ## Local development
 
@@ -320,27 +326,24 @@ cp .env.local.example .env.local
 npm run dev
 ```
 
-Production verification:
+Release validation uses:
 
 ```bash
-cd ui
-npm ci
-npm run typecheck
-npm run build
+./ui/deploy/deploy.sh --validate
 ```
 
 ## Public URL
 
-The Azure-managed Container Apps hostname looks like:
+The generated Container Apps hostname has the form:
 
 ```text
 https://app-regdocs-<suffix>.<environment-id>.<region>.azurecontainerapps.io
 ```
 
-Print the real current URL with:
+Print the real deployed URL with:
 
 ```bash
 ./ui/deploy/deploy.sh --status
 ```
 
-For a short stable address such as `regdocsatlas.example.com`, bind a custom domain you own. `azurewebsites.net` is the App Service hostname family, not the generated hostname for Azure Container Apps.
+A custom domain can provide a shorter address. `azurewebsites.net` is the App Service hostname family, not the Azure-managed Container Apps hostname.
