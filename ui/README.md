@@ -1,172 +1,66 @@
 # REGDOCS Atlas UI
 
-REGDOCS Atlas is the web research workbench for the Stage 5 Azure AI Search index and Stage 6 regulatory-intelligence artifacts.
+REGDOCS Atlas is the Next.js research workbench for the Stage 5 Azure AI Search index and Stage 6 regulatory-intelligence indexes.
 
-The Python pipeline remains responsible for acquiring, analyzing, normalizing, and publishing REGDOCS data. The `ui/` application is a separate Next.js application that reads the published `regdocs-chunks` index through server-side API routes.
+The Python pipeline acquires, analyzes, normalizes, enriches, and publishes REGDOCS data. The `ui/` application is the web layer that lets people search that published corpus, open normalized documents, collect evidence, inspect timelines and relationships, and ask Microsoft Foundry for grounded answers.
+
+## Production architecture
+
+```text
+Browser
+  |
+  v
+Azure Container App: app-regdocs-<suffix>
+  |
+  +--> Azure AI Search
+  |      - regdocs chunks / hybrid search
+  |      - entities
+  |      - relations
+  |      - events
+  |
+  +--> Microsoft Foundry
+  |      - grounded Ask
+  |      - chat deployment
+  |
+  +--> Log Analytics
+         - Container App console logs
+         - structured atlas.error events
+         - Ask telemetry
+```
+
+The browser never receives Azure Search credentials, Foundry credentials, Log Analytics credentials, or the diagnostics operator token. Server-side Azure calls use managed identity in production.
 
 ## What is implemented
 
 The current workbench includes:
 
-- full-stack Next.js/TypeScript application under `ui/`;
-- BERDI-inspired discovery home with purpose-led entry points;
-- three-pane Search / Source / Research Workspace layout;
-- an explicit corpus coverage dashboard with count definitions;
-- a Data Products catalogue and Schedule A pilot path;
-- server-side Azure AI Search access using App Service managed identity or a local query key;
-- hybrid keyword/vector retrieval with optional semantic reranking on a vector-enabled index;
-- Microsoft Foundry grounded answers over either active search filters or exact Workspace passages;
-- streamed grounded answers with validated page-level citations;
-- deterministic document/page citation cards for every source marker returned by the model;
-- scoped regulatory timelines that distinguish filing dates from occurrence dates;
-- scoped relationship graphs for organizations, projects, filings, and documents;
-- evidence links from timeline and graph records back into the active source viewer;
-- persistent System, Light, and Dark appearance selection;
-- no Azure Search credentials shipped to the browser;
-- global corpus search;
-- Filing Dossier, Company, Project, and Document X-Ray search lenses;
-- What Happened, Tables, Figures, Red Flags, and Obligations retrieval presets;
-- exact filing ID, filing number, document ID, company, project, and page filters;
-- Azure Search facets for companies, projects, document types, roles, commodities, application types, chunk types, and file types;
-- total result counts;
-- relevance, filing-date, and chunk-order sorting;
-- Research Workspace collection and within-workspace search for the current browser session;
-- CSV export of collected passages with document, page, and source identity;
-- page-like HTML document reconstruction that opens around a selected search hit;
-- automatic match scrolling and query-term highlighting;
-- structured HTML rendering for extracted text, tables, and figure labels;
-- jump-to-page and windowed previous/next navigation for very large documents;
-- health endpoint at `GET /api/health`.
+- server-side Azure AI Search access;
+- keyword, hybrid vector, and optional semantic retrieval;
+- Microsoft Foundry grounded answers;
+- citation validation before generated answer text is shown;
+- automatic hybrid-to-keyword fallback when needed;
+- retrieved evidence preserved even when Foundry synthesis fails;
+- HTML document reconstruction instead of depending on remote PDF embedding;
+- page/chunk navigation and evidence highlighting;
+- Research Shelf / evidence collection;
+- regulatory timelines and relationship graphs from Stage 6 indexes;
+- `/diagnostics` for configuration and explicit live service checks;
+- structured Ask telemetry;
+- user-visible `ATLAS-...` error references for server faults;
+- protected Log Analytics error lookup at `/diagnostics/errors`.
 
-Hybrid and Ask are configuration-gated: keyword search continues to work against the existing lexical index, while hybrid retrieval requires the versioned vector index and Ask requires a Foundry project/model deployment. See [`PRODUCT.md`](PRODUCT.md) for the capability contract, evaluation requirements, and Schedule A approach.
+See [`PRODUCT.md`](PRODUCT.md) for the product/capability contract and [`OPERATIONS.md`](OPERATIONS.md) for the focused operator runbook.
 
-## Required configuration
+---
 
-The endpoint and index name select the Azure AI Search index:
+# Required runtime configuration
+
+The production Terraform deployment configures these values automatically on the Container App:
 
 ```text
-AZURE_SEARCH_ENDPOINT=https://<service-name>.search.windows.net
-AZURE_SEARCH_INDEX=regdocs-chunks-hybrid
-AZURE_SEARCH_VECTOR_FIELD=content_vector
-AZURE_SEARCH_SEMANTIC_CONFIGURATION=regdocs-semantic
-FOUNDRY_PROJECT_ENDPOINT=https://<resource>.services.ai.azure.com/api/projects/<project>
-FOUNDRY_MODEL_DEPLOYMENT=<chat-model-deployment>
-AZURE_SEARCH_ENTITIES_INDEX=regdocs-entities
-AZURE_SEARCH_RELATIONS_INDEX=regdocs-relations
-AZURE_SEARCH_EVENTS_INDEX=regdocs-events
-```
-
-Authentication is chosen automatically:
-
-- In Azure App Service, leave `AZURE_SEARCH_API_KEY` unset and grant the web app's managed identity the read-only `Search Index Data Reader` role.
-- For local development, either sign in with Azure CLI and use an identity that has `Search Index Data Reader`, or set `AZURE_SEARCH_API_KEY` to a read-only query key.
-
-An admin key works locally but grants permissions the UI does not need. Never put a key in a variable beginning with `NEXT_PUBLIC_`; Next.js exposes `NEXT_PUBLIC_*` values to browser code.
-
-`AZURE_SEARCH_VECTOR_FIELD` enables hybrid requests. `AZURE_SEARCH_SEMANTIC_CONFIGURATION` is optional; when set, relevant hybrid queries are reranked using that index configuration. Foundry calls always use `DefaultAzureCredential`. Grant the runtime identity permission to invoke the deployed model in the Foundry project.
-
-Timeline and Relationship graph read the three Stage 6 indexes. For local previews without those indexes, set `REGDOCS_INTELLIGENCE_DIR` to a completed Stage 6 output directory. `FOUNDRY_SAFETY_SALT` is recommended for multi-user deployments; Atlas hashes it with the requester address and sends only the derived identifier to Foundry.
-
-## Publish the hybrid index
-
-The existing `regdocs-chunks` index is deliberately preserved. The publisher defaults to a separate `regdocs-chunks-hybrid` index and refuses to write to the lexical production name.
-
-Start with a dry run and a small pilot:
-
-```bash
-python tools/publish_hybrid_index.py --dry-run --limit 100
-
-export AZURE_SEARCH_ENDPOINT="https://YOUR-SERVICE.search.windows.net"
-export AZURE_SEARCH_ADMIN_KEY="YOUR-SEARCH-ADMIN-KEY"
-export AZURE_OPENAI_ENDPOINT="https://YOUR-RESOURCE.openai.azure.com"
-export AZURE_OPENAI_API_KEY="YOUR-EMBEDDING-KEY"
-export AZURE_OPENAI_EMBEDDING_DEPLOYMENT="text-embedding-3-small"
-
-python tools/publish_hybrid_index.py --limit 100
-```
-
-Validate the pilot, then run without `--limit` to idempotently publish the complete normalized corpus. Embeddings and uploads are batched; rerunning uses stable Search keys and merges the same chunks. Use a new versioned index name when changing the embedding model or dimensions.
-
-The publisher also persists vectors under `workspace/5_index/embedding-cache.sqlite`. If embedding generation or upload is interrupted, repeat the same command; completed embedding calls are reused instead of billed again. Keep the cache until the full index passes `tools/verify_ai_deployment.py`.
-
-For keyless embedding generation, omit `AZURE_OPENAI_API_KEY` and authenticate with Azure Identity. For keyless query vectorization, grant the Search service's managed identity access to the embedding deployment. If the Search service cannot call the deployment with managed identity, set `AZURE_OPENAI_VECTORIZER_API_KEY` only in the publisher environment; Azure stores it in the index vectorizer configuration.
-
-For the normal production path, upload `workspace/` and `database/` to an
-existing private Blob container with SAS, then run [`deploy/`](deploy/) from
-Azure Cloud Shell. It provisions Search, Foundry, App Service, RBAC, index
-publication, verification, and UI deployment, using the same Blob container
-for input, the resumable embedding cache, and the App Service ZIP.
-
-## Local development
-
-Prerequisites:
-
-- Node.js 22 or newer;
-- an Azure AI Search index produced by Stage 5.
-
-From the repository root:
-
-```bash
-cd ui
-npm install
-cp .env.local.example .env.local
-```
-
-Edit `.env.local` with the real Search endpoint, index name, and (if needed) query key, then run:
-
-```bash
-npm run dev
-```
-
-Open the local Next.js URL.
-
-## Verify before deployment
-
-```bash
-cd ui
-npm install
-npm run typecheck
-npm run build
-```
-
-With the application running:
-
-```bash
-curl http://localhost:3000/api/health
-curl 'http://localhost:3000/api/search?q=caribou&top=5'
-curl 'http://localhost:3000/api/search?q=effects%20on%20caribou&mode=hybrid&top=5'
-curl 'http://localhost:3000/api/search?q=*&chunkType=table&top=5'
-curl 'http://localhost:3000/api/document-view?documentId=<document-id>&page=42'
-curl 'http://localhost:3000/api/timeline?documentId=<document-id>'
-curl 'http://localhost:3000/api/graph?filingId=<filing-id>'
-curl -X POST http://localhost:3000/api/ask -H 'content-type: application/json' \
-  -d '{"question":"What mitigation was proposed for caribou?","searchMode":"hybrid"}'
-```
-
-A configured health response looks like:
-
-```json
-{
-  "service": "regdocs-atlas-ui",
-  "status": "ok",
-  "azureSearch": {
-    "endpointConfigured": true,
-        "authentication": "managed_identity",
-        "indexName": "regdocs-chunks-hybrid",
-        "hybridConfigured": true,
-        "semanticConfigured": true
-  },
-  "foundry": { "configured": true }
-}
-```
-
-The health response never includes an API key.
-
-## Azure App Service runtime
-
-Use a Linux App Service with Node.js 24 LTS and the startup command `node server.js`. Configure:
-
-```text
+AZURE_CLIENT_ID
+LOG_ANALYTICS_WORKSPACE_ID
+REGDOCS_DIAGNOSTICS_TOKEN
 AZURE_SEARCH_ENDPOINT
 AZURE_SEARCH_INDEX
 AZURE_SEARCH_VECTOR_FIELD
@@ -174,20 +68,351 @@ AZURE_SEARCH_SEMANTIC_CONFIGURATION
 FOUNDRY_PROJECT_ENDPOINT
 FOUNDRY_MODEL_DEPLOYMENT
 FOUNDRY_SAFETY_SALT
-AZURE_SEARCH_ENTITIES_INDEX
-AZURE_SEARCH_RELATIONS_INDEX
-AZURE_SEARCH_EVENTS_INDEX
 ```
 
-Enable the web app's managed identity and assign it `Search Index Data Reader` on the Search service. No Python pipeline process is required in the web application.
+The Stage 6 intelligence readers default to the deployed index names `regdocs-entities`, `regdocs-relations`, and `regdocs-events`. They can be overridden for nonstandard deployments with `AZURE_SEARCH_ENTITIES_INDEX`, `AZURE_SEARCH_RELATIONS_INDEX`, and `AZURE_SEARCH_EVENTS_INDEX`.
 
-The production build uses Next.js standalone output. A deployment package must contain the contents of `.next/standalone` at its root, including `server.js`, plus `.next/static` copied into `.next/standalone/.next/static`.
+For local development, Azure Search may also use a read-only `AZURE_SEARCH_API_KEY`. Do not put secrets in variables beginning with `NEXT_PUBLIC_`; Next.js exposes those variables to browser code.
 
-If searches return `403` after role propagation, confirm that Azure AI Search allows role-based access under **Settings > Keys**. If the Search service restricts public network access, the App Service also needs an allowed outbound path or private-network integration.
+Foundry calls and production Search/Log Analytics calls use `DefaultAzureCredential`. The Terraform deployment assigns the Container App's user-assigned identity the required Azure roles.
 
-## Search API
+---
 
-The browser calls `GET /api/search`. The route builds Azure OData filters on the server instead of accepting arbitrary client-supplied filter expressions.
+# Local development
+
+Prerequisites:
+
+- Node.js 22 or newer;
+- an Azure AI Search index produced by Stage 5;
+- Azure credentials or a read-only Search query key.
+
+From the repository root:
+
+```bash
+cd ui
+npm install
+cp .env.local.example .env.local
+npm run dev
+```
+
+Before publishing UI code, run:
+
+```bash
+cd ui
+npm ci
+npm run typecheck
+npm run build
+```
+
+GitHub Actions also runs typecheck/build and validates the Terraform configuration. It does not run a deployed smoke test.
+
+---
+
+# Production deployment from Azure Cloud Shell
+
+The production deployment is under [`ui/deploy/`](deploy/). It uses:
+
+- Terraform for Azure resources and RBAC;
+- Azure Blob Storage for durable Terraform state;
+- Azure Container Registry for immutable UI/indexer images;
+- Azure Container Apps for the web UI and resumable indexing job;
+- Microsoft Foundry for embeddings/chat;
+- Azure AI Search for corpus and intelligence indexes;
+- Log Analytics for application logs and error lookup.
+
+## Important: Cloud Shell does not need to keep Terraform state locally
+
+Terraform state is remote. By default it lives at:
+
+```text
+terraform/regdocs-atlas.tfstate
+```
+
+inside the existing Blob container configured by `STORAGE_ACCOUNT` and `BLOB_CONTAINER`.
+
+`deploy.sh` runs `terraform init -reconfigure` against that Blob on every deployment. A new or reset Cloud Shell session therefore does **not** mean Terraform state has been lost.
+
+### Verify the remote state before considering imports
+
+```bash
+cd ~/cer-regdocs2
+source ui/deploy/config.env
+
+read -rsp "Paste SAS: " AZURE_STORAGE_SAS_TOKEN
+printf '\n'
+export AZURE_STORAGE_SAS_TOKEN="${AZURE_STORAGE_SAS_TOKEN#\?}"
+
+az storage blob show \
+  --account-name "$STORAGE_ACCOUNT" \
+  --container-name "$BLOB_CONTAINER" \
+  --name "${STATE_BLOB:-terraform/regdocs-atlas.tfstate}" \
+  --sas-token "$AZURE_STORAGE_SAS_TOKEN" \
+  --query '{name:name,size:properties.contentLength,lastModified:properties.lastModified}' \
+  -o table
+```
+
+If that Blob exists, **do not import the Azure resources**. Reuse the remote state.
+
+If the state Blob is missing but the Azure resources still exist, stop before running `terraform apply`. That is a state-recovery/import situation and the existing resource IDs should be imported deliberately rather than allowing Terraform to treat the deployment as new.
+
+## One-time Cloud Shell setup
+
+```bash
+git clone <repository-url> cer-regdocs2
+cd cer-regdocs2
+cp ui/deploy/config.env.example ui/deploy/config.env
+code ui/deploy/config.env
+```
+
+At minimum configure:
+
+```text
+SUBSCRIPTION_ID
+NAME_SUFFIX
+STORAGE_ACCOUNT
+STORAGE_RESOURCE_GROUP
+BLOB_CONTAINER
+CONFIRM_BILLABLE_DEPLOYMENT=yes
+```
+
+Then provide a private container SAS with Read, Create, Write, and List permission. Keep the SAS out of Git and out of `config.env`.
+
+```bash
+read -rsp "Paste the container SAS token: " AZURE_STORAGE_SAS_TOKEN
+printf '\n'
+AZURE_STORAGE_SAS_TOKEN="${AZURE_STORAGE_SAS_TOKEN#\?}"
+export AZURE_STORAGE_SAS_TOKEN
+```
+
+## Full infrastructure + workload deployment
+
+Use this when:
+
+- provisioning the environment for the first time;
+- Terraform changed;
+- RBAC changed;
+- Container App environment variables changed;
+- Foundry/Search infrastructure changed;
+- normalized corpus/index inputs changed.
+
+Update the checkout first:
+
+```bash
+cd ~/cer-regdocs2
+git checkout master
+git pull origin master
+```
+
+Then run:
+
+```bash
+./ui/deploy/deploy.sh
+```
+
+The script is designed to be rerun after Cloud Shell disconnects. ACR builds continue in Azure and the indexing job runs independently of the Cloud Shell session.
+
+If the script exits after queueing ACR builds, rerun the same command after the builds complete:
+
+```bash
+./ui/deploy/deploy.sh
+```
+
+When normalized `chunks.jsonl` or `provenance.jsonl` changed and you intentionally want a new index publication:
+
+```bash
+./ui/deploy/deploy.sh --restart-index
+```
+
+To provision without starting an otherwise-needed indexing job:
+
+```bash
+./ui/deploy/deploy.sh --no-start
+```
+
+**Note:** the deployment script tags both UI and indexer images with the current Git commit. A changed indexer image may cause the deployment logic to start a new indexing execution. For a normal UI-code-only release, use the UI-only procedure below instead.
+
+---
+
+# Deploy only the UI
+
+Use this when Terraform, RBAC, Search, Foundry, and index data are already correct and the change is only Next.js/UI/API code.
+
+This path:
+
+- builds only `regdocs-ui`;
+- updates only the Container App;
+- does not run Terraform;
+- does not touch Search or Foundry resources;
+- does not start the indexing job;
+- does not require the Blob SAS.
+
+From Azure Cloud Shell:
+
+```bash
+cd ~/cer-regdocs2
+git checkout master
+git pull origin master
+
+source ui/deploy/config.env
+az account set --subscription "$SUBSCRIPTION_ID"
+
+RESOURCE_GROUP="${RESOURCE_GROUP:-rg-regdocs-atlas}"
+TAG="$(git rev-parse --short=12 HEAD)"
+ACR_NAME="crregdocs${NAME_SUFFIX}"
+APP_NAME="app-regdocs-${NAME_SUFFIX}"
+
+az acr build \
+  --registry "$ACR_NAME" \
+  --image "regdocs-ui:$TAG" \
+  --file ui/deploy/containers/ui.Dockerfile \
+  .
+
+ACR_LOGIN_SERVER="$(az acr show \
+  --name "$ACR_NAME" \
+  --query loginServer \
+  -o tsv)"
+
+az containerapp update \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --image "$ACR_LOGIN_SERVER/regdocs-ui:$TAG"
+```
+
+Confirm the active revision:
+
+```bash
+az containerapp revision list \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query "[].{Revision:name,Active:properties.active,Traffic:properties.trafficWeight,Created:properties.createdTime}" \
+  -o table
+```
+
+Get the public hostname:
+
+```bash
+UI_HOST="$(az containerapp show \
+  --name "$APP_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query properties.configuration.ingress.fqdn \
+  -o tsv)"
+
+echo "https://$UI_HOST"
+```
+
+### Important for the error-observability release
+
+The first deployment containing the Log Analytics error lookup must use the **full Terraform deployment**, because it adds RBAC, the workspace ID, and the diagnostics operator token to the Container App. After those infrastructure changes have been applied once, later UI-only releases can use the UI-only procedure above.
+
+---
+
+# Diagnostics
+
+Open:
+
+```text
+https://<atlas-host>/diagnostics
+```
+
+The page first shows inexpensive configuration checks. Clicking **Run live checks** performs real server-side checks against the configured services, including Azure AI Search, hybrid/semantic retrieval, Microsoft Foundry, the document reader backend, and Stage 6 intelligence indexes.
+
+These live checks are operator-initiated diagnostics. They are not an automated smoke-test suite.
+
+---
+
+# User-visible errors and Log Analytics
+
+Real server faults from Ask, Search, document view, evidence lookup, timeline, and relationship graph are assigned a random reference such as:
+
+```text
+ATLAS-0123ABCD4567EF89
+```
+
+The user sees a safe message containing that reference, for example:
+
+```text
+The grounded answer could not be generated.
+Reference: ATLAS-0123ABCD4567EF89
+```
+
+The server writes the same reference as a structured `atlas.error` event to the Container App console log. The Container Apps environment is already connected to the deployment's Log Analytics workspace.
+
+Normal validation errors, no-result responses, 404s, and rate-limit responses are not treated as server faults and therefore do not receive an operator error record.
+
+Ask question text is not added to the structured error event or Ask telemetry.
+
+## Operator lookup URL
+
+Open:
+
+```text
+https://<atlas-host>/diagnostics/errors?errorId=ATLAS-0123ABCD4567EF89
+```
+
+Enter the diagnostics operator token when prompted. The browser sends that token only to the Atlas server; the server uses managed identity to query Log Analytics.
+
+Retrieve the token after Terraform has been initialized against the production remote state:
+
+```bash
+terraform -chdir=ui/deploy/terraform output -raw diagnostics_operator_token
+printf '\n'
+```
+
+The Terraform output is marked sensitive. Do not put this token in client-side environment variables, screenshots, tickets, or Git.
+
+## Search the Log Analytics workspace directly
+
+In the Azure Portal, open the deployment's Log Analytics workspace and run:
+
+```kusto
+ContainerAppConsoleLogs_CL
+| where TimeGenerated > ago(30d)
+| where Log_s contains "ATLAS-0123ABCD4567EF89"
+| project TimeGenerated, ContainerAppName_s, RevisionName_s, ContainerName_s, Log_s
+| order by TimeGenerated desc
+```
+
+The Terraform deployment retains Log Analytics data for 30 days unless that configuration is changed.
+
+## What an operator should capture from an error
+
+When investigating a user report, ask for:
+
+1. the exact `ATLAS-...` reference;
+2. approximately when the error occurred;
+3. what feature they were using (Ask, Search, document, timeline, graph);
+4. optionally the page/filing/document they were viewing.
+
+The error reference is normally enough to find the underlying server exception. Avoid asking users to send sensitive credentials or copy large browser console dumps unless the server trace is insufficient.
+
+---
+
+# Ask / Foundry observability
+
+Successful and failed Ask requests emit structured `REGDOCS ask telemetry` without question text. The telemetry includes operational fields such as:
+
+```text
+retrieval mode
+hybrid -> keyword fallback
+number of evidence passages
+whether Foundry was used
+Foundry deployment/model
+citation-validation status
+retry count
+Search time
+Foundry time
+total time
+```
+
+This makes it possible to distinguish failures in retrieval from failures in Foundry generation or citation validation.
+
+If Foundry fails after Azure AI Search has already retrieved evidence, Atlas keeps those source passages visible rather than discarding the successful retrieval.
+
+---
+
+# Search API
+
+The browser calls `GET /api/search`. The route builds Azure OData filters on the server instead of accepting arbitrary filter expressions.
 
 Examples:
 
@@ -203,41 +428,41 @@ Examples:
 /api/search?q=impacts%20to%20traditional%20land%20use&mode=hybrid
 ```
 
-Supported query parameters are:
+Supported parameters include `q`, `top`, `sort`, `page`, `documentId`, `filingId`, `filingNumber`, `company`, `project`, `chunkType`, `applicationType`, `commodity`, `documentType`, `fileType`, `role`, and `mode=keyword|hybrid`.
 
-- `q`
-- `top` (maximum 50)
-- `sort=relevance|newest|oldest|chunk`
-- `page`
-- `documentId`
-- `filingId`
-- `filingNumber`
-- `company`
-- `project`
-- `chunkType`
-- `applicationType`
-- `commodity`
-- `documentType`
-- `fileType`
-- `role`
-- `mode=keyword|hybrid`
+---
 
-Facet/filter parameters can be repeated to request multiple values.
+# HTML document viewer
 
-## HTML document viewer
+The normal source preview uses the normalized HTML document reader rather than embedding the remote REGDOCS PDF. `GET /api/document-view` retrieves an ordered window of indexed chunks around a requested page. The UI groups those chunks into page-like sheets, highlights matching evidence, renders extracted tables/figure labels where possible, and provides a link back to the authoritative REGDOCS source.
 
-The browser does not embed or reproduce the source PDF. `GET /api/document-view` retrieves an ordered window of normalized chunks around a requested page. The UI groups those chunks into page-like sheets, renders tab-delimited table chunks as HTML tables, labels extracted figure text, scrolls to the selected search passage, and highlights query terms.
+The HTML reconstruction is optimized for search, reading, accessibility, and evidence collection. It does not claim pixel fidelity to the original document.
 
-The view is optimized for reading, searching, accessibility, and evidence collection. It does not claim pixel fidelity: columns, exact line breaks, handwriting, images, and page geometry can differ from the original. Users can always open the authoritative source in REGDOCS.
+---
 
-## Grounded Ask architecture
+# Grounded Ask architecture
 
-`POST /api/ask` is a controlled retrieval-augmented generation route. For corpus questions, the server retrieves up to 12 passages from Azure AI Search using the active filters and selected keyword/hybrid mode. For Workspace questions, it refetches the exact chunk IDs from Search, so browser-supplied passage text is never trusted. Only those passages are sent to the Foundry model. The active UI requests NDJSON streaming and progressively renders the response; JSON remains available to non-streaming API clients.
+`POST /api/ask` is a controlled retrieval-augmented generation route.
 
-The prompt requires a source marker such as `[S1]` on every factual claim, treats retrieved document text as untrusted content, prohibits outside knowledge, and asks the model to disclose insufficient evidence. The server maps markers back to fixed document/page/source metadata; the model cannot invent the citation cards. Important conclusions must still be verified against the authoritative REGDOCS source.
+For corpus questions, the server selects a retrieval strategy and retrieves up to 12 passages from Azure AI Search. Exact phrase/record-like questions can favor lexical search; normal conceptual questions favor hybrid retrieval, with keyword fallback when hybrid is unavailable or fails.
 
-## Current boundary
+For Shelf/Workspace questions, Atlas refetches the exact chunk IDs from Search so browser-supplied passage text is not trusted as evidence.
 
-Hybrid retrieval, grounded Ask, deterministic relationship graphs, and filing chronology are implemented but require Azure deployment configuration and CER-specific evaluation. Model-derived Stage 6 records remain explicitly labeled and unreviewed unless promoted through the pipeline. Find Similar, Filing DNA, contradiction analysis, a human review workbench, and reviewed Schedule A datasets remain later capabilities.
+Only retrieved passages are sent to Foundry. The answer must contain valid `[S#]` citations that map back to those fixed passages. Model text is held until citation validation succeeds. If generation or citation validation fails, the retrieved evidence remains available to the user and the failure receives an `ATLAS-...` reference when it is a server fault.
 
-The next source-viewer milestone is optionally serving an original page image beside the HTML reconstruction and applying Stage 4 provenance polygons to the source image. The HTML view remains the accessible reading surface.
+Important conclusions should still be verified against the authoritative REGDOCS source.
+
+---
+
+# Operational files
+
+```text
+ui/README.md                  UI architecture, deployment, diagnostics, errors
+ui/OPERATIONS.md              focused error/operations runbook
+ui/deploy/README.md           Cloud Shell/Terraform deployment details
+ui/deploy/deploy.sh           resumable full deployment script
+ui/deploy/config.env          ignored local deployment configuration
+ui/deploy/terraform/          Azure infrastructure and RBAC
+```
+
+For the Python acquisition/analysis pipeline, return to the repository-level [`README.md`](../README.md) and [`SYNTAX.md`](../SYNTAX.md).
