@@ -193,6 +193,8 @@ async function runDeep(): Promise<DiagnosticsPayload> {
   checks.entitiesIndex = await probeIndex(process.env.AZURE_SEARCH_ENTITIES_INDEX?.trim() || "regdocs-entities");
   checks.relationsIndex = await probeIndex(process.env.AZURE_SEARCH_RELATIONS_INDEX?.trim() || "regdocs-relations");
   checks.eventsIndex = await probeIndex(process.env.AZURE_SEARCH_EVENTS_INDEX?.trim() || "regdocs-events");
+  checks.claimsIndex = await probeIndex(process.env.AZURE_SEARCH_CLAIMS_INDEX?.trim() || "regdocs-claims");
+  checks.obligationsIndex = await probeIndex(process.env.AZURE_SEARCH_OBLIGATIONS_INDEX?.trim() || "regdocs-obligations");
 
   const required = Object.values(checks).filter((check) => !check.skipped);
   return {
