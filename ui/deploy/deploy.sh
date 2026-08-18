@@ -7,11 +7,16 @@ TERRAFORM_DIR="$SCRIPT_DIR/terraform"
 CONFIG_FILE="$SCRIPT_DIR/config.env"
 MODE="full"
 MODE_SET=false
+OPERATION="deploy"
+ERROR_ID=""
 RESTART_INDEX=false
 
 usage() {
   cat <<'EOF'
-Usage: ./ui/deploy/deploy.sh [--config PATH] [--full|--ui-only|--infra-only] [--restart-index]
+Usage:
+  ./ui/deploy/deploy.sh [--config PATH] [--full|--ui-only|--infra-only] [--restart-index]
+  ./ui/deploy/deploy.sh [--config PATH] --status
+  ./ui/deploy/deploy.sh [--config PATH] --error ATLAS-0123ABCD4567EF89
 
 Safe to run again after a Cloud Shell timeout. Terraform state is remote, ACR
 builds continue in Azure, and completed work is reused.
@@ -24,6 +29,13 @@ Deployment modes:
   --infra-only      Reconcile Terraform/RBAC/config only. Build no images and
                     never start the indexing job.
 
+Read-only operations:
+  --status          Show the live UI URL/image, indexer image, recent job
+                    executions, and recent logs for the latest execution from
+                    Log Analytics. No SAS token is required.
+  --error ID        Find one ATLAS-... server error in Log Analytics. No SAS
+                    token is required.
+
 Other options:
   --restart-index   With a full deployment, force a new indexing execution even
                     when the latest execution already succeeded.
@@ -34,23 +46,37 @@ Examples:
   ./ui/deploy/deploy.sh --infra-only
   ./ui/deploy/deploy.sh
   ./ui/deploy/deploy.sh --restart-index
+  ./ui/deploy/deploy.sh --status
+  ./ui/deploy/deploy.sh --error ATLAS-0123ABCD4567EF89
 EOF
+}
+
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
 }
 
 set_mode() {
   local requested="$1"
+  [[ "$OPERATION" == "deploy" ]] || fail "Deployment modes cannot be combined with --status or --error."
   if [[ "$MODE_SET" == true && "$MODE" != "$requested" ]]; then
-    echo "ERROR: choose only one deployment mode: --full, --ui-only, or --infra-only" >&2
-    exit 2
+    fail "Choose only one deployment mode: --full, --ui-only, or --infra-only."
   fi
   MODE="$requested"
   MODE_SET=true
 }
 
+set_operation() {
+  local requested="$1"
+  [[ "$OPERATION" == "deploy" ]] || fail "Choose only one read-only operation: --status or --error."
+  [[ "$MODE_SET" == false && "$RESTART_INDEX" == false ]] || fail "$requested cannot be combined with deployment-mode flags."
+  OPERATION="$requested"
+}
+
 while (($#)); do
   case "$1" in
     --config)
-      [[ $# -ge 2 ]] || { echo "ERROR: --config requires a path" >&2; exit 2; }
+      [[ $# -ge 2 ]] || fail "--config requires a path"
       CONFIG_FILE="$2"
       shift 2
       ;;
@@ -67,12 +93,22 @@ while (($#)); do
       shift
       ;;
     --restart-index)
+      [[ "$OPERATION" == "deploy" ]] || fail "--restart-index cannot be combined with --status or --error."
       RESTART_INDEX=true
       shift
       ;;
+    --status)
+      set_operation status
+      shift
+      ;;
+    --error)
+      [[ $# -ge 2 ]] || fail "--error requires an ATLAS-... reference"
+      set_operation error
+      ERROR_ID="$(tr '[:lower:]' '[:upper:]' <<<"$2")"
+      shift 2
+      ;;
     --no-start)
-      echo "ERROR: --no-start was removed. Use --ui-only for a UI release or --infra-only for Terraform/RBAC/config only." >&2
-      exit 2
+      fail "--no-start was removed. Use --ui-only for a UI release or --infra-only for Terraform/RBAC/config only."
       ;;
     -h|--help)
       usage
@@ -87,17 +123,11 @@ while (($#)); do
 done
 
 if [[ "$RESTART_INDEX" == true && "$MODE" != "full" ]]; then
-  echo "ERROR: --restart-index can only be used with the full deployment mode." >&2
-  exit 2
+  fail "--restart-index can only be used with the full deployment mode."
 fi
 
 log() {
   printf '\n==> %s\n' "$*"
-}
-
-fail() {
-  echo "ERROR: $*" >&2
-  exit 1
 }
 
 require_command() {
@@ -140,6 +170,94 @@ STATE_BLOB="${STATE_BLOB:-terraform/regdocs-atlas.tfstate}"
 NORMALIZED_BLOB_PREFIX="${NORMALIZED_BLOB_PREFIX:-workspace/4_normalize}"
 EMBEDDING_CACHE_BLOB="${EMBEDDING_CACHE_BLOB:-workspace/5_index/embedding-cache.sqlite}"
 STORAGE_SUBSCRIPTION_ID="${STORAGE_SUBSCRIPTION_ID:-$SUBSCRIPTION_ID}"
+APP_NAME="app-regdocs-${NAME_SUFFIX:-}"
+JOB_NAME="job-regdocs-${NAME_SUFFIX:-}"
+LOG_WORKSPACE_NAME="log-regdocs-${NAME_SUFFIX:-}"
+
+# Read-only status/error operations deliberately do not require Terraform state
+# access or a Storage SAS token.
+if [[ "$OPERATION" == "status" || "$OPERATION" == "error" ]]; then
+  for name in SUBSCRIPTION_ID NAME_SUFFIX RESOURCE_GROUP; do
+    require_value "$name"
+  done
+  require_command az
+
+  if ! az account show --output none 2>/dev/null; then
+    fail "Cloud Shell is not signed in."
+  fi
+  az account set --subscription "$SUBSCRIPTION_ID"
+
+  WORKSPACE_ID="$(az monitor log-analytics workspace show \
+    --resource-group "$RESOURCE_GROUP" \
+    --workspace-name "$LOG_WORKSPACE_NAME" \
+    --query customerId \
+    --output tsv \
+    --only-show-errors 2>/dev/null || true)"
+  [[ -n "$WORKSPACE_ID" ]] || fail "Could not find Log Analytics workspace $LOG_WORKSPACE_NAME in $RESOURCE_GROUP."
+
+  if [[ "$OPERATION" == "error" ]]; then
+    [[ "$ERROR_ID" =~ ^ATLAS-[A-F0-9]{16}$ ]] || fail "Error reference must look like ATLAS-0123ABCD4567EF89."
+    log "Looking up $ERROR_ID in Log Analytics"
+    az monitor log-analytics query \
+      --workspace "$WORKSPACE_ID" \
+      --analytics-query "ContainerAppConsoleLogs_CL | where TimeGenerated > ago(30d) | where Log_s contains '$ERROR_ID' | project Time=TimeGenerated, App=ContainerAppName_s, Revision=RevisionName_s, Container=ContainerName_s, Message=Log_s | order by Time desc" \
+      --output table \
+      --only-show-errors
+    exit 0
+  fi
+
+  UI_FQDN="$(az containerapp show \
+    --name "$APP_NAME" \
+    --resource-group "$RESOURCE_GROUP" \
+    --query properties.configuration.ingress.fqdn \
+    --output tsv \
+    --only-show-errors 2>/dev/null || true)"
+  UI_IMAGE="$(az containerapp show \
+    --name "$APP_NAME" \
+    --resource-group "$RESOURCE_GROUP" \
+    --query 'properties.template.containers[0].image' \
+    --output tsv \
+    --only-show-errors 2>/dev/null || true)"
+  INDEXER_IMAGE="$(az containerapp job show \
+    --name "$JOB_NAME" \
+    --resource-group "$RESOURCE_GROUP" \
+    --query 'properties.template.containers[0].image' \
+    --output tsv \
+    --only-show-errors 2>/dev/null || true)"
+
+  log "REGDOCS Atlas deployment status"
+  [[ -n "$UI_FQDN" ]] && echo "UI: https://$UI_FQDN" || echo "UI: not found"
+  [[ -n "$UI_IMAGE" ]] && echo "UI image: $UI_IMAGE"
+  [[ -n "$INDEXER_IMAGE" ]] && echo "Indexer image: $INDEXER_IMAGE"
+  echo "Log Analytics: $LOG_WORKSPACE_NAME ($WORKSPACE_ID)"
+
+  echo
+  echo "Recent index executions:"
+  az containerapp job execution list \
+    --name "$JOB_NAME" \
+    --resource-group "$RESOURCE_GROUP" \
+    --query 'sort_by(@, &properties.startTime)[-10:].{Name:name,Status:properties.status,Started:properties.startTime,Ended:properties.endTime}' \
+    --output table \
+    --only-show-errors 2>/dev/null || echo "No indexer job/executions found."
+
+  LATEST_EXECUTION_NAME="$(az containerapp job execution list \
+    --name "$JOB_NAME" \
+    --resource-group "$RESOURCE_GROUP" \
+    --query 'sort_by(@, &properties.startTime)[-1].name' \
+    --output tsv \
+    --only-show-errors 2>/dev/null || true)"
+
+  if [[ -n "$LATEST_EXECUTION_NAME" ]]; then
+    echo
+    echo "Recent Log Analytics output for $LATEST_EXECUTION_NAME:"
+    az monitor log-analytics query \
+      --workspace "$WORKSPACE_ID" \
+      --analytics-query "ContainerAppConsoleLogs_CL | where TimeGenerated > ago(48h) | where ContainerGroupName_s startswith '$LATEST_EXECUTION_NAME' | project Time=TimeGenerated, Message=Log_s | order by Time asc | take 200" \
+      --output table \
+      --only-show-errors 2>/dev/null || echo "Logs are not available yet. Log Analytics ingestion can take a few minutes."
+  fi
+  exit 0
+fi
 
 for name in \
   SUBSCRIPTION_ID NAME_SUFFIX STORAGE_ACCOUNT STORAGE_SUBSCRIPTION_ID STORAGE_RESOURCE_GROUP \
@@ -153,7 +271,7 @@ done
 [[ -n "${AZURE_STORAGE_SAS_TOKEN:-}" ]] || fail \
   "Export AZURE_STORAGE_SAS_TOKEN. It is used only by Cloud Shell to access remote Terraform state and, for full deployments, verify index inputs."
 [[ "$NAME_SUFFIX" =~ ^[a-z0-9]{3,12}$ ]] || fail \
-  "NAME_SUFFIX must be 3-12 lowercase letters or digits."
+  "NAME_SUFFIX must be 3-12 lowercase letters and digits."
 [[ "$STORAGE_ACCOUNT" =~ ^[a-z0-9]{3,24}$ ]] || fail \
   "STORAGE_ACCOUNT must be 3-24 lowercase letters and digits."
 
@@ -247,8 +365,6 @@ INDEXER_IN_STATE=false
 grep -Eq '^azurerm_container_app\.ui' <<<"$STATE_LIST" && UI_IN_STATE=true
 grep -Eq '^azurerm_container_app_job\.indexer' <<<"$STATE_LIST" && INDEXER_IN_STATE=true
 
-APP_NAME="app-regdocs-${NAME_SUFFIX}"
-JOB_NAME="job-regdocs-${NAME_SUFFIX}"
 LEGACY_IMAGE_TAG="$(terraform_output deployed_image_tag)"
 PREVIOUS_UI_IMAGE_TAG="$(terraform_output deployed_ui_image_tag)"
 PREVIOUS_INDEXER_IMAGE_TAG="$(terraform_output deployed_indexer_image_tag)"
@@ -461,7 +577,7 @@ case "$LATEST_STATUS" in
     [[ -n "$LATEST_STATUS" ]] && echo "Previous execution: $LATEST_NAME ($LATEST_STATUS)"
     az containerapp job start --name "$JOB_NAME" --resource-group "$RESOURCE_GROUP" \
       --no-wait --output none --only-show-errors
-    echo "The job now runs in Azure and survives Cloud Shell disconnects. Rerun this script to check it."
+    echo "The job now runs in Azure and survives Cloud Shell disconnects. Use --status to inspect executions and Log Analytics output."
     ;;
 esac
 
@@ -473,3 +589,6 @@ az containerapp job execution list \
   --query 'sort_by(@, &properties.startTime)[-5:].{Name:name,Status:properties.status,Started:properties.startTime,Ended:properties.endTime}' \
   --output table \
   --only-show-errors || true
+
+echo
+echo "Use ./ui/deploy/deploy.sh --status for recent indexer logs from Log Analytics."
