@@ -31,6 +31,13 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
 
+  deploy-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n ui/deploy/deploy.sh
+      - run: ./ui/deploy/deploy.sh --help
+
   terraform:
     runs-on: ubuntu-latest
     defaults:
