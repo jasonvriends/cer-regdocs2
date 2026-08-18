@@ -5,20 +5,46 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 TERRAFORM_DIR="$SCRIPT_DIR/terraform"
 CONFIG_FILE="$SCRIPT_DIR/config.env"
+MODE="full"
+MODE_SET=false
 RESTART_INDEX=false
-NO_START=false
 
 usage() {
   cat <<'EOF'
-Usage: ./ui/deploy/deploy.sh [--config PATH] [--restart-index] [--no-start]
+Usage: ./ui/deploy/deploy.sh [--config PATH] [--full|--ui-only|--infra-only] [--restart-index]
 
-Safe to run again after a Cloud Shell timeout. Completed Terraform resources,
-ACR images, and an active or successful indexing execution are reused.
+Safe to run again after a Cloud Shell timeout. Terraform state is remote, ACR
+builds continue in Azure, and completed work is reused.
 
-  --config PATH     Read deployment settings from PATH (default: config.env)
-  --restart-index   Start a new index execution even if the last one succeeded
-  --no-start        Provision everything but do not start the indexing job
+Deployment modes:
+  --full            Reconcile infrastructure, build/deploy UI and indexer, and
+                    start indexing when the indexer changed. This is the default.
+  --ui-only         Reconcile infrastructure, build/deploy only the UI, preserve
+                    the deployed indexer image, and never start the indexing job.
+  --infra-only      Reconcile Terraform/RBAC/config only. Build no images and
+                    never start the indexing job.
+
+Other options:
+  --restart-index   With a full deployment, force a new indexing execution even
+                    when the latest execution already succeeded.
+  --config PATH     Read deployment settings from PATH (default: config.env).
+
+Examples:
+  ./ui/deploy/deploy.sh --ui-only
+  ./ui/deploy/deploy.sh --infra-only
+  ./ui/deploy/deploy.sh
+  ./ui/deploy/deploy.sh --restart-index
 EOF
+}
+
+set_mode() {
+  local requested="$1"
+  if [[ "$MODE_SET" == true && "$MODE" != "$requested" ]]; then
+    echo "ERROR: choose only one deployment mode: --full, --ui-only, or --infra-only" >&2
+    exit 2
+  fi
+  MODE="$requested"
+  MODE_SET=true
 }
 
 while (($#)); do
@@ -28,13 +54,25 @@ while (($#)); do
       CONFIG_FILE="$2"
       shift 2
       ;;
+    --full)
+      set_mode full
+      shift
+      ;;
+    --ui-only)
+      set_mode ui-only
+      shift
+      ;;
+    --infra-only)
+      set_mode infra-only
+      shift
+      ;;
     --restart-index)
       RESTART_INDEX=true
       shift
       ;;
     --no-start)
-      NO_START=true
-      shift
+      echo "ERROR: --no-start was removed. Use --ui-only for a UI release or --infra-only for Terraform/RBAC/config only." >&2
+      exit 2
       ;;
     -h|--help)
       usage
@@ -47,6 +85,11 @@ while (($#)); do
       ;;
   esac
 done
+
+if [[ "$RESTART_INDEX" == true && "$MODE" != "full" ]]; then
+  echo "ERROR: --restart-index can only be used with the full deployment mode." >&2
+  exit 2
+fi
 
 log() {
   printf '\n==> %s\n' "$*"
@@ -68,6 +111,20 @@ require_value() {
   [[ "$value" != *REPLACE* ]] || fail "$name still contains REPLACE in $CONFIG_FILE"
 }
 
+terraform_output() {
+  local name="$1"
+  local value
+  value="$(terraform -chdir="$TERRAFORM_DIR" output -raw "$name" 2>/dev/null || true)"
+  [[ "$value" == "null" ]] && value=""
+  printf '%s' "$value"
+}
+
+image_tag_from_reference() {
+  local image="$1"
+  [[ -n "$image" ]] || return 0
+  printf '%s' "${image##*:}"
+}
+
 if [[ ! -f "$CONFIG_FILE" ]]; then
   fail "Missing $CONFIG_FILE. Copy config.env.example to config.env and edit it first."
 fi
@@ -83,10 +140,6 @@ STATE_BLOB="${STATE_BLOB:-terraform/regdocs-atlas.tfstate}"
 NORMALIZED_BLOB_PREFIX="${NORMALIZED_BLOB_PREFIX:-workspace/4_normalize}"
 EMBEDDING_CACHE_BLOB="${EMBEDDING_CACHE_BLOB:-workspace/5_index/embedding-cache.sqlite}"
 STORAGE_SUBSCRIPTION_ID="${STORAGE_SUBSCRIPTION_ID:-$SUBSCRIPTION_ID}"
-START_INDEX_JOB="${START_INDEX_JOB:-true}"
-if [[ "$NO_START" == true ]]; then
-  START_INDEX_JOB=false
-fi
 
 for name in \
   SUBSCRIPTION_ID NAME_SUFFIX STORAGE_ACCOUNT STORAGE_SUBSCRIPTION_ID STORAGE_RESOURCE_GROUP \
@@ -98,7 +151,7 @@ done
 [[ "${CONFIRM_BILLABLE_DEPLOYMENT:-}" == "yes" ]] || fail \
   "Set CONFIRM_BILLABLE_DEPLOYMENT=yes after reviewing the billable Azure resources."
 [[ -n "${AZURE_STORAGE_SAS_TOKEN:-}" ]] || fail \
-  "Export AZURE_STORAGE_SAS_TOKEN. It is used only by Cloud Shell to verify inputs and store Terraform state."
+  "Export AZURE_STORAGE_SAS_TOKEN. It is used only by Cloud Shell to access remote Terraform state and, for full deployments, verify index inputs."
 [[ "$NAME_SUFFIX" =~ ^[a-z0-9]{3,12}$ ]] || fail \
   "NAME_SUFFIX must be 3-12 lowercase letters or digits."
 [[ "$STORAGE_ACCOUNT" =~ ^[a-z0-9]{3,24}$ ]] || fail \
@@ -119,20 +172,22 @@ SAS_TOKEN="${AZURE_STORAGE_SAS_TOKEN#\?}"
 export ARM_SAS_TOKEN="$SAS_TOKEN"
 export ARM_SUBSCRIPTION_ID="$SUBSCRIPTION_ID"
 
-log "Verifying the two required normalized Blob inputs before creating billable resources"
-for filename in chunks.jsonl provenance.jsonl; do
-  blob_name="${NORMALIZED_BLOB_PREFIX%/}/$filename"
-  az storage blob show \
-    --account-name "$STORAGE_ACCOUNT" \
-    --container-name "$BLOB_CONTAINER" \
-    --name "$blob_name" \
-    --sas-token "$SAS_TOKEN" \
-    --query '[name,properties.contentLength]' \
-    --output tsv \
-    --only-show-errors >/dev/null || fail \
-      "Cannot read $blob_name using the supplied SAS token. Check its expiry, permissions, IP restrictions, and Storage firewall."
-  echo "Verified $blob_name"
-done
+if [[ "$MODE" == "full" ]]; then
+  log "Verifying normalized Blob inputs required by the indexing job"
+  for filename in chunks.jsonl provenance.jsonl; do
+    blob_name="${NORMALIZED_BLOB_PREFIX%/}/$filename"
+    az storage blob show \
+      --account-name "$STORAGE_ACCOUNT" \
+      --container-name "$BLOB_CONTAINER" \
+      --name "$blob_name" \
+      --sas-token "$SAS_TOKEN" \
+      --query '[name,properties.contentLength]' \
+      --output tsv \
+      --only-show-errors >/dev/null || fail \
+        "Cannot read $blob_name using the supplied SAS token. Check its expiry, permissions, IP restrictions, and Storage firewall."
+    echo "Verified $blob_name"
+  done
+fi
 
 export TF_VAR_subscription_id="$SUBSCRIPTION_ID"
 export TF_VAR_resource_group_name="$RESOURCE_GROUP"
@@ -147,7 +202,6 @@ export TF_VAR_blob_container_name="$BLOB_CONTAINER"
 export TF_VAR_normalized_blob_prefix="$NORMALIZED_BLOB_PREFIX"
 export TF_VAR_embedding_cache_blob="$EMBEDDING_CACHE_BLOB"
 CURRENT_IMAGE_TAG="$(git -C "$REPOSITORY_ROOT" rev-parse --short=12 HEAD)"
-export TF_VAR_image_tag="$CURRENT_IMAGE_TAG"
 
 # Optional config.env overrides map directly to Terraform variables.
 declare -A TF_OVERRIDES=(
@@ -187,24 +241,78 @@ terraform -chdir="$TERRAFORM_DIR" init -reconfigure -input=false \
   -backend-config="container_name=$BLOB_CONTAINER" \
   -backend-config="key=$STATE_BLOB"
 
-PREVIOUS_IMAGE_TAG="$(terraform -chdir="$TERRAFORM_DIR" output -raw deployed_image_tag 2>/dev/null || true)"
-if terraform -chdir="$TERRAFORM_DIR" state list 2>/dev/null | \
-    grep -Eq '^azurerm_container_app\.(ui|job)|^azurerm_container_app_job\.indexer'; then
+STATE_LIST="$(terraform -chdir="$TERRAFORM_DIR" state list 2>/dev/null || true)"
+UI_IN_STATE=false
+INDEXER_IN_STATE=false
+grep -Eq '^azurerm_container_app\.ui' <<<"$STATE_LIST" && UI_IN_STATE=true
+grep -Eq '^azurerm_container_app_job\.indexer' <<<"$STATE_LIST" && INDEXER_IN_STATE=true
+
+APP_NAME="app-regdocs-${NAME_SUFFIX}"
+JOB_NAME="job-regdocs-${NAME_SUFFIX}"
+LEGACY_IMAGE_TAG="$(terraform_output deployed_image_tag)"
+PREVIOUS_UI_IMAGE_TAG="$(terraform_output deployed_ui_image_tag)"
+PREVIOUS_INDEXER_IMAGE_TAG="$(terraform_output deployed_indexer_image_tag)"
+
+if [[ "$UI_IN_STATE" == true ]]; then
+  ACTUAL_UI_IMAGE="$(az containerapp show \
+    --name "$APP_NAME" \
+    --resource-group "$RESOURCE_GROUP" \
+    --query 'properties.template.containers[0].image' \
+    --output tsv \
+    --only-show-errors 2>/dev/null || true)"
+  ACTUAL_UI_TAG="$(image_tag_from_reference "$ACTUAL_UI_IMAGE")"
+  [[ -n "$ACTUAL_UI_TAG" ]] && PREVIOUS_UI_IMAGE_TAG="$ACTUAL_UI_TAG"
+fi
+
+if [[ "$INDEXER_IN_STATE" == true ]]; then
+  ACTUAL_INDEXER_IMAGE="$(az containerapp job show \
+    --name "$JOB_NAME" \
+    --resource-group "$RESOURCE_GROUP" \
+    --query 'properties.template.containers[0].image' \
+    --output tsv \
+    --only-show-errors 2>/dev/null || true)"
+  ACTUAL_INDEXER_TAG="$(image_tag_from_reference "$ACTUAL_INDEXER_IMAGE")"
+  [[ -n "$ACTUAL_INDEXER_TAG" ]] && PREVIOUS_INDEXER_IMAGE_TAG="$ACTUAL_INDEXER_TAG"
+fi
+
+[[ -n "$PREVIOUS_UI_IMAGE_TAG" ]] || PREVIOUS_UI_IMAGE_TAG="$LEGACY_IMAGE_TAG"
+[[ -n "$PREVIOUS_INDEXER_IMAGE_TAG" ]] || PREVIOUS_INDEXER_IMAGE_TAG="$LEGACY_IMAGE_TAG"
+
+if [[ "$MODE" == "ui-only" && ( "$UI_IN_STATE" != true || "$INDEXER_IN_STATE" != true ) ]]; then
+  fail "--ui-only requires an existing deployed UI and indexer. Use a full deployment first."
+fi
+
+if [[ "$UI_IN_STATE" == true || "$INDEXER_IN_STATE" == true ]]; then
+  [[ -n "$PREVIOUS_UI_IMAGE_TAG" ]] || fail "Could not determine the currently deployed UI image tag."
+  [[ -n "$PREVIOUS_INDEXER_IMAGE_TAG" ]] || fail "Could not determine the currently deployed indexer image tag."
   FOUNDATION_DEPLOY_WORKLOADS=true
-  FOUNDATION_IMAGE_TAG="${PREVIOUS_IMAGE_TAG:-$CURRENT_IMAGE_TAG}"
+  FOUNDATION_UI_IMAGE_TAG="$PREVIOUS_UI_IMAGE_TAG"
+  FOUNDATION_INDEXER_IMAGE_TAG="$PREVIOUS_INDEXER_IMAGE_TAG"
 else
   FOUNDATION_DEPLOY_WORKLOADS=false
-  FOUNDATION_IMAGE_TAG="$CURRENT_IMAGE_TAG"
+  FOUNDATION_UI_IMAGE_TAG="$CURRENT_IMAGE_TAG"
+  FOUNDATION_INDEXER_IMAGE_TAG="$CURRENT_IMAGE_TAG"
 fi
 
 log "Reconciling Azure infrastructure (safe to rerun)"
 terraform -chdir="$TERRAFORM_DIR" apply -auto-approve -input=false \
   -lock-timeout=5m \
   -var="deploy_workloads=$FOUNDATION_DEPLOY_WORKLOADS" \
-  -var="image_tag=$FOUNDATION_IMAGE_TAG"
+  -var="ui_image_tag=$FOUNDATION_UI_IMAGE_TAG" \
+  -var="indexer_image_tag=$FOUNDATION_INDEXER_IMAGE_TAG"
 
-ACR_NAME="$(terraform -chdir="$TERRAFORM_DIR" output -raw container_registry_name)"
-ACR_LOGIN_SERVER="$(terraform -chdir="$TERRAFORM_DIR" output -raw container_registry_login_server)"
+if [[ "$MODE" == "infra-only" ]]; then
+  UI_URL="$(terraform_output ui_url)"
+  log "Infrastructure reconciliation complete"
+  [[ -n "$UI_URL" ]] && echo "UI: $UI_URL"
+  echo "No images were built and the indexing job was not started."
+  exit 0
+fi
+
+ACR_NAME="$(terraform_output container_registry_name)"
+ACR_LOGIN_SERVER="$(terraform_output container_registry_login_server)"
+[[ -n "$ACR_NAME" && -n "$ACR_LOGIN_SERVER" ]] || fail "Terraform did not return the Container Registry outputs."
+
 UI_IMAGE="regdocs-ui:$CURRENT_IMAGE_TAG"
 INDEXER_IMAGE="regdocs-indexer:$CURRENT_IMAGE_TAG"
 
@@ -257,20 +365,52 @@ queue_build() {
   return 0
 }
 
-QUEUED=false
-queue_build "$UI_IMAGE" "ui/deploy/containers/ui.Dockerfile" && QUEUED=true
-queue_build "$INDEXER_IMAGE" "ui/deploy/containers/indexer.Dockerfile" && QUEUED=true
-
-if [[ "$QUEUED" == true ]] || ! image_exists "$UI_IMAGE" || ! image_exists "$INDEXER_IMAGE"; then
-  log "ACR is building the images independently of this Cloud Shell session"
+show_recent_builds() {
   az acr task list-runs \
     --registry "$ACR_NAME" \
     --top 5 \
     --query '[].{Image:outputImages[0],Status:status,Started:startTime}' \
     --output table \
     --only-show-errors || true
+}
+
+if [[ "$MODE" == "ui-only" ]]; then
+  QUEUED=false
+  queue_build "$UI_IMAGE" "ui/deploy/containers/ui.Dockerfile" && QUEUED=true
+
+  if [[ "$QUEUED" == true ]] || ! image_exists "$UI_IMAGE"; then
+    log "ACR is building the UI image independently of this Cloud Shell session"
+    show_recent_builds
+    echo
+    echo "Run this same --ui-only command again after the build finishes."
+    exit 0
+  fi
+
+  log "Deploying only the UI; preserving the indexer image and execution state"
+  terraform -chdir="$TERRAFORM_DIR" apply -auto-approve -input=false \
+    -lock-timeout=5m \
+    -var="deploy_workloads=true" \
+    -var="ui_image_tag=$CURRENT_IMAGE_TAG" \
+    -var="indexer_image_tag=$PREVIOUS_INDEXER_IMAGE_TAG"
+
+  UI_URL="$(terraform_output ui_url)"
+  log "UI-only deployment complete"
+  echo "UI: $UI_URL"
+  echo "UI image tag: $CURRENT_IMAGE_TAG"
+  echo "Indexer image tag preserved: $PREVIOUS_INDEXER_IMAGE_TAG"
+  echo "The indexing job was not built, changed, or started."
+  exit 0
+fi
+
+QUEUED=false
+queue_build "$UI_IMAGE" "ui/deploy/containers/ui.Dockerfile" && QUEUED=true
+queue_build "$INDEXER_IMAGE" "ui/deploy/containers/indexer.Dockerfile" && QUEUED=true
+
+if [[ "$QUEUED" == true ]] || ! image_exists "$UI_IMAGE" || ! image_exists "$INDEXER_IMAGE"; then
+  log "ACR is building the images independently of this Cloud Shell session"
+  show_recent_builds
   echo
-  echo "Exit Cloud Shell if needed. Run this same command again after the builds finish."
+  echo "Run this same full deployment command again after the builds finish."
   exit 0
 fi
 
@@ -278,10 +418,11 @@ log "Deploying the UI and indexing job from completed ACR images"
 terraform -chdir="$TERRAFORM_DIR" apply -auto-approve -input=false \
   -lock-timeout=5m \
   -var="deploy_workloads=true" \
-  -var="image_tag=$CURRENT_IMAGE_TAG"
+  -var="ui_image_tag=$CURRENT_IMAGE_TAG" \
+  -var="indexer_image_tag=$CURRENT_IMAGE_TAG"
 
-JOB_NAME="$(terraform -chdir="$TERRAFORM_DIR" output -raw index_job_name)"
-UI_URL="$(terraform -chdir="$TERRAFORM_DIR" output -raw ui_url)"
+JOB_NAME="$(terraform_output index_job_name)"
+UI_URL="$(terraform_output ui_url)"
 
 log "Deployment status"
 echo "UI: $UI_URL"
@@ -316,15 +457,11 @@ case "$LATEST_STATUS" in
     fi
     ;;
   *)
-    if [[ "${START_INDEX_JOB,,}" == "true" ]]; then
-      log "Starting the resumable Azure indexing job"
-      [[ -n "$LATEST_STATUS" ]] && echo "Previous execution: $LATEST_NAME ($LATEST_STATUS)"
-      az containerapp job start --name "$JOB_NAME" --resource-group "$RESOURCE_GROUP" \
-        --no-wait --output none --only-show-errors
-      echo "The job now runs in Azure and survives Cloud Shell disconnects. Rerun this script to check it."
-    else
-      echo "Index job was not started because START_INDEX_JOB=false or --no-start was supplied."
-    fi
+    log "Starting the resumable Azure indexing job"
+    [[ -n "$LATEST_STATUS" ]] && echo "Previous execution: $LATEST_NAME ($LATEST_STATUS)"
+    az containerapp job start --name "$JOB_NAME" --resource-group "$RESOURCE_GROUP" \
+      --no-wait --output none --only-show-errors
+    echo "The job now runs in Azure and survives Cloud Shell disconnects. Rerun this script to check it."
     ;;
 esac
 
