@@ -9,6 +9,12 @@ The production stack contains Azure AI Search, Microsoft Foundry, Azure Containe
 # Command syntax
 
 ```bash
+# Local preflight. No Azure calls and no SAS required.
+./ui/deploy/deploy.sh --validate
+
+# Terraform plan against the existing remote state. No apply/build/index run.
+./ui/deploy/deploy.sh --plan
+
 # UI/API release. Applies Terraform changes, builds/deploys only the UI,
 # preserves the indexer image, and never starts indexing.
 ./ui/deploy/deploy.sh --ui-only
@@ -33,8 +39,10 @@ The production stack contains Azure AI Search, Microsoft Foundry, Azure Containe
 
 `--no-start` has been removed. It was ambiguous because a changed indexer image could still trigger indexing. Use `--ui-only` or `--infra-only` instead.
 
-| Change | Command |
+| Goal/change | Command |
 |---|---|
+| Validate code/Terraform before Azure | `./ui/deploy/deploy.sh --validate` |
+| Preview Terraform changes | `./ui/deploy/deploy.sh --plan` |
 | Next.js UI/API | `./ui/deploy/deploy.sh --ui-only` |
 | UI + Terraform/RBAC/env | `./ui/deploy/deploy.sh --ui-only` |
 | Terraform/RBAC/env only | `./ui/deploy/deploy.sh --infra-only` |
@@ -46,6 +54,44 @@ The production stack contains Azure AI Search, Microsoft Foundry, Azure Containe
 | Trace server error | `./ui/deploy/deploy.sh --error ATLAS-...` |
 
 The UI and indexer have separate Terraform image tags. `--ui-only` changes only the UI tag and cannot accidentally turn a UI commit into an indexer update.
+
+---
+
+# Preflight before deployment
+
+Run this first after pulling a change:
+
+```bash
+./ui/deploy/deploy.sh --validate
+```
+
+It runs:
+
+```text
+bash -n ui/deploy/deploy.sh
+terraform fmt -check -recursive
+terraform init -backend=false
+terraform validate
+python -m compileall pipeline.py regdocs_atlas tools
+npm ci
+npm run typecheck
+npm run build
+```
+
+`--validate` does not read Terraform remote state and makes no Azure API calls. It does not need `config.env` or a SAS token.
+
+After local validation, preview infrastructure changes:
+
+```bash
+source ui/deploy/config.env
+read -rsp "Paste SAS: " AZURE_STORAGE_SAS_TOKEN
+printf '\n'
+export AZURE_STORAGE_SAS_TOKEN="${AZURE_STORAGE_SAS_TOKEN#\?}"
+
+./ui/deploy/deploy.sh --plan
+```
+
+`--plan` initializes against the existing remote Terraform state and runs `terraform plan` using the currently deployed UI/indexer image tags. It does not apply Terraform, build images, or start indexing.
 
 ---
 
@@ -130,7 +176,7 @@ The safe indexing value is:
 EMBEDDING_BATCH_SIZE="32"
 ```
 
-Terraform also defaults to 32, and the cloud indexer falls back to 32 if the environment variable is absent.
+Terraform also defaults to 32, and the cloud indexer falls back to 32 if the environment variable is absent. `deploy.sh` caps an older local value above 32 down to 32.
 
 Optional UI ingress restriction:
 
@@ -153,7 +199,7 @@ export AZURE_STORAGE_SAS_TOKEN="${AZURE_STORAGE_SAS_TOKEN#\?}"
 
 The SAS is used for the remote Terraform backend. Full deployments also use it to verify normalized index inputs. Keep it out of Git and `config.env`.
 
-`--status` and `--error` are read-only and do not require the SAS token.
+`--validate`, `--status`, and `--error` do not require the SAS token. `--plan` needs it only for the remote Terraform backend.
 
 ---
 
@@ -277,9 +323,20 @@ Open:
 https://<atlas-host>/diagnostics
 ```
 
-The page can perform operator-initiated live checks against Search keyword retrieval, hybrid/vector retrieval, optional semantic ranking, the HTML document reader, Microsoft Foundry grounded inference, and the Stage 6 entities/relations/events indexes.
+The initial configuration view is inexpensive. **Live checks require the diagnostics operator token** because they make real billable/service calls and can reveal operational error details.
+
+Retrieve the token from Terraform state:
+
+```bash
+terraform -chdir=ui/deploy/terraform output -raw diagnostics_operator_token
+printf '\n'
+```
+
+Enter that token on `/diagnostics`, then choose **Run live checks**. The live checks exercise Search keyword retrieval, hybrid/vector retrieval, optional semantic ranking, the HTML document reader, Microsoft Foundry grounded inference, live corpus metadata, and the Stage 6 entities/relations/events indexes.
 
 This is the quickest way to prove the deployed app is actually reaching Foundry rather than merely having Foundry environment variables configured.
+
+Successful Ask answers also expose a small expandable run footer showing the Foundry deployment, retrieval mode/fallback, semantic use, evidence/citation counts, retry count, timings, and live corpus coverage.
 
 ---
 
@@ -346,25 +403,21 @@ The Azure-provided Container Apps hostname cannot be shortened to an App Service
 
 ---
 
-# Manual verification
+# Manual verification without GitHub Actions
 
-There are no GitHub Actions in this repository. Before merging/deploying infrastructure or UI changes, run locally or in Cloud Shell:
+There are no GitHub Actions in this repository. The normal pre-merge/pre-deploy check is now one command:
 
 ```bash
-cd ui
-npm ci
-npm run typecheck
-npm run build
-
-cd deploy/terraform
-terraform fmt -check
-terraform init -backend=false -input=false
-terraform validate
-
-cd ../../..
-bash -n ui/deploy/deploy.sh
-./ui/deploy/deploy.sh --help
+./ui/deploy/deploy.sh --validate
 ```
+
+For infrastructure changes, follow it with:
+
+```bash
+./ui/deploy/deploy.sh --plan
+```
+
+Review the plan before running any deployment mode.
 
 ---
 
