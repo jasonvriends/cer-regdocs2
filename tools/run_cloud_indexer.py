@@ -88,7 +88,7 @@ def publisher_command() -> list[str]:
         "--cache-db",
         str(CACHE_PATH),
         "--embedding-batch-size",
-        setting("REGDOCS_EMBEDDING_BATCH_SIZE", "128"),
+        setting("REGDOCS_EMBEDDING_BATCH_SIZE", "32"),
         "--upload-batch-size",
         setting("REGDOCS_SEARCH_UPLOAD_BATCH_SIZE", "1000"),
     ]
